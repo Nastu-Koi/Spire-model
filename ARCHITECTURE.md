@@ -63,7 +63,7 @@ flowchart TD
 | PolicyValue | 候选分布和当前策略未来累计奖励估计 | 不生成自由格式引擎命令 |
 | Dataset/Learner | BC 样本、当前策略 rollout、训练与评测 | 不把示范伪装成 on-policy 数据 |
 
-观测 $x_t=(o_t,m_t)$：$o_t$ 是当前公开信息，$m_t$ 只由此前公开观测、公开事件和自己的动作更新。外部摘要不保证完全消除部分可观测性；后续只有发现明确历史缺失时，才增加学习式记忆。
+观测 $`x_t=(o_t,m_t)`$：$`o_t`$ 是当前公开信息，$`m_t`$ 只由此前公开观测、公开事件和自己的动作更新。外部摘要不保证完全消除部分可观测性；后续只有发现明确历史缺失时，才增加学习式记忆。
 
 **允许输入：**当前可见卡牌及数值、公开状态、资源、公开遗物计数、当前敌人意图、已揭示地图、已观察敌人行动、已知抽牌堆组成，以及公开效果明确揭示且尚未失效的牌序。
 
@@ -102,14 +102,14 @@ RunRecorder 原始记录含 seed，且明确标注 `draw_pile_order=engine_inter
 
 实体表示：
 
-$$
+```math
 \begin{aligned}
-e_i ={}& E_{\mathrm{type}} + E_{\mathrm{content}} + E_{\mathrm{zone}} \\
-       &+ \operatorname{MLP}_{\mathrm{num}}(n_i,k_i) \\
-       &+ \operatorname{EffectEncoder}(F_i)
-        + \operatorname{ContextEncoder}(c_i).
+e_i &= E_{\mathrm{type}} + E_{\mathrm{content}} + E_{\mathrm{zone}} \\
+    &\quad + \mathrm{MLP}_{\mathrm{num}}(n_i,k_i) \\
+    &\quad + \mathrm{EffectEncoder}(F_i)
+           + \mathrm{ContextEncoder}(c_i).
 \end{aligned}
-$$
+```
 
 数值按字段语义归一化，同时保留适当的线性幅值与压缩幅值，例如生命比例和绝对生命、费用数值与 X 费标志。未知、零、不可用必须分开。计数与数量要显式保留，避免集合平均把一张牌和多张牌编码成一样。
 
@@ -129,13 +129,13 @@ $$
 
 任意两地图节点采用六类互斥关系：自身、正向直接、正向间接、反向直接、反向间接、互不可达。再编码带符号的层差：
 
-$$
+```math
 \begin{aligned}
-\operatorname{score}_{ij}^{(h)} ={}& \frac{q_i^\top k_j}{\sqrt{d_h}} \\
- &+ b^{(h)}_{\operatorname{relation}(i,j)} \\
- &+ c^{(h)}_{\operatorname{bucket}(\mathrm{floor}_j-\mathrm{floor}_i)}.
+\mathrm{score}_{ij}^{(h)} &= \frac{q_i^\top k_j}{\sqrt{d_h}} \\
+ &\quad + b^{(h)}_{\mathrm{relation}(i,j)} \\
+ &\quad + c^{(h)}_{\mathrm{bucket}(\mathrm{floor}_j-\mathrm{floor}_i)}.
 \end{aligned}
-$$
+```
 
 这是针对本任务的设计，借鉴 [Graphormer 的结构注意力偏置](https://arxiv.org/abs/2106.05234)，不代表论文验证了 STS2 的这个关系划分。主干中的地图节点对直接使用此偏置，首版不再堆叠独立大型地图网络。
 
@@ -170,22 +170,22 @@ $$
 
 设共享局部编码器为 E，所有 token 一起计算：
 
-$$
+```math
 \begin{aligned}
 X &= [e_{\mathrm{value}},E(s_1),\ldots,E(s_N), \\
   &\qquad E(a_1),\ldots,E(a_M)], \\
 H &= T_\theta(X;B).
 \end{aligned}
-$$
+```
 
-$$
+```math
 \begin{aligned}
 \ell_a &= f_{\mathrm{score}}(h_a), \\
 V &= g(h_{\mathrm{value}}), \\
 \pi_\theta(a\mid x)
   &= \frac{\exp(\ell_a)}{\sum_{b\in A_{\mathrm{legal}}(x)}\exp(\ell_b)}.
 \end{aligned}
-$$
+```
 
 共享 E 表示共享语义字段与效果处理参数，不要求卡牌和动作具有完全相同的字段：type、verb、operation 和 known/applicable mask 区分它们。动作使用公开来源／目标引用，必要时以不同角色槽融合来源／目标的初始局部表示；不复制整份状态。没有来源或目标时使用明确的空引用类型。
 
@@ -221,9 +221,9 @@ DecisionFrame
 
 **同一次提交前没有新公开信息的多选**，作为一个宏动作：
 
-$$
+```math
 \log\pi(S\mid x)=\sum_k\log\pi(a_k\mid x,a_{<k}).
-$$
+```
 
 包括非强制 STOP；强制停止没有额外随机选择。无序子集采用按稳定公开候选语义／界面顺序的规范生成方式，让每个子集对应唯一解码序列；该顺序与张量打包顺序分开保存，不能因打乱 batch 中 token 就改变多选约束。公开语义完全相同的副本按数量或等价类处理，不使用隐藏实例 ID 作为排序特征。每个前缀必须能补全为合法结果。顺序具有游戏意义时保留顺序。不能丢掉可实现的合法子集。
 
@@ -262,12 +262,12 @@ CombatSolver 等教师来源应单独保留以供审计；actor 标签本身不�
 
 最终验收指标固定为五角色等权 A10 通关概率：
 
-$$
+```math
 J(\theta)=\frac{1}{5}\sum_{c=1}^{5}
 \Pr_{\pi_\theta}(\mathrm{win}\mid c,\mathrm{A10}).
-$$
+```
 
-其中 $c$ 表示角色，$\mathrm{win}$ 表示击败第三幕 Boss 并确认整局通关。
+其中 $`c`$ 表示角色，$`\mathrm{win}`$ 表示击败第三幕 Boss 并确认整局通关。
 
 训练采用局内里程碑奖励。下表数值是首轮待验证的工程起点，可根据开发评测调整，但一次采样和更新期间必须固定：
 
@@ -295,13 +295,13 @@ $$
 
 完整对局的回报与优势改为：
 
-$$
+```math
 \begin{aligned}
 \gamma &= 1, \\
 G_t &= \sum_{k=t}^{T-1}r_k, \\
-\hat A_t &= G_t-V_{\mathrm{old}}(x_t).
+\hat{A}_t &= G_t-V_{\mathrm{old}}(x_t).
 \end{aligned}
-$$
+```
 
 这里以正常结束的完整对局为前提，默认完整回报对应 lambda=1。不同时间点的 G 不再都相同：已经在过去获得的奖励不能重复加入未来回报。主干仍然是单步状态网络；所有阶段奖励和最终结果通过同一条整局时间线传递。战斗结束只是奖励结算边界，不是 value 的终止边界。
 
@@ -315,28 +315,28 @@ $$
 
 PPO 使用新旧策略的概率比与 clipped surrogate；算法依据见 [PPO 论文](https://arxiv.org/abs/1707.06347)。概率比为：
 
-$$
+```math
 \rho_t=\exp\!\left(
   \log\pi_\theta(a_t\mid x_t)
   -\log\pi_{\mathrm{old}}(a_t\mid x_t)
 \right).
-$$
+```
 
 主价值头使用线性输出，以 MSE 拟合未来累计奖励；不使用二元 BCE 或 sigmoid 概率约束。诊断包括 RMSE、explained variance、相对常数基线误差及预测／目标标准差。真实通关率由对局结果统计；若以后增加单独的通关概率辅助头，必须与 PPO 的 V_return 分开命名和监督。
 
 Actor 聚合以“等权角色、每局内部累加决策贡献”为原则，例如：
 
-$$
+```math
 \begin{aligned}
-\tilde\rho_t &= \operatorname{clip}(\rho_t,1-\epsilon,1+\epsilon), \\
-u_t &= \min(\rho_t\hat A_t,\tilde\rho_t\hat A_t), \\
+\tilde{\rho}_t &= \mathrm{clip}(\rho_t,1-\epsilon,1+\epsilon), \\
+u_t &= \min(\rho_t\hat{A}_t,\tilde{\rho}_t\hat{A}_t), \\
 L_{\mathrm{actor}} &= -\frac{1}{5H_{\mathrm{ref}}}
   \sum_{c=1}^{5}\frac{1}{N_c}\sum_{i=1}^{N_c}
   \sum_{t\in\tau_{c,i}}u_t.
 \end{aligned}
-$$
+```
 
-其中 $u_t$ 是单步裁剪目标，$N_c$ 是角色 $c$ 的对局数，$\tau_{c,i}$ 是该角色第 $i$ 条轨迹。$H_{\mathrm{ref}}$ 是固定的梯度尺度常量，与单局长度和胜负无关；不能逐局除以自己的动作数而无意改变目标。分桶和微批次只改变计算顺序，保留上述权重。成功重采样、分阶段配额若用于 RL，需要显式分布校正，不能照搬 BC 的平衡采样。
+其中 $`u_t`$ 是单步裁剪目标，$`N_c`$ 是角色 $`c`$ 的对局数，$`\tau_{c,i}`$ 是该角色第 $`i`$ 条轨迹。$`H_{\mathrm{ref}}`$ 是固定的梯度尺度常量，与单局长度和胜负无关；不能逐局除以自己的动作数而无意改变目标。分桶和微批次只改变计算顺序，保留上述权重。成功重采样、分阶段配额若用于 RL，需要显式分布校正，不能照搬 BC 的平衡采样。
 
 约 0.5B 的首轮试点可取 clip=0.2、主干 LR=1e-5、动作／价值头 LR=3e-5、梯度范数上限 1、1–2 遍 PPO、target KL=0.01–0.02，均为待验证起点。先校准策略／价值梯度尺度，再确定损失系数；记录分角色和阶段的 KL，不能只看全局平均。优势采用 G-V，不逐局或逐阶段减均值；若做标准化，以整轮冻结统计统一处理，不能在分桶微批次中分别归一化。
 
