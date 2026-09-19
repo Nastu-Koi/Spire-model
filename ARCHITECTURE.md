@@ -224,7 +224,8 @@ DecisionFrame
 ```math
 $$
 \log \pi(S \mid x)
-= \sum_k \log \pi(a_k \mid x, a_{<k}).
+=
+\sum_k \log \pi(a_k \mid x, a_{\lt k})
 $$
 ```
 
