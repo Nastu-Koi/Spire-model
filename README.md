@@ -23,7 +23,7 @@ bash sts2-cli/setup.sh "$GAME_DIR"
 
 脚本会从安装目录复制游戏程序集到 `sts2-cli/lib`，处理 headless 所需的补丁并构建引擎。不会修改 Steam 安装目录里的游戏 DLL。也接受 Proton/Windows 游戏目录，例如 WSL 下的 `/mnt/d/SteamLibrary/steamapps/common/Slay the Spire 2`。
 
-## 2. 用 steam_recorder 收集 Steam 数据
+## 2. 用 steam_recorder 收集 Steam 游戏数据
 
 采集器源码就在仓库的 `steam_recorder/`。退出游戏后构建并安装：
 
@@ -83,12 +83,18 @@ python -m model --device cuda bootstrap \
 
 ## 4. PPO强化训练
 
+Bootstrap 只学习如何选动作，没有训练价值头。第一次开始 PPO 时，建议加上 `--value-warmup`：先用当前策略采样完整对局，只更新价值头，让它学习预测后续回报；下一轮重新采样，再正常更新策略和价值头。
+
+先跑一段短训练，可以用下面的命令（1 轮 warmup + 10 轮 PPO）：
+
 ```bash
 python -m model --device cuda train \
   --checkpoint runs/bootstrap/current \
-  --runs-per-character 4 --rounds 160 \
+  --value-warmup --runs-per-character 4 --rounds 11 \
   --output runs/ppo
 ```
+
+`--rounds` 包含 warmup 这一轮。如果要做 1 轮 warmup 加 160 轮 PPO，就改为 `--rounds 161`。warmup 也会保存训练信息并更新 `current`，历史中的 `stage` 为 `value`，不计入累计 PPO 轮数。
 
 每轮用当前策略打完五个角色各 4 局，再做 PPO 更新。游戏 seed 每轮随机生成并保存。正常战败也用于训练；引擎异常或未结束的对局不会当作完整回报训练。
 
@@ -112,7 +118,7 @@ python -m model --device cuda train \
   --rounds 120 --output runs/ppo
 ```
 
-模型、优化器、随机状态和累计轮次都会恢复。未完成的一轮重新采样，之前留下的轨迹不会被覆盖。如果需要先训练价值头，可以在第一次启动时加 `--value-warmup`；本次第一轮只更新价值头，后续轮次正常做 PPO。
+模型、优化器、随机状态和累计轮次都会恢复。未完成的一轮重新采样，之前留下的轨迹不会被覆盖。warmup 完成后，续训不再加 `--value-warmup`；这个参数会让本次启动的第一轮再次只训练价值头。
 
 ### 训练监测网页
 
