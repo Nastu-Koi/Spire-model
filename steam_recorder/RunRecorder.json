@@ -1,0 +1,12 @@
+{
+  "id": "RunRecorder",
+  "name": "整局状态与动作记录器 / Run Recorder",
+  "author": "local",
+  "description": "记录实玩状态与动作，支持 Bootstrap 数据采集和模型直接控制游戏。",
+  "version": "0.5.0",
+  "min_game_version": "0.111.0",
+  "has_pck": false,
+  "has_dll": true,
+  "dependencies": [],
+  "affects_gameplay": true
+}

@@ -147,7 +147,7 @@ internal class LocLookup
 /// through map navigation, combat, events, rest sites, shops, and act transitions.
 /// Drives the engine forward until it hits a "decision point" requiring external input.
 /// </summary>
-public class RunSimulator
+public partial class RunSimulator
 {
     private static int? _expectedSaveSchemaVersion;
     private static bool _expectedSaveSchemaVersionReady;
@@ -181,13 +181,18 @@ public class RunSimulator
 
     private bool HasPendingInteraction() => _cardSelector.HasPending
         || _cardSelector.HasPendingReward
+        || HasProtocolRewardMenu
+        || HasProtocolCrystal
         || (_pendingBundleTcs != null && !_pendingBundleTcs.Task.IsCompleted);
 
     private void WaitForPendingOperation() => _pendingOperation.WaitForBoundary(
         _syncCtx.Pump, HasPendingInteraction, TimeSpan.FromSeconds(3));
 
-    public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null, string lang = "en")
+    public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null, string lang = "en",
+        bool decisionProtocol = false)
     {
+        ResetDecisionProtocol(ascension);
+        _protocolTrainingRun = decisionProtocol && ascension == 10;
         try
         {
             _loc.Lang = lang;
@@ -240,7 +245,7 @@ public class RunSimulator
             LocPatches._bundleSimRef = this;
 
             // Now we should be at the map — detect decision point
-            return DetectDecisionPoint();
+            return decisionProtocol ? AdvanceToBoundary() : DetectDecisionPoint();
         }
         catch (Exception ex)
         {
@@ -354,7 +359,7 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetPlayer failed", ex); }
     }
 
-    public Dictionary<string, object?> EnterRoom(string roomType, string? encounter, string? eventId)
+    public Dictionary<string, object?> EnterRoom(string roomType, string? encounter, string? eventId, bool decisionProtocol = false)
     {
         try
         {
@@ -402,7 +407,7 @@ public class RunSimulator
             RunManager.Instance.EnterRoom(room).GetAwaiter().GetResult();
             _syncCtx.Pump();
             WaitForActionExecutor();
-            return DetectDecisionPoint();
+            return decisionProtocol ? AdvanceToBoundary() : DetectDecisionPoint();
         }
         catch (Exception ex) { return ErrorWithTrace("EnterRoom failed", ex); }
     }
@@ -450,6 +455,8 @@ public class RunSimulator
     // ─── Game actions ───
     public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en")
     {
+        // A loaded save needs a separate contract audit before training use.
+        ResetDecisionProtocol(null);
         try
         {
             _loc.Lang = lang;
@@ -1358,6 +1365,8 @@ public class RunSimulator
             return Error("select_bundle requires 'bundle_index'");
 
         var idx = Convert.ToInt32(args["bundle_index"]);
+        if (idx < 0 || idx >= _pendingBundles.Count)
+            return Error($"Invalid bundle index {idx}");
         Log($"Bundle selection: pack {idx}");
         var bundles = _pendingBundles;
         var tcs = _pendingBundleTcs;
@@ -1365,7 +1374,7 @@ public class RunSimulator
         _pendingBundleTcs = null;
 
         // Set result directly (no ContinueWith/ThreadPool)
-        var selected = (idx >= 0 && idx < bundles.Count) ? bundles[idx] : bundles[0];
+        var selected = bundles[idx];
         tcs.TrySetResult(selected);
 
         _syncCtx.Pump();
@@ -1381,10 +1390,11 @@ public class RunSimulator
             return Error("select_cards requires 'indices' (comma-separated card indices)");
 
         var indicesStr = args["indices"]?.ToString() ?? "";
-        var indices = indicesStr.Split(',')
-            .Select(s => int.TryParse(s.Trim(), out var v) ? v : -1)
-            .Where(i => i >= 0)
-            .ToArray();
+        var parts = string.IsNullOrWhiteSpace(indicesStr) ? Array.Empty<string>() : indicesStr.Split(',');
+        var indices = new int[parts.Length];
+        for (var i = 0; i < parts.Length; i++)
+            if (!int.TryParse(parts[i].Trim(), out indices[i]))
+                return Error("Selection indices must be comma-separated integers");
 
         Log($"Card selection: indices [{string.Join(",", indices)}]");
         _cardSelector.ResolvePendingByIndices(indices);
@@ -3016,6 +3026,8 @@ public class RunSimulator
         // Patch TalkCmd.Play to a no-op (issue #64). Monster speech-bubble VFX during
         // moves (e.g. BygoneEffigy.WakeMove) NRE in headless and break the enemy turn.
         PatchTalkCmd();
+        SelectionMetadata.Install();
+        HeadlessEventPresentation.Install();
 
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
@@ -3227,6 +3239,8 @@ public class RunSimulator
         public int PendingMinSelect { get; private set; }
         public int PendingMaxSelect { get; private set; }
         public string PendingPrompt { get; private set; } = "";
+        public SelectionSession? Session { get; private set; }
+        public SelectionMetadata Metadata { get; private set; } = new();
         private volatile TaskCompletionSource<IEnumerable<CardModel>>? _pendingTcs;
 
         public bool HasPending => _pendingTcs != null && !_pendingTcs.Task.IsCompleted;
@@ -3235,17 +3249,15 @@ public class RunSimulator
             IEnumerable<CardModel> options, int minSelect, int maxSelect)
         {
             var optList = options.ToList();
-            if (optList.Count == 0)
-                return Task.FromResult<IEnumerable<CardModel>>(Array.Empty<CardModel>());
-
-            // If only one option and minSelect requires it, auto-select
-            if (optList.Count == 1 && minSelect >= 1)
-                return Task.FromResult<IEnumerable<CardModel>>(optList);
+            Metadata = SelectionMetadata.Current.Value ?? new();
+            minSelect = Metadata.Minimum ?? minSelect;
+            var session = new SelectionSession(optList.Count, minSelect, maxSelect);
 
             // Store pending selection and wait
             PendingOptions = optList;
             PendingMinSelect = minSelect;
             PendingMaxSelect = maxSelect;
+            Session = session;
             var request = new TaskCompletionSource<IEnumerable<CardModel>>(TaskCreationOptions.RunContinuationsAsynchronously);
             _pendingTcs = request;
 
@@ -3261,33 +3273,51 @@ public class RunSimulator
             var request = _pendingTcs;
             // Clear the old prompt before resuming code that can publish a new one.
             PendingOptions = null;
+            Session = null;
             _pendingTcs = null;
             request?.TrySetResult(selected);
         }
 
         public void ResolvePendingByIndices(int[] indices)
         {
-            if (PendingOptions == null) return;
-            var selected = indices
-                .Where(i => i >= 0 && i < PendingOptions.Count)
-                .Select(i => PendingOptions[i])
-                .ToList();
+            if (!HasPending || PendingOptions == null || Session == null)
+                throw new InvalidOperationException("No pending card selection.");
+            var selected = Session.CommitLegacy(indices).Select(i => PendingOptions[i]).ToList();
+            ResolvePending(selected);
+        }
+
+        public void FinishSession()
+        {
+            if (!HasPending || PendingOptions == null || Session == null)
+                throw new InvalidOperationException("No pending card selection.");
+            var selected = Session.Commit().Select(i => PendingOptions[i]).ToList();
             ResolvePending(selected);
         }
 
         public void CancelPending()
         {
+            ResolvePendingByIndices(Array.Empty<int>());
+        }
+
+        public void CancelSession()
+        {
+            if (!HasPending || !Metadata.Cancelable) throw new InvalidOperationException("Selection cannot be canceled.");
             ResolvePending(Array.Empty<CardModel>());
         }
 
         // Pending card reward from events (GetSelectedCardReward blocks until resolved)
-        private sealed class RewardRequest(List<MegaCrit.Sts2.Core.Entities.Cards.CardCreationResult> cards)
+        private sealed class RewardRequest(List<MegaCrit.Sts2.Core.Entities.Cards.CardCreationResult> cards,
+            IReadOnlyList<CardRewardAlternative> alternatives)
         {
             public readonly List<MegaCrit.Sts2.Core.Entities.Cards.CardCreationResult> Cards = cards;
-            public readonly TaskCompletionSource<int> Choice = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public readonly IReadOnlyList<CardRewardAlternative> Alternatives = alternatives;
+            public readonly TaskCompletionSource<CardRewardSelection> Choice = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
         private RewardRequest? _pendingReward;
         public List<MegaCrit.Sts2.Core.Entities.Cards.CardCreationResult>? PendingRewardCards => Volatile.Read(ref _pendingReward)?.Cards;
+        public IReadOnlyList<CardRewardAlternative>? PendingRewardAlternatives => Volatile.Read(ref _pendingReward)?.Alternatives;
+        public CardModel? PreselectedRewardCard;
+        public string? PreselectedRewardAlternative;
 
         // NOTE: STS2 build 23372702 changed ICardSelector.GetSelectedCardReward to return
         // a CardRewardSelection struct { CardModel card; CardRewardAlternative alternative }.
@@ -3297,20 +3327,25 @@ public class RunSimulator
             IReadOnlyList<MegaCrit.Sts2.Core.Entities.Cards.CardCreationResult> options,
             IReadOnlyList<CardRewardAlternative> alternatives)
         {
-            if (options.Count == 0) return default;  // Skip
+            if (Interlocked.Exchange(ref PreselectedRewardCard, null) is { } selected)
+            {
+                if (!options.Any(o => ReferenceEquals(o.Card, selected)))
+                    throw new InvalidOperationException("Preselected reward card is absent.");
+                return new CardRewardSelection { card = selected };
+            }
+            if (Interlocked.Exchange(ref PreselectedRewardAlternative, null) is { } alternate)
+                return new CardRewardSelection { alternative = alternatives.Single(a => a.OptionId == alternate) };
+            if (options.Count == 0 && alternatives.Count == 0) return default;
 
             // Store pending and block until main loop resolves
-            var request = new RewardRequest(options.ToList());
+            var request = new RewardRequest(options.ToList(), alternatives);
             Volatile.Write(ref _pendingReward, request);
 
             Console.Error.WriteLine($"[SIM] Card reward pending: {options.Count} cards (blocking)");
             PendingChanged?.Invoke();
             try
             {
-                var choice = request.Choice.Task.WaitAsync(TimeSpan.FromSeconds(300)).GetAwaiter().GetResult();
-                if (choice >= 0 && choice < options.Count)
-                    return new MegaCrit.Sts2.Core.TestSupport.CardRewardSelection { card = options[choice].Card };
-                return default;  // Skip (card=null, alternative=null)
+                return request.Choice.Task.WaitAsync(TimeSpan.FromSeconds(300)).GetAwaiter().GetResult();
             }
             finally
             {
@@ -3322,13 +3357,28 @@ public class RunSimulator
 
         public void ResolveReward(int index)
         {
+            var pending = Volatile.Read(ref _pendingReward) ?? throw new InvalidOperationException("No reward pending.");
+            if (index < 0 || index >= pending.Cards.Count) throw new ArgumentOutOfRangeException(nameof(index));
             var request = Interlocked.Exchange(ref _pendingReward, null);
-            request?.Choice.TrySetResult(index);
+            request!.Choice.TrySetResult(new CardRewardSelection { card = request.Cards[index].Card });
+            PendingChanged?.Invoke();
+        }
+
+        public void ResolveRewardAlternative(int index)
+        {
+            var pending = Volatile.Read(ref _pendingReward) ?? throw new InvalidOperationException("No reward pending.");
+            if (index < 0 || index >= pending.Alternatives.Count) throw new ArgumentOutOfRangeException(nameof(index));
+            var request = Interlocked.Exchange(ref _pendingReward, null);
+            request!.Choice.TrySetResult(new CardRewardSelection { alternative = request.Alternatives[index] });
+            PendingChanged?.Invoke();
         }
 
         public void SkipReward()
         {
-            ResolveReward(-1);
+            var alternatives = PendingRewardAlternatives ?? throw new InvalidOperationException("No reward pending.");
+            var index = alternatives.ToList().FindIndex(a => a.OptionId.Equals("Skip", StringComparison.OrdinalIgnoreCase));
+            if (index < 0) throw new InvalidOperationException("This reward cannot be skipped.");
+            ResolveRewardAlternative(index);
         }
     }
 

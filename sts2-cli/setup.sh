@@ -39,7 +39,7 @@ if [ -z "$GAME_DIR" ]; then
             fi
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            GAME_DIR="C:/Program Files (x86)/Steam/steamapps/common/Slay the Spire 2"
+            GAME_DIR="D:/SteamLibrary/steamapps/common/Slay the Spire 2"
             ;;
     esac
 fi

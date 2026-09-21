@@ -128,6 +128,13 @@ class Game:
             state = self.auto_combat(state)
         raise RuntimeError("Combat did not end")
 
+    def auto_card_selection(self, state):
+        """Legacy test policy: satisfy the engine's full minimum, or skip."""
+        minimum = state["min_select"]
+        if minimum == 0:
+            return self.act("skip_select")
+        return self.act("select_cards", indices=",".join(str(i) for i in range(minimum)))
+
     def skip_neow(self, state):
         """Skip the Neow event and all follow-up rewards until map_select."""
         for _ in range(20):
@@ -142,10 +149,7 @@ class Game:
             elif dec == "bundle_select":
                 state = self.act("select_bundle", bundle_index=0)
             elif dec == "card_select":
-                if state.get("min_select", 0) == 0:
-                    state = self.act("skip_select")
-                else:
-                    state = self.act("select_cards", indices="0")
+                state = self.auto_card_selection(state)
             else:
                 state = self.act("proceed")
         return state

@@ -1,5 +1,9 @@
 # sts2-cli
 
+Spire-model development: [versioned engine decision protocol](docs/decision-protocol.md).
+Start an A10 run with `decision_protocol: true` for full-run candidate-based play and training.
+The protocol covers combat, map, events, shops, rewards, selections and Crystal Sphere; debug mutations invalidate training eligibility.
+
 <details open>
 <summary><b>English</b></summary>
 

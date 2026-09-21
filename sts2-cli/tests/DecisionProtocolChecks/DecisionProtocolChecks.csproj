@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Sts2Headless/SelectionSession.cs" Link="SelectionSession.cs" />
+    <Compile Include="../../src/Sts2Headless/DecisionGate.cs" Link="DecisionGate.cs" />
+  </ItemGroup>
+</Project>
