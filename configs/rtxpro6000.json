@@ -1,0 +1,51 @@
+{
+  "model": {
+    "hidden_size": 1792,
+    "num_heads": 28,
+    "layers": 25,
+    "ffn_size": 7168,
+    "local_size": 256,
+    "local_heads": 8,
+    "local_layers": 2,
+    "vocabulary_size": 16384,
+    "field_buckets": 512,
+    "relation_buckets": 128,
+    "backend": "auto",
+    "checkpoint_layers": false,
+    "compile_blocks": false
+  },
+  "training": {
+    "backbone_lr": 1e-05,
+    "head_lr": 3e-05,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "logical_batch_size": 32,
+    "microbatch_size": 4,
+    "clip_ratio": 0.2,
+    "target_kl": 0.015,
+    "ppo_epochs": 2,
+    "value_coef": 0.5,
+    "entropy_coef": 0.001,
+    "bootstrap_coef": 0.0,
+    "horizon_scale": 100.0,
+    "precision": "bf16",
+    "token_buckets": [
+      256,
+      512,
+      1024,
+      2048,
+      4096
+    ],
+    "action_buckets": [
+      16,
+      32,
+      64,
+      128,
+      256,
+      512,
+      1024
+    ],
+    "token_budget": 8192,
+    "pair_budget": 16777216
+  }
+}

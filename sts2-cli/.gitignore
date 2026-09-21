@@ -1,5 +1,5 @@
 decompiled/
-lib/
+/lib
 bin/
 obj/
 *.user

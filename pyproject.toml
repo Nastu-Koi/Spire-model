@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spire-model"
+version = "0.1.0"
+description = "Public-state hybrid Transformer/GRU policy and complete-run Bootstrap/PPO training"
+requires-python = ">=3.11"
+dependencies = ["torch>=2.6", "accelerate>=1.0", "numpy>=1.26"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+spire-model = "model.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["model*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "steam_recorder/tests"]
+markers = ["engine: requires local headless engine and game assemblies", "cuda: requires a CUDA GPU"]
+
+[tool.setuptools.package-data]
+model = ["web/*.html"]

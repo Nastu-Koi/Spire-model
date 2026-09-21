@@ -38,7 +38,7 @@ class TestFullRun:
                 assert "victory" in state
                 return
             if state.get("type") == "error":
-                state = game.act("proceed")
+                pytest.fail(f"Engine error: {state}")
             elif dec == "combat_play":
                 state = game.auto_combat(state)
             elif dec == "map_select":
@@ -53,10 +53,7 @@ class TestFullRun:
             elif dec == "bundle_select":
                 state = game.act("select_bundle", bundle_index=0)
             elif dec == "card_select":
-                if state.get("min_select", 0) == 0:
-                    state = game.act("skip_select")
-                else:
-                    state = game.act("select_cards", indices="0")
+                state = game.auto_card_selection(state)
             elif dec == "rest_site":
                 opts = [o for o in state["options"] if o.get("is_enabled")]
                 state = game.act("choose_option", option_index=opts[0]["index"])

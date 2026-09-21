@@ -111,14 +111,36 @@ class Program
     static Dictionary<string, object?>? HandleCommand(RunSimulator sim, JsonElement cmd)
     {
         var cmdType = cmd.GetProperty("cmd").GetString() ?? "";
+        if (cmdType is "start_run" or "load_save" or "action" or "set_player" or "enter_room"
+            or "set_draw_order" or "quit")
+            sim.InvalidateDecisionProtocol();
         switch (cmdType)
         {
+            case "advance_to_boundary":
+                return sim.AdvanceToBoundary();
+
+            case "execute_candidate":
+                if (!cmd.TryGetProperty("decision_id", out var decisionId) || decisionId.ValueKind != JsonValueKind.String
+                    || !cmd.TryGetProperty("state_version", out var stateVersion) || stateVersion.ValueKind != JsonValueKind.Number
+                    || !stateVersion.TryGetInt64(out var version)
+                    || !cmd.TryGetProperty("candidate_ref", out var candidateRef) || candidateRef.ValueKind != JsonValueKind.String)
+                    return new() { ["type"] = "error", ["code"] = "invalid_candidate_request" };
+                long? revision = null;
+                if (cmd.TryGetProperty("selection_revision", out var rev) && rev.ValueKind != JsonValueKind.Null)
+                {
+                    if (rev.ValueKind != JsonValueKind.Number || !rev.TryGetInt64(out var value))
+                        return new() { ["type"] = "error", ["code"] = "invalid_candidate_request" };
+                    revision = value;
+                }
+                return sim.ExecuteCandidate(decisionId.GetString()!, version, candidateRef.GetString()!, revision);
+
             case "start_run":
                 return sim.StartRun(
                     cmd.TryGetProperty("character", out var ch) ? ch.GetString() ?? "Ironclad" : "Ironclad",
                     cmd.TryGetProperty("ascension", out var asc) ? asc.GetInt32() : 0,
                     cmd.TryGetProperty("seed", out var s) ? s.GetString() : null,
-                    cmd.TryGetProperty("lang", out var lang) ? lang.GetString() ?? "en" : "en"
+                    cmd.TryGetProperty("lang", out var lang) ? lang.GetString() ?? "en" : "en",
+                    cmd.TryGetProperty("decision_protocol", out var protocol) && protocol.ValueKind == JsonValueKind.True
                 );
 
             case "action":
@@ -160,6 +182,8 @@ class Program
             }
             case "get_map":
                 return sim.GetFullMap();
+            case "public_catalog":
+                return sim.PublicCatalog();
 
             case "set_player":
             {
@@ -174,7 +198,8 @@ class Program
                 var roomType = cmd.TryGetProperty("type", out var rt) ? rt.GetString() ?? "" : "";
                 var encounter = cmd.TryGetProperty("encounter", out var enc) ? enc.GetString() : null;
                 var eventId = cmd.TryGetProperty("event", out var ev) ? ev.GetString() : null;
-                return sim.EnterRoom(roomType, encounter, eventId);
+                return sim.EnterRoom(roomType, encounter, eventId,
+                    cmd.TryGetProperty("decision_protocol", out var dp) && dp.ValueKind == JsonValueKind.True);
             }
 
             case "set_draw_order":

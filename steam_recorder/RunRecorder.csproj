@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>RunRecorder</AssemblyName>
+    <Version>0.5.0</Version>
+    <Nullable>annotations</Nullable>
+    <DebugType>embedded</DebugType>
+    <EmbedAllSources>true</EmbedAllSources>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="RunRecorder/**/*.cs" />
+    <Reference Include="sts2"><HintPath>$(GameDataDir)/sts2.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GodotSharp"><HintPath>$(GameDataDir)/GodotSharp.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(GameDataDir)/0Harmony.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

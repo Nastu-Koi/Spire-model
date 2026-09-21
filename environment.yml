@@ -1,0 +1,9 @@
+name: sts2
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirment.txt
+      - -e .

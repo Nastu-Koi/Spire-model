@@ -41,7 +41,8 @@ PROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
                        "src", "Sts2Headless", "Sts2Headless.csproj")
 
 
-def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: bool = True):
+def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: bool = True,
+             ascension: int = 0):
     """Play a complete run and return the result."""
     rng = random.Random(seed)
     logger = GameLogger(character, seed, enabled=log)
@@ -112,7 +113,7 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
             print(f"Connected: {ready}")
 
         # Start run
-        state = send({"cmd": "start_run", "character": character, "seed": seed})
+        state = send({"cmd": "start_run", "character": character, "seed": seed, "ascension": ascension})
 
         step = 0
         max_steps = 2000  # Safety limit
@@ -254,11 +255,13 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                              "args": {"bundle_index": 0}})
 
             elif decision == "card_select":
-                # Auto-select first card
+                # Legacy regression policy: submit a complete legal-size array.
+                # The versioned runner consumes engine candidates instead.
                 cards = state.get("cards", [])
-                if cards:
+                count = max(state["min_select"], min(1, state["max_select"], len(cards)))
+                if count:
                     state = send({"cmd": "action", "action": "select_cards",
-                                 "args": {"indices": "0"}})
+                                 "args": {"indices": ",".join(str(i) for i in range(count))}})
                 else:
                     state = send({"cmd": "action", "action": "skip_select"})
 
@@ -304,6 +307,8 @@ def main():
     parser.add_argument("character", nargs="?", default="Ironclad",
                         choices=VALID_CHARACTERS, metavar="character",
                         help=f"Character to play as (default: Ironclad). Choices: {', '.join(VALID_CHARACTERS)}")
+    parser.add_argument("--ascension", type=int, default=0, choices=range(11),
+                        help="Ascension level (default: 0; architecture regression: 10)")
     args = parser.parse_args()
 
     if args.num_runs <= 0:
@@ -319,7 +324,7 @@ def main():
     for i in range(num_runs):
         seed = f"run_{i+1}"
         print(f"\n--- Run {i+1}/{num_runs} (seed: {seed}) ---")
-        result = play_run(seed, character, verbose=True)
+        result = play_run(seed, character, verbose=True, ascension=args.ascension)
         results.append(result)
         print()
 
