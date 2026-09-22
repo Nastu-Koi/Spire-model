@@ -29,7 +29,7 @@ class ModelConfig:
             raise ValueError("Dimensions must be positive integers and vocabularies need reserved entries")
         if self.hidden_size % self.num_heads or self.local_size % self.local_heads:
             raise ValueError("Attention dimensions must divide evenly")
-        if self.backend not in {"reference", "sdpa", "flex", "auto"}:
+        if self.backend not in {"reference", "sdpa", "flex", "flash", "auto"}:
             raise ValueError("Unknown attention backend")
 
     @classmethod

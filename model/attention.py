@@ -1,5 +1,7 @@
 """Attention implementations and compact map-only global biases."""
 from dataclasses import dataclass
+from functools import partial
+import importlib.util
 import math
 import warnings
 
@@ -36,6 +38,8 @@ class MapAttention(nn.Module):
         self.backend = backend
         self.actual_backend = backend
         self._flex = None
+        self._flash = None
+        self._warned_flash_training = False
 
     def _score_bias(self, metadata, batch, head, query, key, map_weight=None, floor_weight=None):
         map_weight = self.map_relation.weight if map_weight is None else map_weight
@@ -75,19 +79,54 @@ class MapAttention(nn.Module):
         batch_size, tokens, width = x.shape
         q, k, v = (self.qkv(x).view(batch_size, tokens, 3, self.heads, self.head_dim)
                    .permute(2, 0, 3, 1, 4).unbind(0))
-        if self.backend in {"flex", "auto"} and x.is_cuda:
+        if self.backend in {"flex", "flash", "auto"} and x.is_cuda:
             from torch.nn.attention.flex_attention import flex_attention
-            if self._flex is None:
-                self._flex = torch.compile(flex_attention, dynamic=True)
+            # FA4 cannot differentiate captured bias tables. Use Triton whenever
+            # autograd is enabled, including eval() calls used for gradient checks.
+            use_flash = self.backend == "flash" and not torch.is_grad_enabled()
+            if use_flash:
+                if q.dtype not in {torch.float16, torch.bfloat16}:
+                    raise ValueError("FlashAttention requires FP16/BF16; enable BF16 autocast")
+                if self._flash is None:
+                    try:
+                        available = importlib.util.find_spec("flash_attn.cute") is not None
+                    except ModuleNotFoundError:
+                        available = False
+                    if not available:
+                        raise RuntimeError("FlashAttention-4 is not installed; install a compatible "
+                                           "flash-attn-4 package or select backend='flex'")
+                    self._flash = torch.compile(
+                        partial(flex_attention, kernel_options={"BACKEND": "FLASH"}),
+                        dynamic=False,
+                    )
+                attention = self._flash
+                # Even under no_grad, parameters retain requires_grad=True.
+                # Detach captures so Inductor can select the FA4 forward kernel.
+                map_weight = self.map_relation.weight.detach()
+                floor_weight = self.floor_delta.weight.detach()
+            else:
+                if self.backend == "flash" and not self._warned_flash_training:
+                    warnings.warn("FlashAttention-4 does not support learned map-bias gradients; "
+                                  "using Triton FlexAttention while autograd is enabled", stacklevel=2)
+                    self._warned_flash_training = True
+                if self._flex is None:
+                    self._flex = torch.compile(
+                        partial(flex_attention, kernel_options={"BACKEND": "TRITON"}),
+                        dynamic=True,
+                    )
+                attention = self._flex
+                map_weight = self.map_relation.weight
+                floor_weight = self.floor_delta.weight
 
             def score_mod(score, batch, head, query, key):
-                score = score + self._score_bias(metadata, batch, head, query, key)
+                score = score + self._score_bias(metadata, batch, head, query, key,
+                                               map_weight, floor_weight)
                 key_in_bounds = key < valid.shape[1]
                 key_token = key.clamp(max=valid.shape[1] - 1)
                 return torch.where(key_in_bounds & valid[batch, key_token], score, -float("inf"))
 
-            out = self._flex(q, k, v, score_mod=score_mod)
-            self.actual_backend = "flex"
+            out = attention(q, k, v, score_mod=score_mod)
+            self.actual_backend = "flash" if use_flash else "flex"
         else:
             bias = self.dense_bias(metadata)
             mask = bias.masked_fill(~valid[:, None, None, :], -float("inf"))
@@ -95,8 +134,8 @@ class MapAttention(nn.Module):
                 out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask.to(q.dtype), dropout_p=0.0)
                 self.actual_backend = "sdpa"
             else:
-                if self.backend == "flex" and self.actual_backend != "reference":
-                    warnings.warn("FlexAttention requires CUDA; using reference attention")
+                if self.backend in {"flex", "flash"} and self.actual_backend != "reference":
+                    warnings.warn("Flex/FlashAttention requires CUDA; using reference attention", stacklevel=2)
                 self.actual_backend = "reference"
                 with torch.autocast(device_type=x.device.type, enabled=False):
                     scores = q.float() @ k.float().transpose(-1, -2) / math.sqrt(self.head_dim)

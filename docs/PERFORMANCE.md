@@ -17,6 +17,39 @@ python -m pytest -m cuda tests
 
 CUDA 测试必须在目标机器运行；CPU 环境将跳过这些测试。新检查点格式为 2，不能继续加载旧 hybrid 权重；原始采集数据仍可导入。
 
+## 可选 FlashAttention-4
+
+配置中设置 `model.backend` 为 `"flash"`，通过 FlexAttention 的
+`kernel_options={"BACKEND": "FLASH"}` 调用 FA4，保留地图关系、楼层偏置和 padding mask。
+默认 `auto` 仍使用 CUDA Triton FlexAttention，不自动启用实验性的 FA4。
+局部效果程序仍用 SDPA，以保留可学习的图关系。
+
+在 CUDA 环境额外安装与 PyTorch/CUDA 相容的 FA4 包（无需给 CPU 环境安装）：
+
+```bash
+python -m pip install --pre flash-attn-4
+# CUDA 13 环境按包的安装说明选择 flash-attn-4[cu13]
+python -m pytest tests/test_model_redesign.py -m cuda -q
+```
+
+参考 [PyTorch FA4 接口说明](https://pytorch.org/blog/flexattention-flashattention-4-fast-and-flexible/)
+和 [FA4 安装说明](https://pypi.org/project/flash-attn-4/)。应固定目标机验证通过的版本；
+不能将面向 SM100 数据中心 GPU 的性能结果直接套用到 RTX PRO 6000 的 SM120。
+
+`flash` 当前用于 **CUDA FP16/BF16、关闭 autograd 的推理**（`torch.no_grad()` 或
+`torch.inference_mode()`；仅 `eval()` 不会关闭 autograd）。推理采用静态形状编译，
+新 batch/序列长度可能触发重新编译。缺失 FA4 包、FP32 输入或内核不兼容会明确报错，
+不会静默丢弃地图偏置。CPU 会提示并回退 reference。
+
+PyTorch 2.14 的 FA4 后端尚不支持对 score modifier 捕获的地图参数求梯度，
+FA4 的 SM120 实现也限制自定义 score modifier 的反向传播。因此开启 autograd 时，
+`flash` 会提示并使用 Triton FlexAttention，保持完整地图参数梯度；不会冻结或 detach
+训练中的偏置。`actual_backend` 报告实际使用的 `flash` / `flex` / `reference`。
+现有 `benchmark` 测前向加反向，选择 `flash` 时测到的是训练回退路径，不能当成 FA4 推理基准。
+
+CUDA 测试覆盖带地图偏置和不等长 padding 的 FA4 推理、参数更新后重新推理，以及训练回退的
+梯度一致性。无 CUDA 或未安装 FA4 时，对应测试跳过；接入代码不代表已在目标 GPU 验证加速。
+
 ## 快速反馈
 
 ```bash
