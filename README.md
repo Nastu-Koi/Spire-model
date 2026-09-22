@@ -2,7 +2,9 @@
 
 先用 Steam 实玩记录训练模型，再在 `sts2-cli` 中用 PPO 强化训练，最后让模型接管 Steam 游戏。
 
-代码入口是 `python -m model`。默认模型约 1B 参数，配置在 `configs/rtxpro6000.json。目前适配游戏 **0.111.0、单人 A10**。
+代码入口是 `python -m model`。v2 默认采用小型纯 Full Attention、SwiGLU 和 Muon/AdamW，配置在 `configs/rtxpro6000.json`；CPU 调试使用 `configs/tiny.json`。目前适配游戏 **0.111.0、单人 A10**。
+
+v2 检查点不兼容旧 hybrid 权重，需要重新训练；采集数据可继续导入。批量训练、多引擎采样、RTX 基准及独立评估步骤见 [性能验证](docs/PERFORMANCE.md)。
 
 ## 1. 安装环境和 sts2-cli
 

@@ -6,22 +6,11 @@ import random
 import torch
 
 from .config import TrainConfig
-from .data import microbatches, samples
-from .policy import replay
+from .data import batch_pad_size, microbatches, samples
+from .optim import build_optimizer
+from .policy import replay_batch
 from .protocol import ProtocolError
 from .rollout import numeric_backend, precision_context
-
-
-def build_optimizer(model, config):
-    grouped = defaultdict(list)
-    for name, parameter in model.named_parameters():
-        head = not name.startswith(("encoder.", "blocks.", "final_norm."))
-        decay = parameter.ndim >= 2 and not any(x in name for x in ("norm", "symbol", "field", "relation", "floor"))
-        grouped[head, decay].append(parameter)
-    groups = [{"params": parameters, "lr": config.head_lr if head else config.backbone_lr,
-               "weight_decay": config.weight_decay if decay else 0.}
-              for (head, decay), parameters in grouped.items()]
-    return torch.optim.AdamW(groups, betas=(.9, .999), eps=1e-8, fused=model.device.type == "cuda")
 
 
 def ppo_objective(new_log_prob, old_log_prob, advantage, clip_ratio):
@@ -59,62 +48,79 @@ class Learner:
         for start in range(0, len(items), cfg.logical_batch_size):
             logical = items[start:start + cfg.logical_batch_size]
             self.optimizer.zero_grad(set_to_none=True)
-            batch_kl, batch_weight = 0., 0.
+            logical_rows = []
+            logical_items = []
             for micro in microbatches(logical, cfg):
-                # Sequential full-session replay bounds activation memory. Each
-                # session backpropagates once; the shared logical batch steps once.
-                for item in micro:
-                    with precision_context(self.model, cfg.precision):
-                        log_prob, value, entropy = replay(self.model, self.vocabulary, item.macro["steps"])
+                with precision_context(self.model, cfg.precision):
+                    outputs = replay_batch(self.model, self.vocabulary,
+                                           [item.macro["steps"] for item in micro],
+                                           pad_to=batch_pad_size(micro, cfg))
+                    losses, rows = [], []
+                    for item, (log_prob, value, entropy) in zip(micro, outputs):
                         if mode == "bootstrap":
                             loss = -log_prob
                             kl = clipped = log_prob.new_zeros(())
                             value_loss = log_prob.new_zeros(())
+                            predicted = log_prob.new_zeros(())
                         else:
                             macro = item.macro
-                            actor, kl, clipped = ppo_objective(log_prob, macro["old_log_prob"], macro["advantage"], cfg.clip_ratio)
+                            actor, kl, clipped = ppo_objective(
+                                log_prob, macro["old_log_prob"], macro["advantage"], cfg.clip_ratio
+                            )
                             value_loss = (value.float() - macro["return"]) ** 2
-                            loss = value_loss if mode == "value" else actor + cfg.value_coef * value_loss - cfg.entropy_coef * entropy
-                        weighted_loss = item.weight * loss
-                    if not torch.isfinite(weighted_loss):
-                        self.optimizer.zero_grad(set_to_none=True)
-                        raise FloatingPointError("Non-finite loss; optimizer update cancelled")
-                    self.accelerator.backward(weighted_loss)
-                    w = item.weight
-                    batch_kl += float(kl.detach()) * w
-                    batch_weight += w
-                    group = (item.character, item.macro["phase"])
-                    groups[group][0] += float(kl.detach()) * w
-                    groups[group][1] += w
-                    total_metrics["loss"] += float(loss.detach()) * w
-                    total_metrics["value_mse"] += float(value_loss.detach()) * w
-                    total_metrics["entropy"] += float(entropy.detach()) * w
-                    total_metrics["clip_fraction"] += float(clipped.detach()) * w
-                    total_metrics["kl"] += float(kl.detach()) * w
-                    weights += w
-                    if mode != "bootstrap":
-                        predicted, target = float(value.detach()), item.macro["return"]
-                        value_sums["weight"] += w
-                        value_sums["target"] += w * target
-                        value_sums["target2"] += w * target * target
-                        value_sums["predicted"] += w * predicted
-                        value_sums["predicted2"] += w * predicted * predicted
-                        value_sums["error"] += w * (target-predicted)
-                        value_sums["error2"] += w * (target-predicted)**2
+                            loss = (value_loss if mode == "value" else
+                                    actor + cfg.value_coef * value_loss - cfg.entropy_coef * entropy)
+                            predicted = value.float()
+                        losses.append(item.weight * loss)
+                        rows.append(torch.stack((loss.float(), value_loss.float(), entropy.float(),
+                                                 clipped.float(), kl.float(), predicted)))
+                    weighted_loss = torch.stack(losses).sum()
+                if not bool(torch.isfinite(weighted_loss)):
+                    self.optimizer.zero_grad(set_to_none=True)
+                    raise FloatingPointError("Non-finite loss; optimizer update cancelled")
+                self.accelerator.backward(weighted_loss)
+                logical_rows.append(torch.stack(rows).detach())
+                logical_items.extend(micro)
             if demonstrations and cfg.bootstrap_coef and mode == "ppo":
                 auxiliary = random.choices(demonstrations, weights=[x.weight for x in demonstrations], k=1)[0]
                 with precision_context(self.model, cfg.precision):
-                    lp, _, _ = replay(self.model, self.vocabulary, auxiliary.macro["steps"])
+                    lp, _, _ = replay_batch(self.model, self.vocabulary, [auxiliary.macro["steps"]],
+                                            pad_to=batch_pad_size([auxiliary], cfg))[0]
                     auxiliary_loss = -cfg.bootstrap_coef * lp
                 self.accelerator.backward(auxiliary_loss)
             norm = self.accelerator.clip_grad_norm_(self.model.parameters(), cfg.max_grad_norm)
-            if not torch.isfinite(norm):
+            if not bool(torch.isfinite(norm)):
                 self.optimizer.zero_grad(set_to_none=True)
                 raise FloatingPointError("Non-finite gradients; optimizer update cancelled")
             self.optimizer.step()
             self.scheduler.step()
             self.updates += 1
             total_metrics["last_grad_norm"] = float(norm)
+            # Transfer all per-sample diagnostics for this logical batch once.
+            host_rows = torch.cat(logical_rows).cpu().tolist()
+            batch_kl, batch_weight = 0., 0.
+            for item, (loss, value_loss, entropy, clipped, kl, predicted) in zip(logical_items, host_rows):
+                w = item.weight
+                batch_kl += kl * w
+                batch_weight += w
+                group = (item.character, item.macro["phase"])
+                groups[group][0] += kl * w
+                groups[group][1] += w
+                total_metrics["loss"] += loss * w
+                total_metrics["value_mse"] += value_loss * w
+                total_metrics["entropy"] += entropy * w
+                total_metrics["clip_fraction"] += clipped * w
+                total_metrics["kl"] += kl * w
+                weights += w
+                if mode != "bootstrap":
+                    target = item.macro["return"]
+                    value_sums["weight"] += w
+                    value_sums["target"] += w * target
+                    value_sums["target2"] += w * target * target
+                    value_sums["predicted"] += w * predicted
+                    value_sums["predicted2"] += w * predicted * predicted
+                    value_sums["error"] += w * (target-predicted)
+                    value_sums["error2"] += w * (target-predicted)**2
             if mode == "ppo" and batch_kl / max(batch_weight, 1e-12) > cfg.target_kl:
                 total_metrics["early_stop"] = 1
                 break
@@ -158,11 +164,16 @@ class Learner:
                 raise ProtocolError("Rollout numeric backend differs from learner; collect fresh on-policy data")
         largest = 0.
         with precision_context(self.model, self.config.precision):
-            for item in items:
-                log_prob, value, _ = replay(self.model, self.vocabulary, item.macro["steps"])
-                error = abs(float(log_prob) - item.macro["old_log_prob"])
-                value_error = abs(float(value) - item.macro["old_value"])
-                largest = max(largest, error, value_error)
+            for micro in microbatches(items, self.config):
+                outputs = replay_batch(self.model, self.vocabulary,
+                                       [item.macro["steps"] for item in micro],
+                                       pad_to=batch_pad_size(micro, self.config))
+                current = torch.stack([torch.stack((log_prob.float(), value.float()))
+                                       for log_prob, value, _ in outputs]).cpu().tolist()
+                for item, (log_prob, value) in zip(micro, current):
+                    error = abs(log_prob - item.macro["old_log_prob"])
+                    value_error = abs(value - item.macro["old_value"])
+                    largest = max(largest, error, value_error)
         if largest > (0.02 if self.config.precision == "bf16" else 1e-4):
             raise ProtocolError(f"Stored old probabilities/values do not replay: max error={largest}")
         return largest
@@ -206,11 +217,16 @@ class Learner:
         self.model.eval()
         metrics = defaultdict(lambda: {"nll": 0., "branches": 0, "macros": 0})
         with precision_context(self.model, self.config.precision):
-            for run in runs:
-                for macro in run["macros"]:
-                    lp, _, _ = replay(self.model, self.vocabulary, macro["steps"])
-                    group = metrics[run["character"] + "/" + macro["phase"]]
-                    group["nll"] -= float(lp)
+            items = samples(runs)
+            for batch in microbatches(items, self.config):
+                outputs = replay_batch(self.model, self.vocabulary,
+                                       [item.macro["steps"] for item in batch],
+                                       pad_to=batch_pad_size(batch, self.config))
+                log_probs = torch.stack([output[0].float() for output in outputs]).cpu().tolist()
+                for item, log_prob in zip(batch, log_probs):
+                    macro = item.macro
+                    group = metrics[item.character + "/" + macro["phase"]]
+                    group["nll"] -= log_prob
                     group["branches"] += sum(not s["forced"] for s in macro["steps"])
                     group["macros"] += 1
         return {key: dict(value, nll_per_branch=value["nll"] / value["branches"]) for key, value in metrics.items()}

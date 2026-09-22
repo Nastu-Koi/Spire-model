@@ -20,7 +20,7 @@ from .rewards import MilestoneLedger
 from .representation import Vocabulary, symbols_from_frames
 from .rollout import RolloutRunner, collect_round, precision_context, write_run
 from .runtime import configure_runtime
-from .seeds import RandomSeedSchedule
+from .seeds import RandomSeedSchedule, validate_evaluation_seeds
 from .trainer import Learner, evaluate_runs
 
 
@@ -64,7 +64,7 @@ def smoke(output):
 
 
 def parser():
-    p = argparse.ArgumentParser(description="STS2 hybrid policy: data → Bootstrap → PPO → Steam")
+    p = argparse.ArgumentParser(description="STS2 Full Attention policy: data → Bootstrap → PPO → Steam")
     p.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     p.add_argument("--threads", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
@@ -73,6 +73,19 @@ def parser():
     x.add_argument("--output", required=True)
     x = sub.add_parser("parameters")
     x.add_argument("--architecture", help="Read the model dimensions from architecture JSON")
+    x.add_argument("--config", help="Native model/training JSON profile")
+    x = sub.add_parser("benchmark", help="Measure batched replay on disposable weights; no game launches")
+    x.add_argument("--config", default="configs/rtxpro6000.json")
+    x.add_argument("--data", help="Optional trajectories; defaults to synthetic decisions")
+    x.add_argument("--batch-size", type=int, default=4)
+    x.add_argument("--steps", type=int, default=10)
+    x.add_argument("--warmup", type=int, default=2)
+    x.add_argument("--optimizer-steps", action="store_true", help="Also benchmark clipping and optimizer updates on disposable weights")
+    x.add_argument("--trace", help="Optional Chrome profiler trace path")
+    x.add_argument("--output", help="Optional JSON report path")
+    x = sub.add_parser("data-stats", help="Read-only observation capacity statistics")
+    x.add_argument("--data", required=True)
+    x.add_argument("--max-runs", type=int, default=32)
     x = sub.add_parser("init", help="Create random weights and a frozen vocabulary from public engine content")
     x.add_argument("--config", required=True)
     x.add_argument("--engine-root")
@@ -112,6 +125,7 @@ def parser():
         x.add_argument("--engine-root")
         x.add_argument("--output", required=True)
         x.add_argument("--max-steps", type=int, default=10000)
+        x.add_argument("--workers", type=int, default=1, help="Concurrent engine processes sharing batched GPU inference")
         if command == "train":
             x.add_argument("--rounds", type=int, default=160,
                            help="Additional sampling/update rounds in this invocation (default 160)")
@@ -157,15 +171,19 @@ def _learner(checkpoint, device):
 
 
 def _save(path, learner, extra=None):
+    previous = getattr(learner, "checkpoint_metadata", {})
+    metadata = {**previous, **(extra or {})}
+    metadata["training_seeds"] = sorted(set(previous.get("training_seeds", [])) | set(metadata.get("training_seeds", [])))
     save_checkpoint(path, learner.model, learner.vocabulary, learner.optimizer, learner.scheduler,
-                    overwrite=Path(path).name == "current", training=learner.config, progress={**getattr(learner, "checkpoint_metadata", {}),
-                                                       **(extra or {}), "reward_version": MilestoneLedger().version,
+                    overwrite=Path(path).name == "current", training=learner.config, progress={**metadata, "reward_version": MilestoneLedger().version,
                                                        "policy_version": learner.policy_version, "updates": learner.updates})
+    learner.checkpoint_metadata = metadata
 
 
 def _data_metadata(runs):
     contracts = {fingerprint(r["contract"]): r["contract"] for r in runs}
     return {"training_engine_contracts": list(contracts.values()),
+            "training_seeds": sorted({str(r["seed"]) for r in runs}),
             "training_seed_pool_hash": fingerprint(sorted((r["character"], str(r["seed"])) for r in runs))}
 
 
@@ -184,10 +202,24 @@ def main(argv=None):
             from .steam import play
             emit(play(args.checkpoint, args.bridge_dir, args.device, args.timeout, args.max_decisions))
         elif args.command == "parameters":
-            config = ModelConfig.from_architecture(args.architecture) if args.architecture else ModelConfig()
+            config = (ModelConfig(**json.loads(Path(args.config).read_text())["model"]) if args.config else
+                      ModelConfig.from_architecture(args.architecture) if args.architecture else ModelConfig())
             with torch.device("meta"):
                 model = PolicyValue(config)
             emit(model.parameter_report())
+        elif args.command == "data-stats":
+            from .benchmark import capacity_report
+            emit(capacity_report(args.data, max_runs=args.max_runs))
+        elif args.command == "benchmark":
+            from .benchmark import benchmark
+            result = benchmark(args.config, device=args.device, data=args.data, batch_size=args.batch_size,
+                               steps=args.steps, warmup=args.warmup, trace=args.trace,
+                               optimizer_steps=args.optimizer_steps)
+            result["runtime"] = runtime
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+            emit(result)
         elif args.command == "smoke":
             emit(smoke(args.output))
         elif args.command == "init":
@@ -297,6 +329,8 @@ def main(argv=None):
                 if args.runs_per_character is not None and (args.runs_per_character < 1 or args.seeds):
                     raise ValueError("--runs-per-character requires random seeds and a positive count")
             learner, manifest = _learner(args.checkpoint, args.device)
+            auxiliary_runs = (load_runs(args.demonstrations)
+                              if args.command == "train" and args.demonstrations and learner.config.bootstrap_coef else None)
             seeds = json.loads(Path(args.seeds).read_text()) if args.seeds else None
             schedule = None
             if args.command == "train" and seeds is None:
@@ -308,15 +342,11 @@ def main(argv=None):
             directory.mkdir(parents=True, exist_ok=True)
             factory = lambda: CliEngine(root=args.engine_root)
             if args.command == "evaluate":
-                traces = []
+                validate_evaluation_seeds(seeds, manifest["progress"])
                 runner = RolloutRunner(learner.model, learner.vocabulary, precision=learner.config.precision,
                                        version=learner.policy_version, max_steps=args.max_steps)
-                for character in CHARACTERS:
-                    for i, seed in enumerate(seeds[character]):
-                        with factory() as engine:
-                            trace = runner.run(engine, character, seed, sample=False)
-                        write_run(directory / f"{character}-{i}.json", trace)
-                        traces.append(trace)
+                paths = collect_round(factory, runner, seeds, directory, workers=args.workers, sample=False)
+                traces = [json.loads(p.read_text()) for p in paths]
                 emit(evaluate_runs(traces))
             else:
                 rounds = args.rounds if args.command == "train" else 1
@@ -342,15 +372,18 @@ def main(argv=None):
                         if history:
                             history.status("collecting", round=round_index + 1, character=character,
                                            games_completed=completed, games_total=total)
-                    paths = collect_round(factory, runner, assigned, directory / f"round-{round_index}", on_run=game_done)
+                    paths = collect_round(factory, runner, assigned, directory / f"round-{round_index}",
+                                          on_run=game_done, workers=args.workers)
                     if args.command == "train":
                         runs = [json.loads(p.read_text()) for p in paths]
+                        used_demonstrations = []
                         if history:
                             history.status("updating", round=round_index + 1)
                         if args.value_warmup and local_index == 0:
                             metrics = learner.value_warmup(runs)
                         else:
-                            metrics = learner.ppo(runs, load_runs(args.demonstrations) if args.demonstrations else None)
+                            metrics = learner.ppo(runs, auxiliary_runs)
+                            used_demonstrations = auxiliary_runs or []
                             completed_ppo_rounds += 1
                         seed_metadata = {"seed_mode": "random" if schedule else "fixed"}
                         if schedule:
@@ -361,7 +394,7 @@ def main(argv=None):
                                                 evaluation=evaluate_runs(runs), policy_version=learner.policy_version,
                                                 seed_file=str(directory / f"round-{round_index}" / "metadata" / "seeds.json"))
                         _save(directory / "current", learner,
-                              {"runtime": runtime, **_data_metadata(runs), **seed_metadata,
+                              {"runtime": runtime, **_data_metadata(runs + used_demonstrations), **seed_metadata,
                                "sampling_round": round_index, "completed_ppo_rounds": completed_ppo_rounds,
                                "last_training_record": record})
                         emit(record)

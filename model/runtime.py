@@ -9,7 +9,8 @@ def configure_runtime(device, *, threads=4):
     torch.set_num_threads(threads)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    manifest = {"python": platform.python_version(), "torch": str(torch.__version__), "device": str(device)}
+    manifest = {"python": platform.python_version(), "torch": str(torch.__version__), "device": str(device),
+                "cuda_build": torch.version.cuda, "cudnn": torch.backends.cudnn.version()}
     for package in ("accelerate", "numpy", "triton"):
         try:
             manifest[package] = importlib.metadata.version(package)

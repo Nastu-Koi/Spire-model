@@ -1,17 +1,17 @@
 {
   "model": {
     "architecture_version": 2,
-    "hidden_size": 256,
+    "hidden_size": 64,
     "num_heads": 4,
-    "layers": 4,
-    "ffn_size": 704,
-    "local_size": 64,
+    "layers": 2,
+    "ffn_size": 176,
+    "local_size": 32,
     "local_heads": 4,
     "local_layers": 1,
-    "vocabulary_size": 16384,
+    "vocabulary_size": 1024,
     "field_buckets": 512,
     "relation_buckets": 128,
-    "backend": "auto",
+    "backend": "reference",
     "checkpoint_layers": false,
     "compile_blocks": false
   },
@@ -24,8 +24,8 @@
     "head_lr": 3e-05,
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
-    "logical_batch_size": 32,
-    "microbatch_size": 4,
+    "logical_batch_size": 4,
+    "microbatch_size": 2,
     "clip_ratio": 0.2,
     "target_kl": 0.015,
     "ppo_epochs": 2,
@@ -33,22 +33,19 @@
     "entropy_coef": 0.001,
     "bootstrap_coef": 0.0,
     "horizon_scale": 100.0,
-    "precision": "bf16",
+    "precision": "no",
     "token_buckets": [
-      256,
-      512,
-      1024,
-      2048,
-      4096
-    ],
-    "action_buckets": [
       16,
       32,
       64,
       128,
-      256,
-      512,
-      1024
+      256
+    ],
+    "action_buckets": [
+      8,
+      16,
+      32,
+      64
     ],
     "token_budget": 8192,
     "pair_budget": 16777216

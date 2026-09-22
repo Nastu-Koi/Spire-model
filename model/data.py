@@ -1,6 +1,6 @@
 """Audited complete-run data. Never invent candidates from a teacher's label."""
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
@@ -131,6 +131,7 @@ class Sample:
     character: str
     run_id: str
     weight: float
+    _lengths: tuple[tuple[int, int], ...] | None = field(default=None, repr=False, compare=False)
 
 
 def samples(runs, *, ppo=False, horizon_scale=100.):
@@ -163,18 +164,32 @@ def bucket_size(length, buckets):
     return next((b for b in buckets if b >= length), length)
 
 
+def sample_pad_size(item, config):
+    """Return the token bucket for a sample, caching only input dimensions."""
+    if item._lengths is None:
+        from .representation import observation
+        lengths = []
+        for step in item.macro["steps"]:
+            if not step["forced"]:
+                obs = observation(step["frame"])
+                lengths.append((len(obs.tokens), len(obs.slot_refs)))
+        item._lengths = tuple(lengths)
+    result = 0
+    for tokens, actions in item._lengths:
+        action_pad = bucket_size(actions, config.action_buckets)
+        result = max(result, bucket_size(tokens - actions + action_pad, config.token_buckets))
+    return result
+
+
+def batch_pad_size(batch, config):
+    return max((sample_pad_size(item, config) for item in batch), default=0)
+
+
 def microbatches(logical, config):
     """Capacity changes computation order only, never statistical sample weights."""
-    from .representation import observation
     result, batch, max_n = [], [], 0
     for item in logical:
-        n = 0
-        for step in item.macro["steps"]:
-            if step["forced"]:
-                continue
-            obs = observation(step["frame"])
-            action_pad = bucket_size(len(obs.slot_refs), config.action_buckets)
-            n = max(n, bucket_size(len(obs.tokens) - len(obs.slot_refs) + action_pad, config.token_buckets))
+        n = sample_pad_size(item, config)
         candidate_n = max(max_n, n)
         count = len(batch) + 1
         if batch and (count > config.microbatch_size or count * candidate_n > config.token_budget or count * candidate_n**2 > config.pair_budget):

@@ -4,6 +4,7 @@ Packing indices never become features. Piles remain full unordered multisets.
 Symbols are a frozen, checkpointed vocabulary; unknown content is explicit.
 """
 from dataclasses import dataclass, field
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -101,18 +102,19 @@ def bucket(text, size):
 
 class Vocabulary:
     def __init__(self, symbols=None, capacity=16384):
-        self.symbols = ["<pad>", "<unknown>"] + sorted(set(symbols or []) - {"<pad>", "<unknown>"})
+        self.symbols = tuple(["<pad>", "<unknown>"] + sorted(set(symbols or []) - {"<pad>", "<unknown>"}))
         if len(self.symbols) > capacity:
             raise ValueError("Vocabulary exceeds configured capacity; increase capacity explicitly")
         self.capacity = capacity
         self.lookup = {s: i for i, s in enumerate(self.symbols)}
+        self._digest = fingerprint(self.symbols)
 
     def encode(self, symbol):
         return self.lookup.get(symbol, 1)
 
     @property
     def digest(self):
-        return fingerprint(self.symbols)
+        return self._digest
 
 
 @dataclass
@@ -173,6 +175,14 @@ class Effect:
 
 
 def effect_tree(program):
+    """Return a bounded cached parse tree; callers treat Effect as immutable."""
+    encoded = json.dumps(program, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return _effect_tree_cached(encoded)
+
+
+@lru_cache(maxsize=8192)
+def _effect_tree_cached(encoded):
+    program = json.loads(encoded)
     effect = Effect()
 
     def visit(obj, path, parent=None, scope=None):
@@ -342,12 +352,10 @@ def symbols_from_frames(frames):
 
 
 def field_tensors(rows, vocabulary, field_buckets, device, length=None):
-    n = length or len(rows)
+    n = len(rows) if length is None else length
+    if n < len(rows):
+        raise ValueError("Field tensor length cannot truncate rows")
     width = max(map(len, rows), default=1)
-    ids = torch.zeros((n, width), dtype=torch.long, device=device)
-    kinds = torch.zeros_like(ids)
-    nums = torch.zeros((n, width, 5), device=device)
-    mask = torch.zeros((n, width), dtype=torch.bool, device=device)
     # Construct on CPU in one pass; transfer once instead of tiny CUDA assignments.
     raw_ids, raw_kinds, raw_nums, raw_mask = [], [], [], []
     for row in rows + [[]] * (n - len(rows)):
@@ -356,9 +364,7 @@ def field_tensors(rows, vocabulary, field_buckets, device, length=None):
         raw_kinds.append([bucket(f.name, field_buckets) for f in row] + [0] * pad)
         raw_nums.append([f.number for f in row] + [(0,) * 5] * pad)
         raw_mask.append([True] * len(row) + [False] * pad)
-    if raw_ids:
-        ids = torch.tensor(raw_ids, dtype=torch.long, device=device)
-        kinds = torch.tensor(raw_kinds, dtype=torch.long, device=device)
-        nums = torch.tensor(raw_nums, dtype=torch.float32, device=device)
-        mask = torch.tensor(raw_mask, dtype=torch.bool, device=device)
-    return ids, kinds, nums, mask
+    return (torch.tensor(raw_ids, dtype=torch.long, device=device).reshape(n, width),
+            torch.tensor(raw_kinds, dtype=torch.long, device=device).reshape(n, width),
+            torch.tensor(raw_nums, dtype=torch.float32, device=device).reshape(n, width, 5),
+            torch.tensor(raw_mask, dtype=torch.bool, device=device).reshape(n, width))

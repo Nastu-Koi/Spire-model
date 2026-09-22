@@ -1,12 +1,15 @@
 from contextlib import nullcontext
+from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 import json
 from pathlib import Path
+import queue
+import threading
 import time
 
 import torch
 
-from .policy import SessionPolicy
+from .policy import SessionPolicy, choose_batch
 from .protocol import CHARACTERS, SCHEMA, ProtocolError, clean_frame, execution_command, fingerprint, segment_key, validate_frame
 from .rewards import MilestoneLedger
 
@@ -28,7 +31,7 @@ class RolloutRunner:
         self.precision, self.version = precision, version
         self.max_steps, self.timeout = max_steps, timeout
 
-    def run(self, engine, character, seed, *, sample=True, journal=None):
+    def run(self, engine, character, seed, *, sample=True, journal=None, _policy=None):
         if character not in CHARACTERS:
             raise ValueError("Unknown character")
         trace = {"schema": SCHEMA, "character": character, "seed": str(seed), "ascension": 10,
@@ -37,7 +40,7 @@ class RolloutRunner:
                  "source": "on_policy" if sample else "evaluation", "sampling": "full_distribution" if sample else "argmax",
                  "status": "unresolved", "macros": [], "automatic_steps": 0, "initial_reward": 0.0}
         ledger = MilestoneLedger()
-        policy = SessionPolicy(self.model, self.vocabulary, version=self.version)
+        policy = _policy or SessionPolicy(self.model, self.vocabulary, version=self.version)
         pending_steps, current_segment, active_macro = [], None, None
         waiting_since = None
         sink = Path(journal).open("w") if journal else nullcontext()
@@ -124,9 +127,74 @@ def write_run(path, trace):
     temporary.replace(path)
 
 
-def collect_round(engine_factory, runner, seeds, directory, on_run=None):
+class _InferenceQueue:
+    """Engine threads wait here; the collecting thread owns all GPU execution."""
+
+    def __init__(self, runner):
+        self.runner = runner
+        self.requests = queue.Queue()
+        self.lock = threading.Lock()
+        self.closed = False
+
+    def policy(self):
+        session = SessionPolicy(self.runner.model, self.runner.vocabulary, version=self.runner.version)
+        owner = self
+
+        class QueuedPolicy:
+            def choose(self, frame, *, sample=True):
+                result = Future()
+                with owner.lock:
+                    if owner.closed:
+                        raise RuntimeError("Rollout inference queue closed")
+                    owner.requests.put((session, frame, sample, result))
+                return result.result()
+
+        return QueuedPolicy()
+
+    def process(self, workers):
+        try:
+            first = self.requests.get(timeout=.01)
+        except queue.Empty:
+            return
+        requests = [first]
+        # Briefly coalesce ready decisions, without waiting for every engine.
+        deadline = time.monotonic() + .002
+        while len(requests) < workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                requests.append(self.requests.get(timeout=remaining))
+            except queue.Empty:
+                break
+        try:
+            if len({r[2] for r in requests}) != 1:
+                raise ValueError("A rollout batch cannot mix sampling and evaluation")
+            with torch.no_grad(), precision_context(self.runner.model, self.runner.precision):
+                choices = choose_batch([r[0] for r in requests], [r[1] for r in requests], sample=first[2])
+            for request, choice in zip(requests, choices):
+                request[3].set_result(choice)
+        except BaseException as exc:
+            for request in requests:
+                request[3].set_exception(exc)
+            raise
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            while True:
+                try:
+                    request = self.requests.get_nowait()
+                except queue.Empty:
+                    break
+                request[3].set_exception(RuntimeError("Rollout inference queue closed"))
+
+
+def collect_round(engine_factory, runner, seeds, directory, on_run=None, *, workers=1, sample=True):
     """Freeze the assigned queue before running it; any failure blocks the update."""
     counts = {c: len(seeds.get(c, [])) for c in CHARACTERS}
+    if type(workers) is not int or workers < 1:
+        raise ValueError("Rollout workers must be a positive integer")
     if len(set(counts.values())) != 1 or not all(counts.values()):
         raise ValueError("Allocate equal nonzero run counts to all five characters")
     directory = Path(directory)
@@ -139,17 +207,44 @@ def collect_round(engine_factory, runner, seeds, directory, on_run=None):
     if assignment.exists():
         raise FileExistsError("Rollout seed assignment already exists; choose a new round directory")
     write_run(assignment, seeds)
-    paths = []
-    for character in CHARACTERS:
-        for i, seed in enumerate(seeds[character]):
-            path = directory / f"{character}-{i}.json"
-            with engine_factory() as engine:
-                trace = runner.run(engine, character, seed, journal=path.with_suffix(".jsonl"))
-            write_run(path, trace)
-            paths.append(path)
+    jobs = [(character, seed, directory / f"{character}-{i}.json")
+            for character in CHARACTERS for i, seed in enumerate(seeds[character])]
+    paths = [path for _, _, path in jobs]
+    broker = _InferenceQueue(runner) if workers > 1 else None
+
+    def collect(job):
+        character, seed, path = job
+        with engine_factory() as engine:
+            trace = runner.run(engine, character, seed, sample=sample, journal=path.with_suffix(".jsonl"),
+                               _policy=broker.policy() if broker else None)
+        write_run(path, trace)
+        return character
+
+    if broker is None:
+        for completed, job in enumerate(jobs, 1):
+            character = collect(job)
             if on_run:
-                on_run(character, len(paths), sum(counts.values()))
+                on_run(character, completed, len(jobs))
+    else:
+        runner.model.eval()
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="engine") as pool:
+            pending = {pool.submit(collect, job) for job in jobs}
+            completed = 0
+            try:
+                while pending:
+                    broker.process(workers)
+                    for future in tuple(pending):
+                        if future.done():
+                            character = future.result()
+                            pending.remove(future)
+                            completed += 1
+                            if on_run:
+                                on_run(character, completed, len(jobs))
+            finally:
+                broker.close()
+                for future in pending:
+                    future.cancel()
     failures = [str(p) for p in paths if json.loads(p.read_text())["status"] != "complete"]
-    if failures:
+    if failures and sample:
         raise ProtocolError(f"Round incomplete; no PPO update is permitted. Inspect: {failures}")
     return paths

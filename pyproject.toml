@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "spire-model"
 version = "0.1.0"
-description = "Public-state hybrid Transformer/GRU policy and complete-run Bootstrap/PPO training"
+description = "Public-state Full Attention/SwiGLU policy with batched Bootstrap/PPO training"
 requires-python = ">=3.11"
-dependencies = ["torch>=2.6", "accelerate>=1.0", "numpy>=1.26"]
+dependencies = ["torch>=2.14,<2.15", "accelerate>=1.0", "numpy>=1.26"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
