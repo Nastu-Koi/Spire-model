@@ -5,13 +5,14 @@ from pathlib import Path
 
 @dataclass
 class ModelConfig:
-    hidden_size: int = 1792
-    num_heads: int = 28
-    layers: int = 25
-    ffn_size: int = 7168
-    local_size: int = 256
-    local_heads: int = 8
-    local_layers: int = 2
+    architecture_version: int = 2
+    hidden_size: int = 256
+    num_heads: int = 4
+    layers: int = 4
+    ffn_size: int = 704
+    local_size: int = 64
+    local_heads: int = 4
+    local_layers: int = 1
     vocabulary_size: int = 16384
     field_buckets: int = 512
     relation_buckets: int = 128
@@ -20,21 +21,22 @@ class ModelConfig:
     compile_blocks: bool = False
 
     def __post_init__(self):
+        if self.architecture_version != 2:
+            raise ValueError("Only architecture version 2 (Full Attention/SwiGLU) is supported")
         dimensions = (self.hidden_size, self.num_heads, self.layers, self.ffn_size, self.local_size,
                       self.local_heads, self.local_layers, self.vocabulary_size, self.field_buckets, self.relation_buckets)
         if any(type(x) is not int or x < 1 for x in dimensions) or min(self.vocabulary_size, self.field_buckets, self.relation_buckets) < 2:
             raise ValueError("Dimensions must be positive integers and vocabularies need reserved entries")
         if self.hidden_size % self.num_heads or self.local_size % self.local_heads:
             raise ValueError("Attention dimensions must divide evenly")
-        if self.layers < 1 or self.layers % 2 != 1:
-            raise ValueError("Hybrid schedule must start and end with Full")
         if self.backend not in {"reference", "sdpa", "flex", "auto"}:
             raise ValueError("Unknown attention backend")
 
     @classmethod
     def tiny(cls):
-        return cls(hidden_size=48, num_heads=3, layers=3, ffn_size=96,
-                   local_size=24, local_heads=3, vocabulary_size=1024, backend="reference")
+        return cls(hidden_size=64, num_heads=4, layers=2, ffn_size=176,
+                   local_size=32, local_heads=4, local_layers=1,
+                   vocabulary_size=1024, backend="reference")
 
     @classmethod
     def from_architecture(cls, path):
@@ -47,6 +49,10 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
+    optimizer: str = "muon_adamw"
+    muon_lr: float = 0.001
+    muon_momentum: float = 0.95
+    muon_ns_steps: int = 5
     backbone_lr: float = 1e-5
     head_lr: float = 3e-5
     weight_decay: float = 0.01
@@ -75,6 +81,10 @@ class TrainConfig:
         return cls(**values)
 
     def __post_init__(self):
+        if self.optimizer not in {"muon_adamw", "adamw"}:
+            raise ValueError("Use muon_adamw or adamw")
+        if self.muon_lr <= 0 or not 0 <= self.muon_momentum < 1 or type(self.muon_ns_steps) is not int or self.muon_ns_steps < 1:
+            raise ValueError("Invalid Muon learning rate, momentum or iteration count")
         if min(self.logical_batch_size, self.microbatch_size, self.horizon_scale) <= 0:
             raise ValueError("Batch sizes and horizon scale must be positive")
         if self.precision not in {"no", "bf16"}:

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import random
 import shutil
+import sys
 import uuid
 
 import torch
@@ -48,14 +49,21 @@ def save_checkpoint(path, model, vocabulary, optimizer=None, scheduler=None, *, 
     stage = path.with_name(path.name + ".staging-" + uuid.uuid4().hex)
     stage.mkdir()
     try:
-        manifest = {"format": 1, "model": asdict(model.config), "vocabulary": vocabulary.symbols,
+        manifest = {"format": 2, "model": asdict(model.config), "vocabulary": vocabulary.symbols,
                     "training": asdict(training or TrainConfig()), "progress": progress or {},
                     "torch_version": str(torch.__version__)}
         manifest["weights"] = _shards(model.state_dict().items(), stage, "weights")
         if optimizer:
             state = optimizer.state_dict()
-            manifest["optimizer_groups"] = state["param_groups"]
-            manifest["optimizer"] = _shards(state["state"].items(), stage, "optimizer")
+            parts = {"single": state} if "param_groups" in state else state
+            manifest["optimizer"] = {}
+            for kind, part in parts.items():
+                if not isinstance(part, dict) or "param_groups" not in part:
+                    raise ValueError("Unsupported optimizer state format")
+                manifest["optimizer"][kind] = {
+                    "groups": part["param_groups"],
+                    "shards": _shards(part["state"].items(), stage, "optimizer-" + kind),
+                }
         torch.save({"torch": torch.get_rng_state(), "python": random.getstate(),
                     "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
                     "scheduler": scheduler.state_dict() if scheduler else None}, stage / "runtime.pt")
@@ -64,9 +72,15 @@ def save_checkpoint(path, model, vocabulary, optimizer=None, scheduler=None, *, 
             # Linux renameat2 exchanges two directories atomically: readers always
             # see a complete current checkpoint, even if the process is killed.
             libc = ctypes.CDLL(None, use_errno=True)
-            exchange = libc.renameat2
-            exchange.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-            if exchange(-100, os.fsencode(stage), -100, os.fsencode(path), 2) != 0:
+            if sys.platform == "darwin":
+                exchange = libc.renamex_np
+                exchange.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+                result = exchange(os.fsencode(stage), os.fsencode(path), 2)  # RENAME_SWAP
+            else:
+                exchange = libc.renameat2
+                exchange.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+                result = exchange(-100, os.fsencode(stage), -100, os.fsencode(path), 2)
+            if result != 0:
                 code = ctypes.get_errno()
                 raise OSError(code, os.strerror(code), str(path))
             shutil.rmtree(stage)
@@ -80,8 +94,8 @@ def save_checkpoint(path, model, vocabulary, optimizer=None, scheduler=None, *, 
 def load_model(path, device="cpu"):
     path = Path(path)
     manifest = json.loads((path / "manifest.json").read_text())
-    if manifest.get("format") != 1:
-        raise ValueError("Unsupported checkpoint format")
+    if manifest.get("format") != 2 or manifest.get("model", {}).get("architecture_version") != 2:
+        raise ValueError("Checkpoint requires architecture v2 (Full Attention/SwiGLU); retrain old hybrid checkpoints")
     config = ModelConfig(**manifest["model"])
     # Allocate once on the destination without a second full CPU model.
     with torch.device("meta"):
@@ -105,27 +119,19 @@ def load_model(path, device="cpu"):
 def restore_training(path, optimizer, scheduler=None):
     path = Path(path)
     manifest = json.loads((path / "manifest.json").read_text())
-    if "optimizer" not in manifest:
+    if manifest.get("format") != 2 or "optimizer" not in manifest:
         raise ValueError("Checkpoint has no optimizer state")
-    # Load each parameter's Adam state without accumulating a duplicate full state_dict.
-    groups = manifest["optimizer_groups"]
-    current = optimizer.param_groups
-    if len(groups) != len(current) or any(len(g["params"]) != len(c["params"]) for g, c in zip(groups, current)):
-        raise ValueError("Optimizer parameter groups differ")
-    mapping = {index: p for group, now in zip(groups, current) for index, p in zip(group["params"], now["params"])}
-    for old, now in zip(groups, current):
-        now.update({k: v for k, v in old.items() if k != "params"})
-    optimizer.state.clear()
-    for name in manifest["optimizer"]:
-        shard = torch.load(path / name, map_location="cpu", weights_only=True)
-        for index, state in shard.items():
-            parameter = mapping[index]
-            for key, value in state.items():
-                if isinstance(value, torch.Tensor):
-                    use_device = key != "step" or optimizer.defaults.get("fused") or optimizer.defaults.get("capturable")
-                    state[key] = value.to(parameter.device if use_device else "cpu")
-            optimizer.state[parameter] = state
-        del shard
+    restored = {}
+    for kind, part in manifest["optimizer"].items():
+        state = {}
+        for name in part["shards"]:
+            shard = torch.load(path / name, map_location="cpu", weights_only=True)
+            if state.keys() & shard.keys():
+                raise ValueError("Duplicate optimizer checkpoint tensors")
+            state.update(shard)
+        restored[kind] = {"state": state, "param_groups": part["groups"]}
+    # Delegate dtype/device restoration to the actual optimizer, including Muon.
+    optimizer.load_state_dict(restored["single"] if set(restored) == {"single"} else restored)
     runtime = torch.load(path / "runtime.pt", map_location="cpu", weights_only=True)
     torch.set_rng_state(runtime["torch"])
     random.setstate(runtime["python"])

@@ -1,98 +1,53 @@
-"""Shared typed encoder → [Full, Linear]×n+Full → session GRU pointer."""
+"""Batched typed encoder, full map-aware Transformer, and multi-select GRU."""
 from dataclasses import dataclass
 import math
-import warnings
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
+from .attention import MapAttention, MapAttentionBias, RelationAttention
 from .config import ModelConfig
 from .representation import Observation, Vocabulary, bucket, field_tensors, fields_of
 
 
-def linear_attention(q, k, v, valid, epsilon=1e-6):
-    """Non-causal ELU+1 attention. FP32 aggregation, independently per batch."""
-    with torch.autocast(device_type=q.device.type, enabled=False):
-        query = F.elu(q.float()) + 1
-        key = (F.elu(k.float()) + 1) * valid[:, None, :, None]
-        values = v.float() * valid[:, None, :, None]
-        summary = key.transpose(-1, -2) @ values
-        normalizer = key.sum(dim=-2)
-        denominator = (query * normalizer.unsqueeze(-2)).sum(-1, keepdim=True).clamp_min(epsilon)
-        out = (query @ summary) / denominator
-        out = out * valid[:, None, :, None]
-    return out.to(v.dtype)
+class SwiGLU(nn.Module):
+    """SwiGLU feed-forward layer with an explicit intermediate width."""
 
-
-class Attention(nn.Module):
-    def __init__(self, width, heads, *, linear=False, backend="reference"):
+    def __init__(self, width, intermediate):
         super().__init__()
-        self.heads, self.head_dim, self.linear = heads, width // heads, linear
-        self.qkv = nn.Linear(width, 3 * width)
-        self.output = nn.Linear(width, width)
-        self.backend = backend
-        self.actual_backend = "linear" if linear else backend
-        self._flex = None
+        self.input = nn.Linear(width, 2 * intermediate)
+        self.output = nn.Linear(intermediate, width)
 
-    def forward(self, x, valid, bias=None):
-        b, n, d = x.shape
-        q, k, v = self.qkv(x).view(b, n, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4).unbind(0)
-        if self.linear:
-            out = linear_attention(q, k, v, valid)
-        elif self.backend in {"flex", "auto"} and x.is_cuda:
-            from torch.nn.attention.flex_attention import flex_attention
-            if self._flex is None:
-                self._flex = torch.compile(flex_attention)
-
-            def score_mod(score, batch, head, query, key):
-                return torch.where(valid[batch, key], score + bias[batch, head, query, key], -float("inf"))
-
-            out = self._flex(q, k, v, score_mod=score_mod)
-            self.actual_backend = "flex"
-        elif self.backend == "sdpa":
-            mask = bias.masked_fill(~valid[:, None, None, :], -float("inf"))
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask.to(q.dtype), dropout_p=0.0)
-            self.actual_backend = "sdpa"
-        else:
-            if self.backend == "flex" and self.actual_backend != "reference":
-                warnings.warn("FlexAttention requires CUDA; retaining relation bias with reference attention")
-            self.actual_backend = "reference"
-            with torch.autocast(device_type=x.device.type, enabled=False):
-                scores = q.float() @ k.float().transpose(-1, -2) / math.sqrt(self.head_dim)
-                scores = scores + bias.float()
-                scores = scores.masked_fill(~valid[:, None, None, :], -float("inf"))
-                out = (scores.softmax(-1) @ v.float()).to(v.dtype)
-        out = out.transpose(1, 2).reshape(b, n, d)
-        return self.output(out) * valid.unsqueeze(-1)
+    def forward(self, x):
+        gate, value = self.input(x).chunk(2, dim=-1)
+        return self.output(F.silu(gate) * value)
 
 
-class Block(nn.Module):
-    def __init__(self, width, heads, ffn_size, *, linear=False, backend="reference", relations=128):
+class GlobalBlock(nn.Module):
+    def __init__(self, width, heads, ffn_size, *, backend="reference", relations=128):
         super().__init__()
         self.norm1 = nn.LayerNorm(width)
-        self.attention = Attention(width, heads, linear=linear, backend=backend)
+        self.attention = MapAttention(width, heads, backend=backend, relations=relations)
         self.norm2 = nn.LayerNorm(width)
-        self.ffn = nn.Sequential(nn.Linear(width, ffn_size), nn.GELU(), nn.Linear(ffn_size, width))
-        if not linear:
-            self.relation = nn.Embedding(relations, heads)
-            self.floor = nn.Embedding(33, heads)
+        self.ffn = SwiGLU(width, ffn_size)
 
-    def forward(self, x, valid, edges, floors):
-        bias = None
-        if not self.attention.linear:
-            b, n, _ = x.shape
-            # Sparse additive relationships retain overlapping roles.
-            flat = x.new_zeros((b * n * n, self.attention.heads), dtype=self.relation.weight.dtype)
-            if edges.numel():
-                batch, source, target, role = edges.unbind(-1)
-                flat = flat.index_add(0, batch * n * n + source * n + target, self.relation(role))
-            if floors.numel():
-                batch, source, target, delta = floors.unbind(-1)
-                flat = flat.index_add(0, batch * n * n + source * n + target, self.floor(delta))
-            bias = flat.view(b, n, n, self.attention.heads).permute(0, 3, 1, 2)
-        x = x + self.attention(self.norm1(x), valid, bias)
+    def forward(self, x, valid, map_bias):
+        x = x + self.attention(self.norm1(x), valid, map_bias)
+        return (x + self.ffn(self.norm2(x))) * valid.unsqueeze(-1)
+
+
+class LocalBlock(nn.Module):
+    def __init__(self, width, heads, ffn_size, *, relations=128, backend="reference"):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(width)
+        self.attention = RelationAttention(width, heads, relations=relations, backend=backend)
+        self.norm2 = nn.LayerNorm(width)
+        self.ffn = SwiGLU(width, ffn_size)
+
+    def forward(self, x, valid, edges):
+        x = x + self.attention(self.norm1(x), valid, edges)
         return (x + self.ffn(self.norm2(x))) * valid.unsqueeze(-1)
 
 
@@ -105,8 +60,10 @@ class SharedEncoder(nn.Module):
         self.field = nn.Embedding(config.field_buckets, local, padding_idx=0)
         self.numeric = nn.Sequential(nn.Linear(5, local), nn.GELU(), nn.Linear(local, local))
         self.field_norm = nn.LayerNorm(local)
-        self.local_blocks = nn.ModuleList([Block(local, config.local_heads, local * 4,
-                                                relations=config.relation_buckets)
+        # 8*ceil(d/3) keeps SwiGLU near the parameter count of a 4d GELU FFN.
+        local_ffn = 8 * math.ceil(local / 3)
+        self.local_blocks = nn.ModuleList([LocalBlock(local, config.local_heads, local_ffn,
+                                                     relations=config.relation_buckets, backend=config.backend)
                                            for _ in range(config.local_layers)])
         self.reference = nn.Linear(local, local)
         self.program_binding = nn.Linear(local, local)
@@ -120,34 +77,78 @@ class SharedEncoder(nn.Module):
         # Sum retains multiplicity; sqrt normalization controls magnitude only.
         return self.field_norm((x * mask.unsqueeze(-1)).sum(1) / mask.sum(1).clamp_min(1).sqrt().unsqueeze(-1))
 
-    def forward(self, obs, vocabulary):
-        base = self.fields(obs.tokens, vocabulary)
-        fused = base.clone()
-        for i, j, role in obs.edges:
-            if role in {"source", "target", "option", "owner"}:
-                role_vector = self.field.weight[bucket("reference." + role, self.config.field_buckets)]
-                fused[i] = fused[i] + self.reference(base[j] + role_vector)
-        n = len(obs.effects)
-        program_length = max(len(e.nodes) for e in obs.effects)
-        rows = [row for effect in obs.effects for row in effect.nodes + [[]] * (program_length - len(effect.nodes))]
-        programs = self.fields(rows, vocabulary).view(n, program_length, -1)
-        valid = torch.tensor([[j < len(e.nodes) for j in range(program_length)] for e in obs.effects],
-                             device=base.device, dtype=torch.bool)
+    def forward(self, observations, vocabulary):
+        """Encode every token and effect program in one cross-session batch."""
+        if not observations:
+            return []
+        token_offsets, token_rows, effects = [], [], []
+        offset = 0
+        for obs in observations:
+            token_offsets.append(offset)
+            token_rows.extend(obs.tokens)
+            effects.extend(obs.effects)
+            offset += len(obs.tokens)
+
+        base = self.fields(token_rows, vocabulary)
+        reference_targets, reference_sources, reference_roles = [], [], []
+        accepted = {"source", "target", "option", "owner"}
+        for obs, token_offset in zip(observations, token_offsets):
+            for target, source, role in obs.edges:
+                if role in accepted:
+                    reference_targets.append(token_offset + target)
+                    reference_sources.append(token_offset + source)
+                    reference_roles.append(bucket("reference." + role, self.config.field_buckets))
+        fused = base
+        if reference_targets:
+            targets = torch.tensor(reference_targets, dtype=torch.long, device=base.device)
+            sources = torch.tensor(reference_sources, dtype=torch.long, device=base.device)
+            roles = torch.tensor(reference_roles, dtype=torch.long, device=base.device)
+            contributions = self.reference(base.index_select(0, sources) + self.field(roles))
+            fused = fused.index_add(0, targets, contributions.to(fused.dtype))
+
+        program_length = max(max(len(effect.nodes), 1) for effect in effects)
+        rows = []
+        for effect in effects:
+            rows.extend(list(effect.nodes) + [[]] * (program_length - len(effect.nodes)))
+        programs = self.fields(rows, vocabulary).view(len(effects), program_length, -1)
+        lengths = torch.tensor([len(effect.nodes) for effect in effects], device=base.device)
+        valid = torch.arange(program_length, device=base.device).unsqueeze(0) < lengths.unsqueeze(1)
+
+        binding_targets, binding_sources, binding_roles = [], [], []
         program_edges = []
-        for token, effect in enumerate(obs.effects):
-            for node, ref, role in effect.bindings:
-                if ref not in obs.refs:
-                    raise ValueError("Unresolved effect-program entity reference")
-                programs[token, node] = programs[token, node] + self.program_binding(
-                    base[obs.refs[ref]] + self.field.weight[bucket("binding." + role, self.config.field_buckets)])
-            program_edges.extend((token, i, j, bucket(role, self.config.relation_buckets)) for i, j, role in effect.edges)
+        effect_offset = 0
+        for obs, token_offset in zip(observations, token_offsets):
+            for token, effect in enumerate(obs.effects):
+                for node, ref, role in effect.bindings:
+                    if ref not in obs.refs:
+                        raise ValueError("Unresolved effect-program entity reference")
+                    binding_targets.append((effect_offset + token) * program_length + node)
+                    binding_sources.append(token_offset + obs.refs[ref])
+                    binding_roles.append(bucket("binding." + role, self.config.field_buckets))
+                program_edges.extend((effect_offset + token, source, target,
+                                      bucket(role, self.config.relation_buckets))
+                                     for source, target, role in effect.edges)
+            effect_offset += len(obs.effects)
+
+        if binding_targets:
+            targets = torch.tensor(binding_targets, dtype=torch.long, device=base.device)
+            sources = torch.tensor(binding_sources, dtype=torch.long, device=base.device)
+            roles = torch.tensor(binding_roles, dtype=torch.long, device=base.device)
+            additions = self.program_binding(base.index_select(0, sources) + self.field(roles))
+            flat_programs = programs.flatten(0, 1)
+            programs = flat_programs.index_add(0, targets, additions.to(flat_programs.dtype)).view_as(programs)
         edges = torch.tensor(program_edges, dtype=torch.long, device=base.device).reshape(-1, 4)
-        floors = edges.new_empty((0, 4))
         for block in self.local_blocks:
-            programs = block(programs, valid, edges, floors)
-        pooled = (programs * valid.unsqueeze(-1)).sum(1) / valid.sum(1).sqrt().unsqueeze(-1)
+            programs = block(programs, valid, edges)
+        pooled = (programs * valid.unsqueeze(-1)).sum(1) / valid.sum(1).clamp_min(1).sqrt().unsqueeze(-1)
         local = self.local_norm(fused + programs[:, 0] + pooled)
-        return self.projection(local), local
+        projected = self.projection(local)
+
+        result = []
+        for obs, token_offset in zip(observations, token_offsets):
+            end = token_offset + len(obs.tokens)
+            result.append((projected[token_offset:end], local[token_offset:end]))
+        return result
 
 
 @dataclass
@@ -182,9 +183,9 @@ class PolicyValue(nn.Module):
         self.config = config
         d, local = config.hidden_size, config.local_size
         self.encoder = SharedEncoder(config)
-        self.blocks = nn.ModuleList([Block(d, config.num_heads, config.ffn_size, linear=bool(i % 2),
-                                          backend=config.backend, relations=config.relation_buckets)
-                                     for i in range(config.layers)])
+        self.blocks = nn.ModuleList([GlobalBlock(d, config.num_heads, config.ffn_size,
+                                                backend=config.backend, relations=config.relation_buckets)
+                                     for _ in range(config.layers)])
         self.final_norm = nn.LayerNorm(d)
         self.prefix_order = nn.GRUCell(local, local)
         self.prefix_projection = nn.Linear(local, d)
@@ -200,31 +201,46 @@ class PolicyValue(nn.Module):
         if config.compile_blocks:
             # Module.compile keeps checkpoint state_dict names unchanged.
             for block in self.blocks:
-                block.compile(dynamic=False)
+                block.compile(dynamic=True)
 
     @property
     def device(self):
         return self.bos.device
 
-    def encode(self, observations, vocabulary, *, pad_to=None):
-        self.encoder_calls += 1
-        encoded = [self.encoder(o, vocabulary) for o in observations]
-        n = max(len(o.tokens) for o in observations)
-        n = max(n, pad_to or 0)
-        hidden = torch.stack([F.pad(x, (0, 0, 0, n - x.shape[0])) for x, _ in encoded])
-        valid = torch.tensor([[i < len(o.tokens) for i in range(n)] for o in observations], device=hidden.device)
-        edge_rows, floor_rows = [], []
+    def _map_bias(self, observations, token_count, device):
+        map_count = max(max(len(obs.map_floors) for obs in observations), 1)
+        node_rows = [[-1] * token_count for _ in observations]
+        category_rows = [[[0] * map_count for _ in range(map_count)] for _ in observations]
+        floor_rows = [[0] * map_count for _ in observations]
         for batch, obs in enumerate(observations):
-            edge_rows.extend((batch, i, j, bucket(role, self.config.relation_buckets)) for i, j, role in obs.edges)
-            floor_rows.extend((batch, i, j, max(-16, min(16, fj - fi)) + 16)
-                              for i, fi in obs.map_floors.items() for j, fj in obs.map_floors.items())
-        edges = torch.tensor(edge_rows, dtype=torch.long, device=hidden.device).reshape(-1, 4)
-        floors = torch.tensor(floor_rows, dtype=torch.long, device=hidden.device).reshape(-1, 4)
+            nodes = list(obs.map_floors)
+            slots = {node: slot for slot, node in enumerate(nodes)}
+            for slot, node in enumerate(nodes):
+                node_rows[batch][node] = slot
+                floor_rows[batch][slot] = obs.map_floors[node]
+            for source, target, role in obs.edges:
+                if role.startswith("map_") and source in slots and target in slots:
+                    category_rows[batch][slots[source]][slots[target]] = bucket(role, self.config.relation_buckets)
+        # One transfer per compact table avoids scalar CUDA assignments.
+        return MapAttentionBias(torch.tensor(node_rows, dtype=torch.long, device=device),
+                                torch.tensor(category_rows, dtype=torch.long, device=device),
+                                torch.tensor(floor_rows, dtype=torch.long, device=device))
+
+    def encode(self, observations, vocabulary, *, pad_to=None):
+        if not observations:
+            return []
+        self.encoder_calls += 1
+        encoded = self.encoder(observations, vocabulary)
+        n = max(max(len(o.tokens) for o in observations), pad_to or 0)
+        hidden = torch.stack([F.pad(x, (0, 0, 0, n - x.shape[0])) for x, _ in encoded])
+        lengths = torch.tensor([len(obs.tokens) for obs in observations], device=hidden.device)
+        valid = torch.arange(n, device=hidden.device).unsqueeze(0) < lengths.unsqueeze(1)
+        map_bias = self._map_bias(observations, n, hidden.device)
         for block in self.blocks:
             if self.config.checkpoint_layers and self.training and torch.is_grad_enabled():
-                hidden = checkpoint(block, hidden, valid, edges, floors, use_reentrant=False)
+                hidden = checkpoint(block, hidden, valid, map_bias, use_reentrant=False)
             else:
-                hidden = block(hidden, valid, edges, floors)
+                hidden = block(hidden, valid, map_bias)
         hidden = self.final_norm(hidden)
         result = []
         for b, obs in enumerate(observations):
@@ -233,42 +249,84 @@ class PolicyValue(nn.Module):
             result.append(Encoded(h, encoded[b][1], actions, self.key(actions), obs))
         return result
 
+    def _prefix_batch(self, encoded_list, contexts, vocabulary):
+        local = self.encoder.fields([fields_of(context) for context in contexts], vocabulary)
+        prefixes = []
+        for encoded, context, context_local in zip(encoded_list, contexts, local):
+            selected = context.get("selected_refs", [])
+            order_known = (context.get("known_masks") or {}).get("order_matters", True)
+            if context.get("order_matters") and order_known:
+                state = torch.zeros_like(context_local)
+                for ref in selected:
+                    state = self.prefix_order(encoded.local[encoded.observation.refs[ref]], state)
+                context_local = context_local + state
+            elif selected:
+                indices = torch.tensor([encoded.observation.refs[ref] for ref in selected],
+                                       dtype=torch.long, device=context_local.device)
+                context_local = context_local + encoded.local.index_select(0, indices).sum(0)
+            prefixes.append(context_local)
+        return self.prefix_projection(torch.stack(prefixes))
+
     def prefix(self, encoded, context, vocabulary):
-        local = self.encoder.fields([fields_of(context)], vocabulary)[0]
-        selected = context.get("selected_refs", [])
-        order_known = (context.get("known_masks") or {}).get("order_matters", True)
-        if context.get("order_matters") and order_known:
-            state = torch.zeros_like(local)
-            for ref in selected:
-                state = self.prefix_order(encoded.local[encoded.observation.refs[ref]], state)
-            local = local + state
-        else:
-            for ref in selected:
-                local = local + encoded.local[encoded.observation.refs[ref]]
-        return self.prefix_projection(local)
+        return self._prefix_batch([encoded], [context], vocabulary)[0]
+
+    def decode_batch(self, encoded_list, legal_masks, contexts, vocabulary, *,
+                     hidden=None, previous=None, value=None):
+        """Decode independent multi-select sessions with one batched head pass."""
+        count = len(encoded_list)
+        if not count or len(legal_masks) != count or len(contexts) != count:
+            raise ValueError("Decoder batch inputs must have the same nonzero length")
+        hidden = [None] * count if hidden is None else hidden
+        previous = [None] * count if previous is None else previous
+        value = [True] * count if value is None else value
+        if len(hidden) != count or len(previous) != count or len(value) != count:
+            raise ValueError("Decoder state lists must match the encoded batch")
+        for encoded, mask in zip(encoded_list, legal_masks):
+            if mask.dtype != torch.bool or mask.shape != (encoded.actions.shape[0],):
+                raise ValueError("Invalid engine mask")
+        legal_counts = torch.stack([mask.sum() for mask in legal_masks])
+        if bool((legal_counts < 2).any()):
+            raise ValueError("Forced actions must bypass every model head")
+
+        self.decoder_calls += count
+        prefix = self._prefix_batch(encoded_list, contexts, vocabulary)
+        starts = torch.stack([encoded.hidden[0] + encoded.actions[mask].mean(0) + item_prefix
+                              for encoded, mask, item_prefix in zip(encoded_list, legal_masks, prefix)])
+        previous_embeddings = []
+        for encoded, item in zip(encoded_list, previous):
+            if item is None:
+                previous_embeddings.append(self.bos)
+            elif isinstance(item, torch.Tensor):
+                previous_embeddings.append(item)
+            else:
+                previous_embeddings.append(encoded.actions[item])
+        current = self.input_norm(starts + self.previous_projection(torch.stack(previous_embeddings)))
+        hidden_batch = torch.stack([torch.zeros_like(current_item) if state is None else state
+                                    for current_item, state in zip(current, hidden)])
+        next_hidden = self.gru(current, hidden_batch)
+        queries = self.query(next_hidden)
+
+        max_actions = max(encoded.actions.shape[0] for encoded in encoded_list)
+        keys = torch.stack([F.pad(encoded.keys, (0, 0, 0, max_actions - encoded.keys.shape[0]))
+                            for encoded in encoded_list])
+        masks = torch.stack([F.pad(mask, (0, max_actions - mask.shape[0]), value=False)
+                             for mask in legal_masks])
+        with torch.autocast(device_type=queries.device.type, enabled=False):
+            logits = torch.bmm(queries.float().unsqueeze(1), keys.float().transpose(1, 2)).squeeze(1)
+            logits = logits / math.sqrt(self.config.hidden_size)
+            logits = logits.masked_fill(~masks, -float("inf"))
+        values = self.value(starts).float().squeeze(-1) if any(value) else None
+        return [DecisionOutput(logits[index, :encoded.actions.shape[0]], next_hidden[index],
+                               values[index] if values is not None and value[index] else None)
+                for index, encoded in enumerate(encoded_list)]
 
     def decode(self, encoded, legal_mask, context, vocabulary, *, hidden=None, previous=None, value=True):
-        if legal_mask.dtype != torch.bool or legal_mask.shape != (encoded.actions.shape[0],):
-            raise ValueError("Invalid engine mask")
-        if int(legal_mask.sum()) < 2:
-            raise ValueError("Forced actions must bypass every model head")
-        self.decoder_calls += 1
-        prefix = self.prefix(encoded, context, vocabulary)
-        start = encoded.hidden[0] + encoded.actions[legal_mask].mean(0) + prefix
-        previous_embedding = self.bos if previous is None else previous if isinstance(previous, torch.Tensor) else encoded.actions[previous]
-        current = self.input_norm(start + self.previous_projection(previous_embedding))
-        if hidden is None:
-            hidden = torch.zeros_like(current)
-        hidden = self.gru(current, hidden)
-        query = self.query(hidden)
-        with torch.autocast(device_type=hidden.device.type, enabled=False):
-            logits = query.float() @ encoded.keys.float().T / math.sqrt(self.config.hidden_size)
-            logits = logits.masked_fill(~legal_mask, -float("inf"))
-        return DecisionOutput(logits, hidden, self.value(start).float().squeeze(-1) if value else None)
+        return self.decode_batch([encoded], [legal_mask], [context], vocabulary,
+                                 hidden=[hidden], previous=[previous], value=[value])[0]
 
     def parameter_report(self):
         return {"total": sum(p.numel() for p in self.parameters()),
                 "backbone": sum(p.numel() for b in self.blocks for p in b.parameters()) + sum(p.numel() for p in self.final_norm.parameters()),
                 "gru": sum(p.numel() for p in self.gru.parameters()),
-                "full_layers": sum(not b.attention.linear for b in self.blocks),
-                "linear_layers": sum(b.attention.linear for b in self.blocks)}
+                "full_layers": len(self.blocks),
+                "linear_layers": 0}

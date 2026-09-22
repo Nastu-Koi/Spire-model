@@ -1,4 +1,4 @@
-torch>=2.6
+torch>=2.14,<2.15
 accelerate>=1.0
 numpy>=1.26
 pytest>=8
