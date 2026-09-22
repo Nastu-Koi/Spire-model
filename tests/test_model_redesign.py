@@ -126,6 +126,57 @@ def test_reference_and_sdpa_match_for_map_bias():
     torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
 
 
+def test_flash_cpu_fallback_preserves_map_bias_and_gradients():
+    ModelConfig(backend="flash")
+    obs = make_observation(extra=True)
+    vocab = vocabulary_for(obs)
+    network = model("flash")
+    reference = model()
+    reference.load_state_dict(network.state_dict())
+    with pytest.warns(UserWarning, match="requires CUDA"):
+        actual = network.encode([obs], vocab)[0].hidden
+    expected = reference.encode([obs], vocab)[0].hidden
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+    actual.square().sum().backward()
+    for block in network.blocks:
+        assert block.attention.actual_backend == "reference"
+        assert block.attention.map_relation.weight.grad.abs().sum() > 0
+        assert block.attention.floor_delta.weight.grad.abs().sum() > 0
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA FlashAttention-4")
+def test_flash_cuda_inference_matches_reference_with_padding_and_map_bias():
+    pytest.importorskip("flash_attn.cute")
+    from model.attention import MapAttention
+
+    attention = MapAttention(256, 4, backend="flash").cuda().eval()
+    reference = MapAttention(256, 4, backend="reference").cuda().eval()
+    reference.load_state_dict(attention.state_dict())
+    x = torch.randn(2, 128, 256, device="cuda")
+    valid = torch.arange(128, device="cuda")[None, :] < torch.tensor([117, 83], device="cuda")[:, None]
+    slots = torch.full((2, 128), -1, device="cuda", dtype=torch.long)
+    slots[:, 1:4] = torch.arange(3, device="cuda")
+    metadata = MapAttentionBias(slots, torch.tensor([
+        [[0, 1, 2], [3, 0, 4], [5, 6, 0]],
+        [[0, 2, 3], [4, 0, 5], [6, 1, 0]],
+    ], device="cuda"), torch.tensor([[0, 2, 4], [1, 3, 5]], device="cuda"))
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        actual = attention(x, valid, metadata)
+        expected = reference(x, valid, metadata)
+        torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+        assert attention.actual_backend == "flash"
+        assert actual[~valid].count_nonzero() == 0
+        # A cached compiled callable must read updated parameter values.
+        attention.floor_delta.weight.add_(1.0)
+        reference.floor_delta.weight.add_(1.0)
+        updated = attention(x, valid, metadata)
+        torch.testing.assert_close(updated, reference(x, valid, metadata), rtol=3e-2, atol=3e-2)
+        assert not torch.equal(actual, updated)
+    with pytest.raises(ValueError, match="FP16/BF16"), torch.no_grad():
+        attention(x, valid, metadata)
+
+
 def test_bf16_autocast_handles_vectorized_reference_and_binding_updates():
     obs = make_observation(extra=True)
     vocab = vocabulary_for(obs)
@@ -140,10 +191,11 @@ def test_bf16_autocast_handles_vectorized_reference_and_binding_updates():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA FlexAttention")
-def test_flex_cuda_forward_backward_updates_compact_map_bias():
+@pytest.mark.parametrize("backend", ["flex", "flash"])
+def test_flex_cuda_forward_backward_updates_compact_map_bias(backend):
     obs = make_observation(extra=True)
     vocab = vocabulary_for(obs)
-    flex_config = ModelConfig(backend="flex")
+    flex_config = ModelConfig(backend=backend)
     reference_config = ModelConfig(backend="reference")
     network = PolicyValue(flex_config).cuda().train()
     reference = PolicyValue(reference_config).cuda().train()
