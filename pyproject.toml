@@ -16,7 +16,7 @@ test = ["pytest>=8"]
 spire-model = "model.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["model*"]
+include = ["model*", "combat_solver_cli*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "steam_recorder/tests"]

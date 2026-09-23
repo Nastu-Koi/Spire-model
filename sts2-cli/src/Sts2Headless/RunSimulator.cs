@@ -192,7 +192,7 @@ public partial class RunSimulator
         bool decisionProtocol = false)
     {
         ResetDecisionProtocol(ascension);
-        _protocolTrainingRun = decisionProtocol && ascension == 10;
+        _protocolTrainingRun = decisionProtocol && ascension is >= 0 and <= 10;
         try
         {
             _loc.Lang = lang;

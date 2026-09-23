@@ -13,7 +13,9 @@ def validate_run(run, *, on_policy=False):
     if recorder_bc and (on_policy or run.get("provenance", {}).get("bc_only") is not True
                         or run.get("teacher_visibility") != "unverified"):
         raise ProtocolError("Recorder Bootstrap data is supervised-only with unverified teacher visibility")
-    if run.get("schema") != SCHEMA or run.get("ascension") != 10:
+    ascension = run.get("ascension")
+    if (run.get("schema") != SCHEMA or type(ascension) is not int
+            or not 0 <= ascension <= 10):
         raise ProtocolError("Unsupported trajectory schema or ascension")
     if recorder_bc:
         if run.get("status") != "partial" or run.get("victory") is not None:
@@ -38,6 +40,8 @@ def validate_run(run, *, on_policy=False):
         for step in steps:
             frame = step["frame"]
             validate_frame(frame)
+            if frame["contract"].get("fixed_ascension") != ascension:
+                raise ProtocolError("Frame ascension disagrees with run")
             if frame["contract"] != run["contract"]:
                 raise ProtocolError("Mixed engine contracts")
             if segment_key(frame) != segment:

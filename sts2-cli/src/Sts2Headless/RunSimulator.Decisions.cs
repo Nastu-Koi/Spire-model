@@ -22,7 +22,6 @@ public partial class RunSimulator
         ["observation_schema"] = "public-state-v1",
         ["action_schema"] = "candidate-v0",
         ["auto_advance_version"] = "pending-continuation-v0",
-        ["fixed_ascension"] = 10,
         ["training_ready"] = false,
         ["game_assembly_sha256"] = AssemblyHash(typeof(RunState)),
         ["adapter_assembly_sha256"] = AssemblyHash(typeof(RunSimulator)),
@@ -34,6 +33,7 @@ public partial class RunSimulator
     private Dictionary<string, object?> CurrentProtocolContract => new(ProtocolContract.Value)
     {
         ["training_ready"] = _protocolTrainingRun,
+        ["fixed_ascension"] = _protocolAscension,
         ["debug_mutations_allowed"] = false,
     };
 
@@ -113,7 +113,7 @@ public partial class RunSimulator
     {
         if (_protocolFailure != null) return ProtocolError(_protocolFailure);
         if (_runState == null) return ProtocolError("no_active_run");
-        if (_protocolAscension != 10) return ProtocolError("unverified_run_contract");
+        if (_protocolAscension is null or < 0 or > 10) return ProtocolError("unverified_run_contract");
         if (!_protocolEnabled)
         {
             _protocolEnabled = true;
