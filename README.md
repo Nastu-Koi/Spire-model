@@ -41,10 +41,10 @@ python steam_recorder/install.py --game-dir "$GAME_DIR" --install
 find "$HOME/.local/share" -type d -name run_recorder 2>/dev/null
 ```
 
-Proton 的记录在对应 compatdata 前缀的 Windows 用户目录；WSL 读取 Windows 游戏时则使用 `/mnt/c/Users/<用户名>/AppData/Roaming/SlayTheSpire2/run_recorder`。下面的 `RECORDING_DIR` 要填成你实际找到的路径。
+Proton 的记录在对应 compatdata 前缀的 Windows 用户目录；WSL 读取 Windows 游戏时则使用 `/mnt/c/Users/Nastu/AppData/Roaming/SlayTheSpire2/run_recorder`。下面的 `RECORDING_DIR` 要填成你实际找到的路径。
 
 ```bash
-export RECORDING_DIR="/你的实际记录目录/run_recorder"
+export RECORDING_DIR="/mnt/c/Users/Nastu/AppData/Roaming/SlayTheSpire2/run_recorder"
 python -m model import-recorder "$RECORDING_DIR" \
   --bootstrap-only --output data/steam-001
 ```
@@ -137,6 +137,7 @@ python -m model monitor --root runs --port 8765
 安装本仓库的 `steam_recorder` 后，在 Steam 中开始或继续一局单人 A10，再运行：
 
 ```bash
+export RECORDING_DIR="/mnt/c/Users/Nastu/AppData/Roaming/SlayTheSpire2/run_recorder"
 python -m model --device cuda play-steam \
   --checkpoint runs/ppo/current \
   --bridge-dir "$RECORDING_DIR/bridge"

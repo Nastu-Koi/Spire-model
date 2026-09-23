@@ -50,6 +50,7 @@ public class Node : GodotObject
     public virtual StringName Name { get; set; } = "";
 
     public Node? GetParent() => _parent;
+    public int GetIndex(bool includeInternal = false) => _parent?._children.IndexOf(this) ?? 0;
 
     public Godot.Collections.Array<Node> GetChildren(bool includeInternal = false)
     {

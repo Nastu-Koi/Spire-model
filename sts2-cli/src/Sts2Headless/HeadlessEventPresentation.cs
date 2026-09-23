@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Monsters;
 
 namespace Sts2Headless;
 
@@ -27,6 +28,11 @@ internal static class HeadlessEventPresentation
                     else harmony.Patch(method, transpiler: transpiler);
                 }
         }
+        // The Kaiser Crab monsters play audio through NAudioManager.Instance, which is
+        // deliberately absent in the headless node tree. Remove only those presentation
+        // calls; death handling, music progress and combat hooks still run.
+        harmony.Patch(typeof(Crusher).GetMethod(nameof(Crusher.BeforeDeath))!, transpiler: transpiler);
+        harmony.Patch(typeof(Rocket).GetMethod(nameof(Rocket.BeforeDeath))!, transpiler: transpiler);
         _installed = true;
     }
 
@@ -36,6 +42,7 @@ internal static class HeadlessEventPresentation
     {
         var type = method.DeclaringType?.Name;
         return type == "NDebugAudioManager" && method.Name is "Play" or "Stop"
+            || type == "NAudioManager" && method.Name == "PlayOneShot"
             || type == "NGame" && method.Name is "ScreenShake" or "ScreenShakeTrauma" or "ScreenRumble"
             || type == "NEventRoom" && method.Name is "get_Layout" or "SetPortrait"
             || type == "NEventLayout" && method.Name is "RemoveNodesOnPortrait" or "AddVfxAnchoredToPortrait";

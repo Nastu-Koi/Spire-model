@@ -3,7 +3,7 @@
     "architecture_version": 2,
     "hidden_size": 256,
     "num_heads": 4,
-    "layers": 4,
+    "layers": 24,
     "ffn_size": 704,
     "local_size": 64,
     "local_heads": 4,

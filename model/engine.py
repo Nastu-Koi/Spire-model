@@ -68,9 +68,9 @@ class CliEngine:
             self.proc.stdin.flush()
             return self._read()
 
-    def reset(self, character, seed):
+    def reset(self, character, seed, ascension=10):
         response = self.send({"cmd": "start_run", "character": character, "seed": str(seed),
-                              "ascension": 10, "lang": "en", "decision_protocol": True})
+                              "ascension": ascension, "lang": "en", "decision_protocol": True})
         if response.get("type") == "error":
             raise ProtocolError(str(response))
         return response if response.get("type") == "decision_frame" else self.send({"cmd": "advance_to_boundary"})
