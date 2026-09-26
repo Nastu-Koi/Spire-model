@@ -156,6 +156,47 @@ class FakeEngine:
 
 
 class PublicGenerateTests(unittest.TestCase):
+    def test_deadline_crossed_in_planning_retains_cost_without_executing(self):
+        clock = [0.0]
+        engines = []
+
+        class SlowPlanner(FakePlanner):
+            def choose(self, frame):
+                clock[0] = 2.0
+                return super().choose(frame)
+
+        def engine_factory():
+            engine = FakeEngine(victory=False)
+            engines.append(engine)
+            return engine
+
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            patch(
+                "combat_solver_cli.public_generate.time.monotonic",
+                side_effect=lambda: clock[0],
+            ),
+        ):
+            output = Path(temp) / "run"
+            report = generate(
+                output,
+                workers=1,
+                max_attempts=1,
+                max_seconds=1,
+                planner_factory=SlowPlanner,
+                engine_factory=engine_factory,
+            )
+            result = json.loads((output / "attempts/000001/result.json").read_text())
+        self.assertEqual(report["outcome_counts"]["limit"], 1)
+        self.assertEqual(engines[0].version, 0)
+        self.assertEqual(result["prefix"]["records"], [])
+        self.assertEqual(
+            result["prefix"]["pending_decision"]["diagnostics"], {"method": "test"}
+        )
+        self.assertEqual(result["outcome"]["planning_seconds"], 2.0)
+        self.assertEqual(report["budget_overrun_seconds"], 1.0)
+        self.assertEqual(report["unfinished_attempt_seconds"], 2.0)
+
     def test_target_stops_other_workers_at_a_decision_boundary(self):
         class MixedEngine(FakeEngine):
             def reset(self, character, seed, ascension):
