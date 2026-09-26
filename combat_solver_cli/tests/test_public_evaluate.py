@@ -406,6 +406,212 @@ class PublicEvaluationTests(unittest.TestCase):
         self.assertTrue(all(type(r[2]) is int for r in received))
         self.assertEqual([r[3] for r in received], ["legacy"] * 2 + ["second_wind"] * 2)
 
+    def test_route_resources_is_optional_strict_boolean_and_forwarded(self):
+        manifest = self.manifest()
+        manifest["profiles"].append(
+            {
+                **manifest["profiles"][0],
+                "name": "route",
+                "route_resources": True,
+                "dynamic_legality": True,
+                "draw_samples": 4,
+                "future_value": True,
+                "deck_rewards": True,
+            }
+        )
+        received = []
+
+        class ConfigPlanner(FakePlanner):
+            def __init__(self, **options):
+                received.append(options)
+
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            patch("combat_solver_cli.public_search.PublicPlanner", ConfigPlanner),
+        ):
+            report = evaluate(
+                manifest,
+                Path(temp) / "evaluation",
+                split="dev",
+                engine_factory=lambda: FakeEngine(victory=False),
+            )
+        self.assertNotIn("route_resources", received[0])
+        self.assertIs(received[1]["route_resources"], True)
+        self.assertEqual(
+            {
+                key: received[1][key]
+                for key in (
+                    "dynamic_legality",
+                    "draw_samples",
+                    "future_value",
+                    "deck_rewards",
+                )
+            },
+            {
+                "dynamic_legality": True,
+                "draw_samples": 4,
+                "future_value": True,
+                "deck_rewards": True,
+            },
+        )
+        self.assertEqual(report["profiles"], manifest["profiles"])
+
+        for field, invalid in (
+            ("route_resources", 0),
+            ("route_resources", "true"),
+            ("dynamic_legality", 1),
+            ("future_value", None),
+            ("deck_rewards", "false"),
+            ("draw_samples", True),
+            ("draw_samples", -1),
+            ("draw_samples", 9),
+        ):
+            bad = self.manifest()
+            bad["profiles"][0][field] = invalid
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "evaluation"
+                with self.assertRaisesRegex(ValueError, "profile"):
+                    evaluate(bad, output, split="dev", planner_factory=FakePlanner)
+                self.assertFalse(output.exists())
+
+    def test_resource_and_survival_report_keeps_complete_win_rate_separate(self):
+        class ResourceRun(FakeEngine):
+            actions = (
+                ("map", "MOVE_TO_NODE", None, 1, 1, 70, 100, 1),
+                ("rest_site", "CHOOSE_REST_OPTION", "REST", 1, 6, 38, 110, 1),
+                ("rest_site", "CHOOSE_REST_OPTION", "SMITH", 1, 7, 55, 110, 1),
+                ("shop", "BUY_ITEM", "CARD.TEST", 2, 2, 54, 120, 1),
+                ("card_select", "SELECT_ONE", "CARD.STRIKE", 2, 3, 54, 80, 2),
+            )
+
+            def _frame(self):
+                frame = super()._frame()
+                if self.version < len(self.actions):
+                    frame["boundary"] = "decision"
+                    frame["public"].pop("outcome", None)
+                    frame["events"] = []
+                    frame["legal"]["candidates"] = [
+                        {**item, "candidate_ref": item["decoder_slot_ref"]}
+                        for item in frame["public"]["decoder_bank"]
+                    ]
+                    phase, verb, content, act, floor, hp, gold, potions = self.actions[
+                        self.version
+                    ]
+                    frame["public"]["phase"] = phase
+                    frame["public"]["entities"][0].update(
+                        act=act, floor=floor, hp=hp, gold=gold
+                    )
+                    frame["public"]["entities"].extend(
+                        {
+                            "ref": f"potion:{i}",
+                            "entity_type": "potion",
+                            "zone": "inventory",
+                        }
+                        for i in range(potions)
+                    )
+                    frame["legal"]["candidates"][0]["verb"] = verb
+                    frame["public"]["decoder_bank"][0]["verb"] = verb
+                    if content:
+                        frame["public"]["entities"].append(
+                            {
+                                "ref": "choice",
+                                "entity_type": "rest_option"
+                                if phase == "rest_site"
+                                else "shop_item",
+                                "content_id": content,
+                            }
+                        )
+                        for candidate in (
+                            frame["legal"]["candidates"][0],
+                            frame["public"]["decoder_bank"][0],
+                        ):
+                            candidate["source_refs"] = ["choice"]
+                    if phase == "card_select":
+                        frame["public"]["selection_context"] = {"operation": "remove"}
+                else:
+                    frame["public"]["entities"][0].update(
+                        act=2, floor=4, hp=49, gold=80
+                    )
+                    frame["public"]["entities"].append(
+                        {
+                            "ref": "potion:0",
+                            "entity_type": "potion",
+                            "zone": "inventory",
+                        }
+                    )
+                return frame
+
+            def send(self, command):
+                self.version += 1
+                return self._frame()
+
+        manifest = self.manifest()
+        manifest["profiles"].append(
+            {**manifest["profiles"][0], "name": "candidate", "route_resources": True}
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            report = evaluate(
+                manifest,
+                Path(temp) / "evaluation",
+                split="dev",
+                engine_factory=lambda: ResourceRun(victory=False),
+                planner_factory=FakePlanner,
+            )
+        run = report["runs"][0]
+        self.assertEqual(run["acts_reached"], [1, 2])
+        self.assertEqual(
+            (run["final_hp"], run["final_gold"], run["final_potions"]), (49, 80, 1)
+        )
+        self.assertEqual(
+            run["resource_actions"], {"rest": 1, "upgrade": 1, "buy": 1, "remove": 1}
+        )
+        self.assertEqual(report["act_reach_counts"], {"1": 2, "2": 2, "3": 0})
+        self.assertEqual(report["complete_win_rate"], 0)
+        baseline = report["profile_summaries"]["baseline"]
+        self.assertEqual(baseline["act_reach_counts"], {"1": 1, "2": 1, "3": 0})
+        self.assertEqual(baseline["boss_pass_counts"], {"1": 0, "2": 0, "3": 0})
+        self.assertEqual(baseline["final_resources"]["hp"], {"observed": 1, "mean": 49})
+        self.assertEqual(baseline["resource_actions"], run["resource_actions"])
+        self.assertEqual(baseline["complete_win_rate"], 0)
+        self.assertIsNone(baseline["wall_seconds_per_verified_victory"])
+        self.assertGreaterEqual(baseline["wall_seconds"], 0)
+
+    def test_empty_native_terminal_uses_one_labeled_last_resource_snapshot(self):
+        class EmptyTerminal(FakeEngine):
+            def _frame(self):
+                frame = super()._frame()
+                if frame["boundary"] == "terminal":
+                    frame["public"]["phase"] = "terminal"
+                    frame["public"]["entities"] = []
+                else:
+                    frame["public"]["entities"][0].update(hp=60, gold=100)
+                    frame["public"]["entities"].append(
+                        {
+                            "ref": "potion:0",
+                            "entity_type": "potion",
+                            "zone": "inventory",
+                        }
+                    )
+                return frame
+
+        with tempfile.TemporaryDirectory() as temp:
+            report = evaluate(
+                self.manifest(),
+                Path(temp) / "evaluation",
+                split="dev",
+                engine_factory=lambda: EmptyTerminal(victory=False),
+                planner_factory=FakePlanner,
+            )
+        run = report["runs"][0]
+        self.assertEqual(
+            (run["final_hp"], run["final_gold"], run["final_potions"]), (60, 100, 1)
+        )
+        self.assertEqual(run["resource_snapshot"], "last_decision")
+        self.assertEqual(
+            report["profile_summaries"]["baseline"]["resource_snapshot_counts"],
+            {"last_decision": 1},
+        )
+
     @staticmethod
     def manifest(*, repetitions=1):
         return {

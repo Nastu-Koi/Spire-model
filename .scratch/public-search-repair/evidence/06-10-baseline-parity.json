@@ -1,0 +1,13 @@
+{
+  "baseline_commit": "099dc4fb5e32715504ae121b1fa4994eac330b3f",
+  "frames": 894,
+  "same_actions_and_all_root_scores": true,
+  "difference_count": 0,
+  "source_hashes": {
+    "public_search.py": "f9264ff25b38a093b01428f0d509dce2aaaa2160cd2114257396207419aac5d2",
+    "public_effects.py": "51dfd6db7f319c0b216b4dafa6e50cc71ff7d8fd773ecb9f93c005427e9e335f",
+    "public_future.py": "6db78931555e292f89f1de26a2faed84cff686485836205213c76c2cc8a929e2",
+    "public_rewards.py": "3734436bcdc1117e3706cab28ba34b2260227fc15e0899f175b36bcaa338e817",
+    "public_resources.py": "567a7f088a18cde50807f2bc4ce1b4448f176666f7a0b008081fb432cbfc46f7"
+  }
+}

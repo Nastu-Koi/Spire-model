@@ -411,7 +411,11 @@ def _source_hashes(engine_factory):
     result = {}
     for key, path in (
         ("planner_sha256", planner_path),
+        ("heuristics_sha256", Path(__file__).with_name("astar.py")),
         ("effects_sha256", Path(__file__).with_name("public_effects.py")),
+        ("resources_sha256", Path(__file__).with_name("public_resources.py")),
+        ("rewards_sha256", Path(__file__).with_name("public_rewards.py")),
+        ("future_sha256", Path(__file__).with_name("public_future.py")),
         ("generator_sha256", Path(__file__)),
         (
             "representation_sha256",
@@ -478,6 +482,11 @@ def generate(
     if not isinstance(planner_options, dict) or set(planner_options) - {
         "sampling_seed",
         "effect_profile",
+        "route_resources",
+        "dynamic_legality",
+        "draw_samples",
+        "future_value",
+        "deck_rewards",
     }:
         raise ValueError("Unsupported public planner option")
     if planner_factory is None:
@@ -644,8 +653,23 @@ def main():
     parser.add_argument(
         "--abandon", action=argparse.BooleanOptionalAction, default=True
     )
-    args = parser.parse_args()
-    summary = generate(**vars(args))
+    parser.add_argument("--route-resources", action="store_true")
+    parser.add_argument("--deck-rewards", action="store_true")
+    parser.add_argument("--dynamic-legality", action="store_true")
+    parser.add_argument("--draw-samples", type=int, default=0)
+    parser.add_argument("--future-value", action="store_true")
+    args = vars(parser.parse_args())
+    args["planner_options"] = {
+        key: args.pop(key)
+        for key in (
+            "route_resources",
+            "deck_rewards",
+            "dynamic_legality",
+            "draw_samples",
+            "future_value",
+        )
+    }
+    summary = generate(**args)
     print(json.dumps(summary, ensure_ascii=False, allow_nan=False))
     raise SystemExit(0 if summary["status"] == "complete" else 2)
 
