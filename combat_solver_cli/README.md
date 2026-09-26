@@ -1,5 +1,7 @@
 # combat_solver_cli
 
+仅依据公开信息生成启动示范的新入口为 `python -m combat_solver_cli.public_generate`，使用规则束搜索，不依赖 CombatSolver。范围、运行命令、计时与当前限制见 [公开信息搜索](../docs/PUBLIC_SEARCH.md)。下文原有 A*/MCTS 仍是固定 seed 搜索，不能作为公开信息教师。
+
 独立的 CombatSolver / sts2-cli 接入模块：局内调用本机 CombatSolver 0.44.0，局外使用有预算的加权 A* 或 MCTS，目标是生成真实 A0-A10 最终 Boss 胜利轨迹；当前批量入口默认先搜索 A0。复用现有 Bootstrap 训练结构与 sts2-cli 决策协议；Steam 录制路径保持独立。它是离线 headless 工具，不是安装进 Steam 的 UI Mod；Steam 录制仍由现有 RunRecorder 负责。
 
 ## 本地依赖与配置
@@ -129,9 +131,9 @@ python -m model --device cuda bootstrap \
 
 ## 同 seed 完整通关性能实测
 
-固定 seed `7E4A91CDAE1225F0` 的 Ironclad A0 已在四线配置中生成 545 步完整胜利轨迹，并通过全新原生进程重放；该次从头运行到验收及其他线停止共 424.68 秒。单次结果不代表稳定平均耗时或相对旧实现的加速倍数。代码修改、失败对照、剩余限制和复现命令见 [完整通关分析](../docs/ASTAR_COMPLETION_ANALYSIS.md)。
+固定 seed `7E4A91CDAE1225F0` 的 Ironclad A0 已在四线配置中生成 545 步完整胜利轨迹，并通过全新原生进程重放；该次从头运行到验收及其他线停止共 424.68 秒。单次结果不代表稳定平均耗时或相对旧实现的加速倍数。代码修改、失败对照、剩余限制和复现命令见 [完整通关分析](../docs/archive/search/ASTAR_COMPLETION_ANALYSIS.md)。
 
-早期路线调度与 Boss 预算的具体行为、验证记录见 [路线多样性与 Boss 预算](../docs/EARLY_ROUTE_DIVERSITY.md)。此前 424.68 秒通关记录属于修改前配置，不能当作新配置的性能结果。
+早期路线调度与 Boss 预算的具体行为、验证记录见 [路线多样性与 Boss 预算](../docs/archive/search/EARLY_ROUTE_DIVERSITY.md)。此前 424.68 秒通关记录属于修改前配置，不能当作新配置的性能结果。
 
 ## 蒙特卡洛树搜索
 
@@ -148,7 +150,7 @@ python -m combat_solver_cli search --algorithm mcts \
 
 MCTS 检查点是 `tree.json`，包含整棵树、访问次数、累计价值、精确动作历史和随机数状态。使用 `--algorithm mcts --resume 原输出目录/tree.json` 恢复，保持角色、seed、难度、模拟深度和线数等配置一致，输出到新目录。创建 `STOP` 文件可保存后停止。
 
-算法说明和五个新 seed 的 MCTS 实测见 [MCTS 对比](../docs/MCTS_COMPARISON.md)。
+算法说明和五个新 seed 的 MCTS 实测见 [MCTS 对比](../docs/archive/search/MCTS_COMPARISON.md)。
 
 ### MCTS 局部修正与风险探索（v2）
 
