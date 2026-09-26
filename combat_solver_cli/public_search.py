@@ -7,6 +7,8 @@ Every native root candidate is scored, including actions outside model coverage.
 """
 
 import math
+import time
+from collections import deque
 
 from model.protocol import ProtocolError
 from model.representation import clean_entity, clean_public
@@ -30,6 +32,10 @@ def public_view(frame):
     }
 
 
+class _BudgetStop(Exception):
+    """Stop an unfinished optional future sample at a cooperative boundary."""
+
+
 class PublicPlanner:
     """Replan after every real action; only the first native action is executed."""
 
@@ -46,6 +52,9 @@ class PublicPlanner:
         dynamic_legality=False,
         draw_samples=0,
         future_value=False,
+        adaptive_budget=False,
+        decision_node_limit=512,
+        decision_time_ms=50,
     ):
         if type(depth) is not int or not 1 <= depth <= 12:
             raise ValueError("depth must be an integer from 1 to 12")
@@ -67,6 +76,19 @@ class PublicPlanner:
             raise ValueError("draw_samples must be an integer from 0 to 8")
         if type(future_value) is not bool:
             raise ValueError("future_value must be a boolean")
+        if type(adaptive_budget) is not bool:
+            raise ValueError("adaptive_budget must be a boolean")
+        if (
+            type(decision_node_limit) is not int
+            or not 1 <= decision_node_limit <= 100000
+        ):
+            raise ValueError("decision_node_limit must be an integer from 1 to 100000")
+        if (
+            type(decision_time_ms) not in {int, float}
+            or not math.isfinite(decision_time_ms)
+            or not 0 < decision_time_ms <= 10000
+        ):
+            raise ValueError("decision_time_ms must be a finite number from 0 to 10000")
         self.route_resources = route_resources
         self.deck_rewards = deck_rewards
         self.dynamic_legality = dynamic_legality
@@ -76,8 +98,12 @@ class PublicPlanner:
         self.effect_profile = effect_profile
         self.depth = depth
         self.beam_width = beam_width
+        self.adaptive_budget = adaptive_budget
+        self.decision_node_limit = decision_node_limit
+        self.decision_time_ms = decision_time_ms
 
     def choose(self, frame):
+        started = time.monotonic() if self.adaptive_budget else None
         view = public_view(frame)
         candidates = view["legal"]["candidates"]
         if not candidates:
@@ -85,7 +111,13 @@ class PublicPlanner:
         if len({c["candidate_ref"] for c in candidates}) != len(candidates):
             raise ProtocolError("Ambiguous candidate references")
         if view["public"]["phase"] == "combat":
-            scores, expanded, leaves = self._combat(view)
+            if self.adaptive_budget:
+                scores, expanded, leaves, budget_details = self._combat(
+                    view, started=started
+                )
+            else:
+                scores, expanded, leaves = self._combat(view)
+                budget_details = {"adaptive_budget": False, "budget_tier": "disabled"}
         else:
             resources = ResourcePolicy(view) if self.route_resources else None
             rewards = RewardPolicy(view) if self.deck_rewards else None
@@ -96,10 +128,39 @@ class PublicPlanner:
                     score = resources.score(c) if resources else None
                 scores.append(self._outside(view, c) if score is None else score)
             expanded, leaves = 0, len(candidates)
+            budget_details = {
+                "adaptive_budget": self.adaptive_budget,
+                "budget_tier": "outside_combat",
+            }
+            if started is not None:
+                elapsed = time.monotonic() - started
+                budget_details.update(
+                    base_root_count=len(candidates),
+                    base_candidate_scores=[
+                        {"candidate_ref": c["candidate_ref"], "score": s}
+                        for c, s in zip(candidates, scores)
+                    ],
+                    selected_depth=0,
+                    selected_beam_width=0,
+                    budget_reason="outside_combat",
+                    extra_evaluations=0,
+                    extra_evaluations_by_root=[0] * len(candidates),
+                    decision_node_limit=self.decision_node_limit,
+                    decision_time_ms=self.decision_time_ms,
+                    extra_node_limit=0,
+                    base_elapsed_seconds=elapsed,
+                    unfinished_future_samples=0,
+                    unfinished_future_seconds=0.0,
+                    elapsed_seconds=elapsed,
+                    budget_exhausted=None,
+                    budget_overrun_seconds=max(
+                        0.0, elapsed - self.decision_time_ms / 1000
+                    ),
+                )
         if not all(math.isfinite(s) for s in scores):
             raise ProtocolError("Non-finite public search score")
         best = max(range(len(candidates)), key=lambda i: scores[i])
-        return frame["legal"]["candidates"][best], {
+        diagnostics = {
             "planner": self.version,
             "evaluation": "approximate_rules_not_win_probability",
             "depth": self.depth,
@@ -143,6 +204,8 @@ class PublicPlanner:
                 for c, s in zip(candidates, scores)
             ],
         }
+        diagnostics.update(budget_details)
+        return frame["legal"]["candidates"][best], diagnostics
 
     def abandon_reason(self, frame):
         view = public_view(frame)
@@ -181,7 +244,7 @@ class PublicPlanner:
         # Unknown events retain the existing neutral prior and native legality.
         return float(score)
 
-    def _combat(self, frame):
+    def _combat(self, frame, *, started=None):
         entities = frame["public"]["entities"]
         refs = {e["ref"]: e for e in entities if e.get("ref")}
         model = CombatModel(
@@ -363,6 +426,197 @@ class PublicPlanner:
 
         base = value(root)
         scores, expanded, leaves = [], 0, 0
+        if started is not None:
+            states = []
+            for first in candidates:
+                state, score, reason = transition(root, first)
+                if reason == "unavailable":
+                    scores.append(base - 1)
+                    leaves += 1
+                    states.append(None)
+                    continue
+                scores.append(score)
+                expanded += 1
+                leaves += reason is not None
+                states.append(state)
+            base_elapsed = time.monotonic() - started
+            base_scores = [
+                {"candidate_ref": c["candidate_ref"], "score": s}
+                for c, s in zip(candidates, scores)
+            ]
+            live_threat = sum(
+                root.incoming.get(r, 0) for r, (hp, _) in root.enemies.items() if hp > 0
+            )
+            hp_ratio = root.hp / max(1, number(player(frame).get("max_hp"), root.hp))
+            ordered = sorted(scores, reverse=True)
+            close = len(ordered) > 1 and ordered[0] - ordered[1] <= 3
+            if live_threat >= root.hp * 0.5 or hp_ratio <= 0.3:
+                tier, why = "danger", "visible_hp_or_incoming_pressure"
+            elif close:
+                tier, why = "close", "close_base_scores"
+            elif len(candidates) >= 5:
+                tier, why = "wide", "many_legal_candidates"
+            else:
+                tier, why = "simple", "clear_base_score_and_low_pressure"
+            selected_depth = min(self.depth, 2) if tier == "simple" else self.depth
+            selected_width = (
+                min(self.beam_width, 4) if tier == "simple" else self.beam_width
+            )
+            node_limit = (
+                min(self.decision_node_limit, max(1, len(candidates) // 2))
+                if tier == "simple"
+                else self.decision_node_limit
+            )
+
+            def steps(index, state):
+                beam = [] if state is None else [state]
+                for _ in range(1, selected_depth):
+                    children = []
+                    for parent in beam:
+                        branch_candidates = (
+                            self._hypothetical_candidates(parent, model, candidates)
+                            if self.dynamic_legality
+                            else candidates
+                        )
+                        for candidate in branch_candidates:
+                            child, score, reason = yield (
+                                "transition",
+                                parent,
+                                candidate,
+                            )
+                            if reason == "unavailable":
+                                continue
+                            scores[index] = max(scores[index], score)
+                            if child is not None:
+                                children.append((score, child))
+                    if not children:
+                        break
+                    children.sort(key=lambda pair: pair[0], reverse=True)
+                    beam = [child for _, child in children[:selected_width]]
+                if future is not None:
+                    sampled_states = [state] if state is not None else []
+                    if beam:
+                        best_leaf = max(beam, key=value)
+                        if best_leaf is not state:
+                            sampled_states.append(best_leaf)
+                    if candidates[index]["verb"] == "END_TURN":
+                        sampled_states = [root]
+                    for leaf in sampled_states:
+                        threat = sum(
+                            leaf.incoming.get(r, 0)
+                            for r, (hp, _) in leaf.enemies.items()
+                            if hp > 0
+                        )
+                        if leaf.hp - max(0, threat - leaf.block) > 0:
+                            estimate = yield ("future", leaf)
+                            scores[index] = max(
+                                scores[index], value(leaf) + 1.2 * estimate
+                            )
+
+            # One pending unit per root makes the extra work round-robin. Every
+            # native root already received its required base score above.
+            queue = deque()
+            for i, state in enumerate(states):
+                task = steps(i, state)
+                try:
+                    queue.append((i, task, next(task)))
+                except StopIteration:
+                    pass
+            extra = 0
+            extra_by_root = [0] * len(candidates)
+            unfinished_future_samples = 0
+            unfinished_future_seconds = 0.0
+            deadline = started + self.decision_time_ms / 1000
+            exhausted = None
+            while queue:
+                if time.monotonic() >= deadline:
+                    exhausted = "time"
+                    break
+                if extra >= node_limit:
+                    exhausted = "nodes"
+                    break
+                i, task, unit = queue.popleft()
+                if unit[0] == "transition":
+                    result = transition(unit[1], unit[2])
+                    extra += 1
+                    extra_by_root[i] += 1
+                    if result[2] != "unavailable":
+                        expanded += 1
+                        leaves += result[2] is not None
+                else:
+                    assert future is not None
+                    sample_started = time.monotonic()
+                    sample_cap = max(1, (node_limit - extra) // (len(queue) + 1))
+                    sample_start_nodes = extra
+                    extra += 1
+                    extra_by_root[i] += 1
+                    original_transition = model.transition
+
+                    def bounded_transition(
+                        state,
+                        candidate,
+                        *,
+                        start_nodes=sample_start_nodes,
+                        cap=sample_cap,
+                        root_index=i,
+                        delegate=original_transition,
+                    ):
+                        nonlocal extra, exhausted
+                        if time.monotonic() >= deadline:
+                            exhausted = "time"
+                            raise _BudgetStop
+                        if extra >= node_limit:
+                            exhausted = "nodes"
+                            raise _BudgetStop
+                        if extra - start_nodes >= cap:
+                            raise _BudgetStop
+                        extra += 1
+                        extra_by_root[root_index] += 1
+                        return delegate(state, candidate)
+
+                    model.transition = bounded_transition
+                    try:
+                        result = future.estimate(unit[1])
+                    except _BudgetStop:
+                        unfinished_future_samples += 1
+                        unfinished_future_seconds += time.monotonic() - sample_started
+                        if exhausted is not None:
+                            break
+                        continue
+                    finally:
+                        model.transition = original_transition
+                try:
+                    queue.append((i, task, task.send(result)))
+                except StopIteration:
+                    pass
+            elapsed = time.monotonic() - started
+            return (
+                scores,
+                expanded,
+                leaves,
+                {
+                    "adaptive_budget": True,
+                    "base_root_count": len(candidates),
+                    "base_candidate_scores": base_scores,
+                    "base_elapsed_seconds": base_elapsed,
+                    "budget_tier": tier,
+                    "selected_depth": selected_depth,
+                    "selected_beam_width": selected_width,
+                    "budget_reason": why,
+                    "extra_evaluations": extra,
+                    "extra_evaluations_by_root": extra_by_root,
+                    "unfinished_future_samples": unfinished_future_samples,
+                    "unfinished_future_seconds": unfinished_future_seconds,
+                    "decision_node_limit": self.decision_node_limit,
+                    "decision_time_ms": self.decision_time_ms,
+                    "extra_node_limit": node_limit,
+                    "elapsed_seconds": elapsed,
+                    "budget_exhausted": exhausted,
+                    "budget_overrun_seconds": max(
+                        0.0, elapsed - self.decision_time_ms / 1000
+                    ),
+                },
+            )
         for first in candidates:
             state, score, reason = transition(root, first)
             if reason == "unavailable":

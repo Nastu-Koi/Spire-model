@@ -1,0 +1,74 @@
+{
+  "fixed_baseline_commit": "dfcff31335da9908e1f378b762a8bc9c2a4051f6",
+  "fixed_parity_frames": 894,
+  "fixed_parity_equal": true,
+  "fixed_parity_sha256": "facebd02c2bd61e796a447db0420fdfd23f33b28f36e3757392c306b3ea9f424",
+  "cross_profile": [
+    {
+      "seed": "BD1D31C2468C7C1F",
+      "repetition": 1,
+      "first_difference": null
+    },
+    {
+      "seed": "BD1D31C2468C7C1F",
+      "repetition": 2,
+      "first_difference": null
+    },
+    {
+      "seed": "5ADF5172BEF3142B",
+      "repetition": 1,
+      "first_difference": {
+        "step": 30,
+        "fields": [
+          "action"
+        ]
+      }
+    },
+    {
+      "seed": "5ADF5172BEF3142B",
+      "repetition": 2,
+      "first_difference": {
+        "step": 30,
+        "fields": [
+          "action"
+        ]
+      }
+    },
+    {
+      "seed": "D011001234ABCDEF",
+      "repetition": 1,
+      "first_difference": null
+    },
+    {
+      "seed": "D011001234ABCDEF",
+      "repetition": 2,
+      "first_difference": null
+    },
+    {
+      "seed": "D011001234ABCDE0",
+      "repetition": 1,
+      "first_difference": {
+        "step": 76,
+        "fields": [
+          "action"
+        ]
+      }
+    },
+    {
+      "seed": "D011001234ABCDE0",
+      "repetition": 2,
+      "first_difference": {
+        "step": 76,
+        "fields": [
+          "action"
+        ]
+      }
+    }
+  ],
+  "report_sha256": "24a967f464c7ad9612fdce48f0d8f0153f87d53e5c18bfc743eddedb1e2b911b",
+  "format_only_after_evaluation": {
+    "ast_equal": true,
+    "before_sha256": "49f0a949f068a006a9d6bb934b57200d31b16b59498fc7a85b9d435782a6e420",
+    "after_sha256": "078577d5e46e7d8494bfd50fe7cbf85805c4124ca2ca273dfafed514eb3fb5f3"
+  }
+}

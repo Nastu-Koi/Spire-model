@@ -143,19 +143,18 @@ def play_attempt(
         planning_started = time.monotonic()
         try:
             reason = planner.abandon_reason(visible) if abandon else None
-            if not reason:
-                candidate, detail = planner.choose(visible)
+            if reason:
+                return {
+                    "status": "abandoned",
+                    "reason": reason,
+                    "steps": len(records),
+                    "frame": frame,
+                    "ledger": ledger.state_dict(),
+                }
+            candidate, detail = planner.choose(visible)
         finally:
             if progress is not None:
                 progress["planning_seconds"] += time.monotonic() - planning_started
-        if reason:
-            return {
-                "status": "abandoned",
-                "reason": reason,
-                "steps": len(records),
-                "frame": frame,
-                "ledger": ledger.state_dict(),
-            }
         matches = [
             item
             for item in frame["legal"]["candidates"]
@@ -164,6 +163,14 @@ def play_attempt(
         if len(matches) != 1:
             raise ReplayMismatch("Public planner chose a non-legal candidate")
         chosen = matches[0]
+        if progress is not None:
+            progress["pending_decision"] = {
+                "action": action_semantics(chosen),
+                "diagnostics": detail,
+            }
+        _check_deadline(deadline, stop_event)
+        if progress is not None:
+            progress.pop("pending_decision", None)
         records.append(
             {"before_hash": state_key(frame), "action": action_semantics(chosen)}
         )
@@ -371,7 +378,9 @@ def run_attempt(
             "error_stage": stage,
             "reason": reason,
         }
-    outcome["wall_seconds"] = time.monotonic() - started
+    finished = time.monotonic()
+    outcome["wall_seconds"] = finished - started
+    outcome["budget_overrun_seconds"] = max(0.0, finished - deadline)
     outcome["planning_seconds"] = progress.get("planning_seconds", 0.0)
     outcome["verification_seconds"] = verification_seconds
     if attempt_dir is not None:
@@ -487,6 +496,9 @@ def generate(
         "draw_samples",
         "future_value",
         "deck_rewards",
+        "adaptive_budget",
+        "decision_node_limit",
+        "decision_time_ms",
     }:
         raise ValueError("Unsupported public planner option")
     if planner_factory is None:
@@ -550,6 +562,12 @@ def generate(
             "outcome_counts": outcome_counts,
             "source_hashes": hashes,
             "wall_seconds": elapsed,
+            "budget_overrun_seconds": max(0.0, elapsed - max_seconds),
+            "unfinished_attempt_seconds": sum(
+                result["wall_seconds"]
+                for result in results
+                if result["status"] in {"limit", "error"}
+            ),
             "wall_seconds_per_verified_victory": elapsed / len(accepted)
             if accepted
             else None,
@@ -658,6 +676,9 @@ def main():
     parser.add_argument("--dynamic-legality", action="store_true")
     parser.add_argument("--draw-samples", type=int, default=0)
     parser.add_argument("--future-value", action="store_true")
+    parser.add_argument("--adaptive-budget", action="store_true")
+    parser.add_argument("--decision-node-limit", type=int, default=512)
+    parser.add_argument("--decision-time-ms", type=float, default=50)
     args = vars(parser.parse_args())
     args["planner_options"] = {
         key: args.pop(key)
@@ -667,6 +688,9 @@ def main():
             "dynamic_legality",
             "draw_samples",
             "future_value",
+            "adaptive_budget",
+            "decision_node_limit",
+            "decision_time_ms",
         )
     }
     summary = generate(**args)

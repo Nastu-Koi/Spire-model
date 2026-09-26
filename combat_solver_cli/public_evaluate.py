@@ -47,8 +47,13 @@ def _manifest(manifest):
         "future_value",
         "deck_rewards",
         "route_resources",
+        "adaptive_budget",
     }
-    optional = optional_bools | {"draw_samples"}
+    optional = optional_bools | {
+        "draw_samples",
+        "decision_node_limit",
+        "decision_time_ms",
+    }
     for profile in profiles:
         if (
             not isinstance(profile, dict)
@@ -67,6 +72,21 @@ def _manifest(manifest):
             or any(
                 type(profile[key]) is not bool
                 for key in optional_bools & profile.keys()
+            )
+            or (
+                "decision_node_limit" in profile
+                and (
+                    type(profile["decision_node_limit"]) is not int
+                    or not 1 <= profile["decision_node_limit"] <= 100000
+                )
+            )
+            or (
+                "decision_time_ms" in profile
+                and (
+                    type(profile["decision_time_ms"]) not in (int, float)
+                    or not math.isfinite(profile["decision_time_ms"])
+                    or not 0 < profile["decision_time_ms"] <= 10000
+                )
             )
             or (
                 "draw_samples" in profile
@@ -437,10 +457,71 @@ def _trajectory_metrics(decisions, terminal, result):
         ),
         "resource_actions": resource_actions,
         "decisions": len(decisions),
+        "search_budget": _search_budget(decisions, result),
         "planning_seconds": result.get("outcome", {}).get("planning_seconds", 0.0),
         "verification_seconds": result.get("outcome", {}).get(
             "verification_seconds", 0.0
         ),
+    }
+
+
+def _search_budget(decisions, result):
+    details = [row.get("diagnostics", {}) for row in decisions]
+    pending = result.get("prefix", {}).get("pending_decision")
+    if pending:
+        details.append(pending["diagnostics"])
+    adaptive = [detail for detail in details if detail.get("adaptive_budget")]
+    return {
+        "tier_counts": {
+            tier: sum(detail.get("budget_tier") == tier for detail in adaptive)
+            for tier in sorted({detail["budget_tier"] for detail in adaptive})
+        },
+        "exhausted_counts": {
+            reason: sum(detail.get("budget_exhausted") == reason for detail in adaptive)
+            for reason in sorted(
+                {
+                    detail["budget_exhausted"]
+                    for detail in adaptive
+                    if detail.get("budget_exhausted")
+                }
+            )
+        },
+        "unfinished_future_samples": sum(
+            detail.get("unfinished_future_samples", 0) for detail in adaptive
+        ),
+        "unfinished_future_seconds": sum(
+            detail.get("unfinished_future_seconds", 0.0) for detail in adaptive
+        ),
+        "base_roots": sum(detail.get("base_root_count", 0) for detail in adaptive),
+        "extra_evaluations": sum(
+            detail.get("extra_evaluations", 0) for detail in adaptive
+        ),
+        "overrun_seconds": sum(
+            detail.get("budget_overrun_seconds", 0.0) for detail in adaptive
+        ),
+    }
+
+
+def _sum_search_budgets(cases):
+    budgets = [case["search_budget"] for case in cases]
+    return {
+        **{
+            key: sum(budget[key] for budget in budgets)
+            for key in (
+                "base_roots",
+                "extra_evaluations",
+                "overrun_seconds",
+                "unfinished_future_samples",
+                "unfinished_future_seconds",
+            )
+        },
+        **{
+            key: {
+                name: sum(budget[key].get(name, 0) for budget in budgets)
+                for name in sorted({name for budget in budgets for name in budget[key]})
+            }
+            for key in ("tier_counts", "exhausted_counts")
+        },
     }
 
 
@@ -491,6 +572,11 @@ def _case_summary(cases):
         ),
         "combat_hp_missing_edges": sum(
             case["combat_hp_missing_edges"] for case in cases
+        ),
+        "search_budget": _sum_search_budgets(cases),
+        "budget_overrun_seconds": sum(case["budget_overrun_seconds"] for case in cases),
+        "unfinished_attempt_seconds": sum(
+            case["unfinished_attempt_seconds"] for case in cases
         ),
         "wall_seconds": wall_seconds,
         "wall_seconds_per_verified_victory": wall_seconds / wins if wins else None,
@@ -546,6 +632,9 @@ def evaluate(manifest, output, *, split, engine_factory=None, planner_factory=No
                                 "future_value",
                                 "deck_rewards",
                                 "route_resources",
+                                "adaptive_budget",
+                                "decision_node_limit",
+                                "decision_time_ms",
                             )
                             if key in profile
                         },
@@ -609,6 +698,10 @@ def evaluate(manifest, output, *, split, engine_factory=None, planner_factory=No
                             for row in effect_rows
                         ),
                         "wall_seconds": summary["wall_seconds"],
+                        "budget_overrun_seconds": summary["budget_overrun_seconds"],
+                        "unfinished_attempt_seconds": summary[
+                            "unfinished_attempt_seconds"
+                        ],
                     }
                 )
     counts = {

@@ -406,6 +406,90 @@ class PublicEvaluationTests(unittest.TestCase):
         self.assertTrue(all(type(r[2]) is int for r in received))
         self.assertEqual([r[3] for r in received], ["legacy"] * 2 + ["second_wind"] * 2)
 
+    def test_budget_report_includes_unexecuted_planning_and_failed_attempt_cost(self):
+        clock = [0.0]
+
+        class BudgetPlanner(FakePlanner):
+            def choose(self, frame):
+                clock[0] += 20
+                return frame["legal"]["candidates"][0], {
+                    "adaptive_budget": True,
+                    "budget_tier": "danger",
+                    "extra_evaluations": 3,
+                    "base_root_count": 1,
+                    "budget_exhausted": "time",
+                    "budget_overrun_seconds": 0.02,
+                }
+
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            patch(
+                "combat_solver_cli.public_generate.time.monotonic",
+                side_effect=lambda: clock[0],
+            ),
+        ):
+            report = evaluate(
+                self.manifest(),
+                Path(temp) / "evaluation",
+                split="dev",
+                engine_factory=lambda: FakeEngine(victory=False),
+                planner_factory=BudgetPlanner,
+            )
+        summary = report["profile_summaries"]["baseline"]
+        self.assertEqual(summary["decisions"], 0)
+        self.assertEqual(summary["planning_seconds"], 20)
+        self.assertEqual(summary["unfinished_attempt_seconds"], 20)
+        self.assertEqual(summary["budget_overrun_seconds"], 10)
+        self.assertEqual(summary["search_budget"]["tier_counts"], {"danger": 1})
+        self.assertEqual(summary["search_budget"]["extra_evaluations"], 3)
+        self.assertEqual(summary["search_budget"]["exhausted_counts"], {"time": 1})
+        self.assertEqual(summary["search_budget"]["overrun_seconds"], 0.02)
+
+    def test_adaptive_budget_is_strict_and_forwarded(self):
+        manifest = self.manifest()
+        manifest["profiles"][0].update(
+            adaptive_budget=True, decision_node_limit=32, decision_time_ms=1.5
+        )
+        received = []
+
+        class ConfigPlanner(FakePlanner):
+            def __init__(self, **options):
+                received.append(options)
+
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            patch("combat_solver_cli.public_search.PublicPlanner", ConfigPlanner),
+        ):
+            evaluate(
+                manifest,
+                Path(temp) / "evaluation",
+                split="dev",
+                engine_factory=lambda: FakeEngine(victory=False),
+            )
+        self.assertIs(received[0]["adaptive_budget"], True)
+        self.assertEqual(received[0]["decision_node_limit"], 32)
+        self.assertEqual(received[0]["decision_time_ms"], 1.5)
+        for field, value in (
+            ("adaptive_budget", 1),
+            ("decision_node_limit", True),
+            ("decision_node_limit", 0),
+            ("decision_node_limit", 100001),
+            ("decision_time_ms", True),
+            ("decision_time_ms", float("nan")),
+            ("decision_time_ms", 0),
+            ("decision_time_ms", 10001),
+        ):
+            with (
+                self.subTest(field=field, value=value),
+                tempfile.TemporaryDirectory() as temp,
+            ):
+                invalid = self.manifest()
+                invalid["profiles"][0][field] = value
+                output = Path(temp) / "evaluation"
+                with self.assertRaises(ValueError):
+                    evaluate(invalid, output, split="dev")
+                self.assertFalse(output.exists())
+
     def test_route_resources_is_optional_strict_boolean_and_forwarded(self):
         manifest = self.manifest()
         manifest["profiles"].append(
