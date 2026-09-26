@@ -113,10 +113,11 @@ class CombatModel:
         }
     )
 
-    def __init__(self, frame, effect_profile="potions"):
+    def __init__(self, frame, effect_profile="potions", dynamic_legality=False):
         if effect_profile not in self.profiles:
             raise ValueError("Unknown effect profile")
         self.profile = effect_profile
+        self.dynamic_legality = dynamic_legality
         self.strict = self.profiles.index(effect_profile) >= 3
         self.entities = frame["public"]["entities"]
         self.refs = {e["ref"]: e for e in self.entities if e.get("ref")}
@@ -214,7 +215,13 @@ class CombatModel:
         )
         if self.strict:
             supported = (
-                verb == "PLAY_CARD" and name in self.cards | {"SECOND_WIND", "SPITE"}
+                verb == "PLAY_CARD"
+                and name
+                in (
+                    self.cards
+                    | {"SECOND_WIND", "SPITE"}
+                    | ({"BLOODLETTING"} if self.dynamic_legality else set())
+                )
             ) or modeled_potion
             unsupported = (
                 self.unsupported_hooks
@@ -313,6 +320,8 @@ class CombatModel:
                         nxt.vulnerable[target] += stat(source, "VulnerablePower")
         if name in {"INFLAME", "SETUP_STRIKE"}:
             nxt.strength += stat(source, "StrengthPower")
+        if name == "BLOODLETTING" and verb == "PLAY_CARD" and self.dynamic_legality:
+            nxt.energy += max(0, stat(source, "Energy"))
         potion_reason = None
         if modeled_potion:
             if name == "STRENGTH_POTION":
@@ -345,6 +354,7 @@ class CombatModel:
             verb == "PLAY_CARD"
             and (
                 name in self.cards
+                or (name == "BLOODLETTING" and self.dynamic_legality)
                 or (name == "SECOND_WIND" and self.profile != "legacy")
                 or (
                     name == "SPITE"
@@ -365,6 +375,13 @@ class CombatModel:
             )
         coverage = "modeled" if self.strict and simple else "approximate"
         reason = None if simple else "opaque_or_reveal"
+        if (
+            self.strict
+            and self.dynamic_legality
+            and name == "BLOODLETTING"
+            and stat(source, "Energy") > 0
+        ):
+            coverage, reason = "approximate", "new_legality_requires_native_observation"
         if self.strict and name in {"ANGER", "RAMPAGE"}:
             coverage, reason = "approximate", "pile_change_unmodeled"
         return EffectPrediction(nxt, coverage, reason, damage, block)

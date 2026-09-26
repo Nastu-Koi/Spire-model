@@ -13,6 +13,9 @@ from model.representation import clean_entity, clean_public
 
 from .astar import card_value, player, preference
 from .public_effects import CombatModel, content, number, stat
+from .public_future import FutureSampler
+from .public_resources import ResourcePolicy
+from .public_rewards import RewardPolicy
 
 
 def public_view(frame):
@@ -30,10 +33,19 @@ def public_view(frame):
 class PublicPlanner:
     """Replan after every real action; only the first native action is executed."""
 
-    version = "public-rules-beam-v4"
+    version = "public-rules-beam-v5"
 
     def __init__(
-        self, depth=3, beam_width=16, sampling_seed=0, effect_profile="potions"
+        self,
+        depth=3,
+        beam_width=16,
+        sampling_seed=0,
+        effect_profile="potions",
+        route_resources=False,
+        deck_rewards=False,
+        dynamic_legality=False,
+        draw_samples=0,
+        future_value=False,
     ):
         if type(depth) is not int or not 1 <= depth <= 12:
             raise ValueError("depth must be an integer from 1 to 12")
@@ -45,6 +57,21 @@ class PublicPlanner:
             )
         if effect_profile not in CombatModel.profiles:
             raise ValueError("Unknown effect profile")
+        if type(route_resources) is not bool:
+            raise ValueError("route_resources must be a boolean")
+        if type(deck_rewards) is not bool:
+            raise ValueError("deck_rewards must be a boolean")
+        if type(dynamic_legality) is not bool:
+            raise ValueError("dynamic_legality must be a boolean")
+        if type(draw_samples) is not int or not 0 <= draw_samples <= 8:
+            raise ValueError("draw_samples must be an integer from 0 to 8")
+        if type(future_value) is not bool:
+            raise ValueError("future_value must be a boolean")
+        self.route_resources = route_resources
+        self.deck_rewards = deck_rewards
+        self.dynamic_legality = dynamic_legality
+        self.draw_samples = draw_samples
+        self.future_value = future_value
         self.sampling_seed = sampling_seed
         self.effect_profile = effect_profile
         self.depth = depth
@@ -60,7 +87,14 @@ class PublicPlanner:
         if view["public"]["phase"] == "combat":
             scores, expanded, leaves = self._combat(view)
         else:
-            scores = [self._outside(view, c) for c in candidates]
+            resources = ResourcePolicy(view) if self.route_resources else None
+            rewards = RewardPolicy(view) if self.deck_rewards else None
+            scores = []
+            for c in candidates:
+                score = rewards.score(c) if rewards else None
+                if score is None:
+                    score = resources.score(c) if resources else None
+                scores.append(self._outside(view, c) if score is None else score)
             expanded, leaves = 0, len(candidates)
         if not all(math.isfinite(s) for s in scores):
             raise ProtocolError("Non-finite public search score")
@@ -71,6 +105,36 @@ class PublicPlanner:
             "depth": self.depth,
             "sampling_seed": self.sampling_seed,
             "effect_profile": self.effect_profile,
+            "route_resources": self.route_resources,
+            "deck_rewards": self.deck_rewards,
+            "dynamic_legality": self.dynamic_legality,
+            "draw_samples": self.draw_samples,
+            "future_value": self.future_value,
+            "future_model": (
+                "one_turn_repeated_visible_intent" if self.draw_samples else "disabled"
+            ),
+            "future_boundaries": (
+                [
+                    "no_draw_replacement",
+                    "no_start_turn_hooks",
+                    "retained_or_ethereal_truncated",
+                    "star_or_changed_cost_not_played",
+                    "player_weak_or_frail_truncated",
+                ]
+                if self.draw_samples
+                else []
+            ),
+            "future_terms": (
+                [
+                    "strength",
+                    "effective_draw",
+                    "persistent_defense_prior",
+                    "retained_potions",
+                    "visible_survival",
+                ]
+                if self.future_value
+                else []
+            ),
             "beam_width": self.beam_width,
             "expanded": expanded,
             "boundary_leaves": leaves,
@@ -120,8 +184,17 @@ class PublicPlanner:
     def _combat(self, frame):
         entities = frame["public"]["entities"]
         refs = {e["ref"]: e for e in entities if e.get("ref")}
-        model = CombatModel(frame, effect_profile=self.effect_profile)
+        model = CombatModel(
+            frame,
+            effect_profile=self.effect_profile,
+            dynamic_legality=self.dynamic_legality,
+        )
         root, incoming = model.root, model.incoming
+        future = (
+            FutureSampler(model, self.sampling_seed, self.draw_samples)
+            if self.draw_samples
+            else None
+        )
         # A pure one-turn HP score can defend forever against scaling enemies.
         # Under visible pressure, value reducing the encounter's remaining HP
         # more highly. This is a rule prior, not knowledge of the next intent.
@@ -142,7 +215,7 @@ class PublicPlanner:
             )
             # Block only contributes when it prevents visible incoming damage.
             # Death risk dominates damage greed; this is not a calibrated value.
-            return (
+            result = (
                 (remaining_hp - root.hp) * 3
                 + dealt * damage_weight
                 + kills * 8
@@ -154,13 +227,42 @@ class PublicPlanner:
                 )
                 - (500 if remaining_hp <= 0 else 0)
                 - (
-                    4 * len(root.potions - state.potions)
+                    (6 if self.future_value else 4) * len(root.potions - state.potions)
                     if self.effect_profile == "potions"
                     else 0
                 )
             )
+            if (
+                self.future_value
+                and remaining_hp > 0
+                and not model.amount("player", "SETUP_STRIKE")
+                and not any(
+                    content(refs.get(r, {})) == "SETUP_STRIKE" for r in state.used
+                )
+            ):
+                attacks = sum(
+                    e.get("entity_type") == "card"
+                    and e.get("card_type", "").lower() == "attack"
+                    and e.get("zone") in {"hand", "draw_pile", "discard_pile"}
+                    for e in entities
+                )
+                result += max(0, state.strength - root.strength) * min(3, attacks) * 1.5
+            return result
 
         candidates = frame["legal"]["candidates"]
+
+        def future_draw_value(state, source, *, cost_paid):
+            draw = max(0, stat(source, "Cards", stat(source, "Draw")))
+            available = sum(
+                e.get("entity_type") == "card"
+                and e.get("zone") == "draw_pile"
+                and e.get("ref") not in state.hand | state.discard | state.exhaust
+                for e in entities
+            ) + len(state.discard - {source.get("ref")})
+            energy = state.energy - (
+                0 if cost_paid else max(0, number(source.get("cost"), 1))
+            )
+            return min(6, min(draw, available) * min(2, max(0, energy)))
 
         def transition(state, candidate):
             verb = candidate["verb"]
@@ -189,6 +291,12 @@ class PublicPlanner:
                 bonus += min(hand_attacks, max(0, stat(source, "Energy"))) * 5
                 if stat(source, "HpLoss") >= state.hp:
                     bonus = -1_000_000
+                if self.future_value and state.hp > threat - state.block:
+                    if content(source) == "METALLICIZE":
+                        bonus += min(8, max(0, stat(source, "Block")))
+                    elif content(source) == "BARRICADE":
+                        bonus += 5 if state.block > 0 else 2
+                    bonus += future_draw_value(state, source, cost_paid=False)
                 return (
                     None,
                     value(state) + bonus + preference(frame, candidate),
@@ -199,6 +307,11 @@ class PublicPlanner:
             source = refs.get(source_ref, {})
             damage, block = prediction.damage, prediction.block
             if prediction.reason is None:
+                return nxt, value(nxt), None
+            if (
+                self.dynamic_legality
+                and prediction.reason == "new_legality_requires_native_observation"
+            ):
                 return nxt, value(nxt), None
             # Do not treat an opaque action as a simulated no-op and keep
             # searching past it. Give it an explicit leaf estimate instead.
@@ -237,6 +350,12 @@ class PublicPlanner:
             bonus += min(3, max(0, stat(source, "WeakPower"))) * 2
             if stat(source, "Energy") > 0 and hand_attacks:
                 bonus += min(hand_attacks, stat(source, "Energy")) * 5
+            if self.future_value:
+                bonus += future_draw_value(nxt, source, cost_paid=True)
+                if content(source) == "METALLICIZE":
+                    bonus += min(8, max(0, stat(source, "Block")))
+                elif content(source) == "BARRICADE":
+                    bonus += 5 if nxt.block > 0 else 2
             # Opportunity estimate for the still-visible unused basic hand;
             # this does not invent cards revealed by a draw or other effects.
             potential = self._hand_potential(nxt, refs, candidates, incoming)
@@ -258,7 +377,12 @@ class PublicPlanner:
             for _ in range(1, self.depth):
                 children = []
                 for parent in beam:
-                    for candidate in candidates:
+                    branch_candidates = (
+                        self._hypothetical_candidates(parent, model, candidates)
+                        if self.dynamic_legality
+                        else candidates
+                    )
+                    for candidate in branch_candidates:
                         child, score, reason = transition(parent, candidate)
                         if reason == "unavailable":
                             continue
@@ -273,8 +397,99 @@ class PublicPlanner:
                 # hypothetical continuations. All root scores remain exported.
                 children.sort(key=lambda pair: pair[0], reverse=True)
                 beam = [child for _, child in children[: self.beam_width]]
+            if future is not None:
+                # Keep the immediate successor even if its current-turn value
+                # is low: growth can reverse that ordering next turn. At most
+                # one later beam leaf is sampled for each native root.
+                sampled_states = [state] if state is not None else []
+                if beam:
+                    best_leaf = max(beam, key=value)
+                    if best_leaf is not state:
+                        sampled_states.append(best_leaf)
+                if first["verb"] == "END_TURN":
+                    sampled_states = [root]
+                for leaf in sampled_states:
+                    if (
+                        leaf.hp
+                        - max(
+                            0,
+                            sum(
+                                leaf.incoming.get(r, 0)
+                                for r, (hp, _) in leaf.enemies.items()
+                                if hp > 0
+                            )
+                            - leaf.block,
+                        )
+                        > 0
+                    ):
+                        best = max(best, value(leaf) + 1.2 * future.estimate(leaf))
             scores.append(best)
         return scores, expanded, leaves
+
+    @staticmethod
+    def _hypothetical_candidates(state, model, roots):
+        """Generate modeled branch actions; these refs never leave the search."""
+        templates = {
+            (c.get("source_refs") or [None])[0]: []
+            for c in roots
+            if c["verb"] == "PLAY_CARD"
+        }
+        for c in roots:
+            if c["verb"] == "PLAY_CARD":
+                templates[(c.get("source_refs") or [None])[0]].append(c)
+        options = []
+        for ref in sorted(state.hand):
+            card = model.refs.get(ref, {})
+            if content(card) not in model.cards | {
+                "SECOND_WIND",
+                "SPITE",
+                "BLOODLETTING",
+            }:
+                continue
+            if card.get("enchantment") or card.get("affliction"):
+                continue
+            if number(card.get("star_cost"), -1) >= 0:
+                continue  # Star-resource legality is outside this state model.
+            if "cost" not in card:
+                continue
+            cost = number(card["cost"], -1)
+            if cost < 0 or (not card.get("x_cost") and cost > state.energy):
+                continue
+            if ref in templates:
+                options.extend(templates[ref])
+                continue
+            target_type = card.get("target_type")
+            if target_type == "AnyEnemy":
+                targets = [
+                    [enemy]
+                    for enemy, (hp, _) in sorted(state.enemies.items())
+                    if hp > 0
+                ]
+            elif target_type in {"Self", "AnyPlayer"}:
+                targets = [["player"]]
+            elif target_type in {"None", "AllEnemies"}:
+                targets = [[]]
+            else:
+                continue  # Unknown target constraints need a native observation.
+            for target_refs in targets:
+                options.append(
+                    {
+                        "candidate_ref": "hypothetical:"
+                        + ref
+                        + ":"
+                        + ",".join(target_refs),
+                        "verb": "PLAY_CARD",
+                        "source_refs": [ref],
+                        "target_refs": target_refs,
+                    }
+                )
+        options.extend(
+            c
+            for c in roots
+            if c["verb"] == "USE_POTION"
+            and (c.get("source_refs") or [None])[0] in state.potions
+        )
+        return options
 
     @staticmethod
     def _hand_potential(state, refs, candidates, incoming):

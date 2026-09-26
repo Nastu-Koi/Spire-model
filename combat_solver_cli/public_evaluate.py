@@ -41,13 +41,20 @@ def _manifest(manifest):
         raise ValueError("Manifest needs profiles")
     from .public_effects import CombatModel
 
+    required = {"name", "depth", "beam_width", "effect_profile"}
+    optional_bools = {
+        "dynamic_legality",
+        "future_value",
+        "deck_rewards",
+        "route_resources",
+    }
+    optional = optional_bools | {"draw_samples"}
     for profile in profiles:
-        if not isinstance(profile, dict) or set(profile) != {
-            "name",
-            "depth",
-            "beam_width",
-            "effect_profile",
-        }:
+        if (
+            not isinstance(profile, dict)
+            or not required <= set(profile)
+            or set(profile) - required - optional
+        ):
             raise ValueError(
                 "Each profile needs name, depth, beam_width, effect_profile"
             )
@@ -57,6 +64,17 @@ def _manifest(manifest):
             or type(profile["beam_width"]) is not int
             or not 1 <= profile["beam_width"] <= 256
             or profile["effect_profile"] not in CombatModel.profiles
+            or any(
+                type(profile[key]) is not bool
+                for key in optional_bools & profile.keys()
+            )
+            or (
+                "draw_samples" in profile
+                and (
+                    type(profile["draw_samples"]) is not int
+                    or not 0 <= profile["draw_samples"] <= 8
+                )
+            )
         ):
             raise ValueError("Invalid public planner profile")
     names = [profile.get("name") for profile in profiles]
@@ -188,11 +206,13 @@ def _delta(original, observed):
     return delta
 
 
-def _prediction(before, profile, original):
+def _prediction(before, profile, original, dynamic_legality=False):
     from .public_effects import CombatModel
 
     action = before["record"]["action"]
-    model = CombatModel(before["frame"], effect_profile=profile)
+    model = CombatModel(
+        before["frame"], effect_profile=profile, dynamic_legality=dynamic_legality
+    )
     prediction = model.predict(action).to_dict()
     state = prediction["state"]
     if state is None:
@@ -226,7 +246,7 @@ def _prediction_error(observed, predicted):
     return error
 
 
-def _effect_rows(decisions, profile, terminal=None):
+def _effect_rows(decisions, profile, terminal=None, dynamic_legality=False):
     """Net public observations across adjacent boundaries, not causal engine traces."""
     rows = []
     pairs = list(pairwise(decisions))
@@ -244,7 +264,9 @@ def _effect_rows(decisions, profile, terminal=None):
             continue
         delta = _delta(original, observed)
         try:
-            coverage, reason, predicted_delta = _prediction(before, profile, original)
+            coverage, reason, predicted_delta = _prediction(
+                before, profile, original, dynamic_legality
+            )
             prediction_exception = None
         except Exception as exc:  # noqa: BLE001 - preserve native evidence if model diagnostics fail
             coverage, reason, predicted_delta = "unknown", "prediction_exception", None
@@ -344,9 +366,53 @@ def _trajectory_metrics(decisions, terminal, result):
     prefix = result.get("prefix", {})
     ledger = prefix.get("last_ledger") or result.get("outcome", {}).get("ledger") or {}
     final_public = (terminal or {}).get("public") or {}
-    final = _player(final_public) or _player(
-        (prefix.get("last_decision_frame") or {}).get("public", {})
+    resource_snapshot = (
+        "terminal"
+        if (terminal or {}).get("boundary") == "terminal"
+        else "final_boundary"
     )
+    if not _player(final_public):
+        final_public = next(
+            (public for public in reversed(observations) if _player(public)),
+            (prefix.get("last_decision_frame") or {}).get("public", {}),
+        )
+        resource_snapshot = "last_decision" if _player(final_public) else "unavailable"
+    final = _player(final_public)
+    acts_reached = sorted(
+        {
+            act
+            for public in observations
+            if type(act := _player(public).get("act")) is int and act in (1, 2, 3)
+        }
+    )
+    resource_actions = dict.fromkeys(("rest", "upgrade", "buy", "remove"), 0)
+    for row in decisions:
+        public = row["frame"]["public"]
+        action = row["record"]["action"]
+        verb = action.get("verb")
+        sources = set(action.get("source_refs") or [])
+        source = next(
+            (
+                entity
+                for entity in public.get("entities", [])
+                if entity.get("ref") in sources
+            ),
+            {},
+        )
+        content = str(source.get("content_id") or "").upper()
+        if verb == "CHOOSE_REST_OPTION":
+            if "HEAL" in content or "REST" in content:
+                resource_actions["rest"] += 1
+            elif "SMITH" in content or "UPGRADE" in content:
+                resource_actions["upgrade"] += 1
+        elif verb == "BUY_ITEM":
+            resource_actions["buy"] += 1
+        elif verb == "SELECT_ONE":
+            operation = str(
+                (public.get("selection_context") or {}).get("operation") or ""
+            ).lower()
+            if "remove" in operation:
+                resource_actions["remove"] += 1
     return {
         "potions_used": sum(
             row["record"]["action"]["verb"] == "USE_POTION" for row in decisions
@@ -355,8 +421,79 @@ def _trajectory_metrics(decisions, terminal, result):
         "combat_hp_observed_edges": observed_edges,
         "combat_hp_missing_edges": missing_edges,
         "bosses": sorted(ledger.get("bosses", [])),
+        "acts_reached": acts_reached,
         "final_act": final.get("act"),
         "final_floor": final.get("floor"),
+        "resource_snapshot": resource_snapshot,
+        "final_hp": final.get("hp"),
+        "final_gold": final.get("gold"),
+        "final_potions": (
+            sum(
+                entity.get("entity_type") == "potion" and entity.get("zone") != "shop"
+                for entity in final_public.get("entities", [])
+            )
+            if final
+            else None
+        ),
+        "resource_actions": resource_actions,
+        "decisions": len(decisions),
+        "planning_seconds": result.get("outcome", {}).get("planning_seconds", 0.0),
+        "verification_seconds": result.get("outcome", {}).get(
+            "verification_seconds", 0.0
+        ),
+    }
+
+
+def _case_summary(cases):
+    count = len(cases)
+    wins = sum(case["status"] == "verified_victory" for case in cases)
+    wall_seconds = sum(case["wall_seconds"] for case in cases)
+    final_resources = {}
+    for label, key in (
+        ("hp", "final_hp"),
+        ("gold", "final_gold"),
+        ("potions", "final_potions"),
+    ):
+        values = [
+            case[key]
+            for case in cases
+            if type(case[key]) in (int, float) and math.isfinite(case[key])
+        ]
+        final_resources[label] = {
+            "observed": len(values),
+            "mean": sum(values) / len(values) if values else None,
+        }
+    return {
+        "cases": count,
+        "verified_victories": wins,
+        "complete_win_rate": wins / count if count else None,
+        "act_reach_counts": {
+            str(act): sum(act in case["acts_reached"] for case in cases)
+            for act in (1, 2, 3)
+        },
+        "boss_pass_counts": {
+            str(act): sum(act in case["bosses"] for case in cases) for act in (1, 2, 3)
+        },
+        "final_resources": final_resources,
+        "resource_snapshot_counts": {
+            source: sum(case["resource_snapshot"] == source for case in cases)
+            for source in sorted({case["resource_snapshot"] for case in cases})
+        },
+        "resource_actions": {
+            action: sum(case["resource_actions"][action] for case in cases)
+            for action in ("rest", "upgrade", "buy", "remove")
+        },
+        "decisions": sum(case["decisions"] for case in cases),
+        "planning_seconds": sum(case["planning_seconds"] for case in cases),
+        "verification_seconds": sum(case["verification_seconds"] for case in cases),
+        "combat_hp_net_loss_observed": sum(
+            case["combat_hp_net_loss_observed"] for case in cases
+        ),
+        "combat_hp_missing_edges": sum(
+            case["combat_hp_missing_edges"] for case in cases
+        ),
+        "wall_seconds": wall_seconds,
+        "wall_seconds_per_verified_victory": wall_seconds / wins if wins else None,
     }
 
 
@@ -401,6 +538,17 @@ def evaluate(manifest, output, *, split, engine_factory=None, planner_factory=No
                     planner_options={
                         "sampling_seed": sampling_seed,
                         "effect_profile": profile["effect_profile"],
+                        **{
+                            key: profile[key]
+                            for key in (
+                                "dynamic_legality",
+                                "draw_samples",
+                                "future_value",
+                                "deck_rewards",
+                                "route_resources",
+                            )
+                            if key in profile
+                        },
                     },
                     abandon=manifest["stop"]["abandon"],
                     seed_factory=lambda current=seed: current,
@@ -435,6 +583,7 @@ def evaluate(manifest, output, *, split, engine_factory=None, planner_factory=No
                     decisions,
                     profile["effect_profile"],
                     terminal,
+                    dynamic_legality=profile.get("dynamic_legality", False),
                 )
                 with (run_dir / "effects.jsonl").open("w") as stream:
                     for row in effect_rows:
@@ -483,8 +632,12 @@ def evaluate(manifest, output, *, split, engine_factory=None, planner_factory=No
             counts["budget_stop"] += 1
         if case["error_category"]:
             counts[case["error_category"]] += 1
-    boss_pass_counts = {
-        str(act): sum(act in case["bosses"] for case in cases) for act in (1, 2, 3)
+    case_summary = _case_summary(cases)
+    profile_summaries = {
+        profile["name"]: _case_summary(
+            [case for case in cases if case["profile"] == profile["name"]]
+        )
+        for profile in manifest["profiles"]
     }
     successes = counts.get("verified_victory", 0)
     source_hash_mismatch |= (
@@ -557,7 +710,19 @@ def evaluate(manifest, output, *, split, engine_factory=None, planner_factory=No
         ).hexdigest(),
         "cases": len(cases),
         "counts": counts,
-        "boss_pass_counts": boss_pass_counts,
+        "boss_pass_counts": case_summary["boss_pass_counts"],
+        "act_reach_counts": case_summary["act_reach_counts"],
+        "final_resources": case_summary["final_resources"],
+        "resource_actions": case_summary["resource_actions"],
+        "complete_win_rate": case_summary["complete_win_rate"],
+        "profile_summaries": profile_summaries,
+        "resource_scope": (
+            "Act reach and final resources come from public observations; boss passes "
+            "come from confirmed native milestones. Rest, upgrade, buy, and remove "
+            "count selected public actions. Missing final values are excluded from "
+            "means. These descriptive measures do not establish policy benefit; "
+            "compare complete win rate and total wall cost on fixed seeds."
+        ),
         "combat_hp_scope": (
             "Net player HP loss across adjacent public observations from combat "
             "on the same act/floor, including END_TURN; positive means loss. "
