@@ -12,8 +12,15 @@ Examples:
     # Replay a logged game up to step 42, then continue interactively
     python3 agent/sts2_bridge.py replay /tmp/game.jsonl --until 42 --port 9876
 """
-import json, subprocess, os, sys, threading, re, time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # --- Arg parsing ---
 COMPACT = "--compact" in sys.argv
@@ -27,44 +34,66 @@ if REPLAY_MODE:
     # replay <logfile> [--until STEP] [--port PORT]
     REPLAY_FILE = sys.argv[2] if len(sys.argv) > 2 else None
     for i, a in enumerate(sys.argv):
-        if a == "--until" and i + 1 < len(sys.argv): REPLAY_UNTIL = int(sys.argv[i + 1])
-        if a == "--port" and i + 1 < len(sys.argv): PORT = int(sys.argv[i + 1])
+        if a == "--until" and i + 1 < len(sys.argv):
+            REPLAY_UNTIL = int(sys.argv[i + 1])
+        if a == "--port" and i + 1 < len(sys.argv):
+            PORT = int(sys.argv[i + 1])
 else:
     filtered = [a for a in sys.argv[1:] if not a.startswith("--")]
     PORT = int(filtered[0]) if filtered else 9876
     for i, a in enumerate(sys.argv):
-        if a == "--log" and i + 1 < len(sys.argv): LOG_FILE = sys.argv[i + 1]
+        if a == "--log" and i + 1 < len(sys.argv):
+            LOG_FILE = sys.argv[i + 1]
 
 # --- JSON helpers ---
-_STRIP_KEYS = {"description", "after_upgrade", "enchantment", "enchantment_amount",
-               "affliction", "affliction_amount", "id", "draw_pile_count",
-               "discard_pile_count", "upgraded", "act_name"}
+_STRIP_KEYS = {
+    "description",
+    "after_upgrade",
+    "enchantment",
+    "enchantment_amount",
+    "affliction",
+    "affliction_amount",
+    "id",
+    "draw_pile_count",
+    "discard_pile_count",
+    "upgraded",
+    "act_name",
+}
 
 
 def compact_json(obj, depth=0):
     if isinstance(obj, dict):
         result = {}
         for k, v in obj.items():
-            if k in _STRIP_KEYS: continue
-            if k == "context" and obj.get("decision") == "combat_play": continue
+            if k in _STRIP_KEYS:
+                continue
+            if k == "context" and obj.get("decision") == "combat_play":
+                continue
             if k == "player" and obj.get("decision") == "combat_play":
                 if isinstance(v, dict):
                     potions = v.get("potions")
-                    if potions: result["potions"] = compact_json(potions, depth + 1)
+                    if potions:
+                        result["potions"] = compact_json(potions, depth + 1)
                 continue
             if k == "relics" and isinstance(v, list) and depth > 0:
-                result[k] = [compact_json(r, depth + 1) if isinstance(r, dict) else r for r in v]
+                result[k] = [
+                    compact_json(r, depth + 1) if isinstance(r, dict) else r for r in v
+                ]
                 continue
             result[k] = compact_json(v, depth + 1)
         return result
-    if isinstance(obj, list): return [compact_json(v, depth + 1) for v in obj]
+    if isinstance(obj, list):
+        return [compact_json(v, depth + 1) for v in obj]
     return obj
 
 
 def sanitize_json(obj):
-    if isinstance(obj, str): return re.sub(r'[\x00-\x1f\x7f]', '', obj)
-    if isinstance(obj, dict): return {k: sanitize_json(v) for k, v in obj.items()}
-    if isinstance(obj, list): return [sanitize_json(v) for v in obj]
+    if isinstance(obj, str):
+        return re.sub(r"[\x00-\x1f\x7f]", "", obj)
+    if isinstance(obj, dict):
+        return {k: sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_json(v) for v in obj]
     return obj
 
 
@@ -75,15 +104,28 @@ class Game:
         self.step = 0
         os.environ["STS2_GAME_DIR"] = os.path.expanduser(
             "~/Library/Application Support/Steam/steamapps/common/"
-            "Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64")
+            "Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64"
+        )
         self.proc = subprocess.Popen(
-            [os.path.expanduser("~/.dotnet-arm64/dotnet"), "run", "--no-build",
-             "--project", "Sts2Headless/Sts2Headless.csproj"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            [
+                os.path.expanduser("~/.dotnet-arm64/dotnet"),
+                "run",
+                "--no-build",
+                "--project",
+                "Sts2Headless/Sts2Headless.csproj",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        )
+
         def _forward_stderr():
             for line in self.proc.stderr:
                 print(f"[GAME] {line.rstrip()}", file=sys.stderr)
+
         threading.Thread(target=_forward_stderr, daemon=True).start()
         ready = self._read()
         print(f"Game ready: {ready}", file=sys.stderr)
@@ -108,6 +150,7 @@ class Game:
 # --- Logging ---
 _log_fh = None
 
+
 def log_entry(step, request, response):
     global _log_fh
     if _log_fh is None and LOG_FILE:
@@ -121,10 +164,16 @@ def log_entry(step, request, response):
 # --- Replay mode ---
 def do_replay():
     if not REPLAY_FILE:
-        print("Usage: sts2_bridge.py replay <logfile> [--until STEP] [--port PORT]", file=sys.stderr)
+        print(
+            "Usage: sts2_bridge.py replay <logfile> [--until STEP] [--port PORT]",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    print(f"Replaying {REPLAY_FILE} until step {REPLAY_UNTIL or 'end'}...", file=sys.stderr)
+    print(
+        f"Replaying {REPLAY_FILE} until step {REPLAY_UNTIL or 'end'}...",
+        file=sys.stderr,
+    )
     game = Game()
 
     with open(REPLAY_FILE) as f:
@@ -137,40 +186,52 @@ def do_replay():
         if REPLAY_UNTIL and step > REPLAY_UNTIL:
             break
         req = entry["req"]
-        step_num, resp = game.send(req)
+        _step_num, resp = game.send(req)
         resp = sanitize_json(resp)
         last_resp = resp
         replayed += 1
 
         dec = resp.get("decision", resp.get("type", "?"))
-        hp = resp.get("hp", resp.get("player", {}).get("hp", "")) if isinstance(resp, dict) else ""
-        print(f"  Step {step}: {req.get('cmd','?')}/{req.get('action','')} → {dec} (hp={hp})", file=sys.stderr)
+        hp = (
+            resp.get("hp", resp.get("player", {}).get("hp", ""))
+            if isinstance(resp, dict)
+            else ""
+        )
+        print(
+            f"  Step {step}: {req.get('cmd', '?')}/{req.get('action', '')} → {dec} (hp={hp})",
+            file=sys.stderr,
+        )
 
     print(f"\nReplayed {replayed} steps. Game is at step {replayed}.", file=sys.stderr)
     if last_resp:
         dec = last_resp.get("decision", last_resp.get("type", "?"))
         print(f"Current state: {dec}", file=sys.stderr)
         # Print the full current state for debugging
-        print(json.dumps(last_resp, ensure_ascii=False, indent=2)[:2000], file=sys.stderr)
+        print(
+            json.dumps(last_resp, ensure_ascii=False, indent=2)[:2000], file=sys.stderr
+        )
 
     # Now start interactive bridge from this point
     print(f"\nStarting interactive bridge on port {PORT}...", file=sys.stderr)
 
     class ReplayHandler(BaseHTTPRequestHandler):
         def do_POST(self):
-            data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-            step_num, result = game.send(data)
+            data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            _step_num, result = game.send(data)
             result = sanitize_json(result)
-            if COMPACT: result = compact_json(result)
+            if COMPACT:
+                result = compact_json(result)
             body = json.dumps(result, ensure_ascii=False).encode()
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', len(body))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(body))
             self.end_headers()
             self.wfile.write(body)
-        def log_message(self, fmt, *args): pass
 
-    HTTPServer(('127.0.0.1', PORT), ReplayHandler).serve_forever()
+        def log_message(self, fmt, *args):
+            pass
+
+    HTTPServer(("127.0.0.1", PORT), ReplayHandler).serve_forever()
 
 
 # --- Normal mode ---
@@ -183,7 +244,7 @@ game = Game()
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         step, result = game.send(data)
         raw_result = sanitize_json(result)
         # Log FULL response (before compact) for replay
@@ -192,8 +253,8 @@ class Handler(BaseHTTPRequestHandler):
         client_result = compact_json(raw_result) if COMPACT else raw_result
         body = json.dumps(client_result, ensure_ascii=False).encode()
         self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', len(body))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(body))
         self.end_headers()
         self.wfile.write(body)
 
@@ -204,4 +265,4 @@ class Handler(BaseHTTPRequestHandler):
 mode = "compact" if COMPACT else "full"
 log_info = f", logging to {LOG_FILE}" if LOG_FILE else ""
 print(f"STS2 bridge on port {PORT} (mode={mode}{log_info})", file=sys.stderr)
-HTTPServer(('127.0.0.1', PORT), Handler).serve_forever()
+HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

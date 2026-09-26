@@ -7,7 +7,7 @@ Log files are stored in <project_root>/logs/ with auto-cleanup of old files.
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(ROOT, "logs")

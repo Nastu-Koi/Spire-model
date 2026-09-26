@@ -1,9 +1,9 @@
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from combat_solver_cli.client import configuration, environment, ROOT
+from combat_solver_cli.client import ROOT, configuration, environment
 
 if __name__ == "__main__":
     config = configuration(sys.argv[1])

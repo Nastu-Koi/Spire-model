@@ -1,13 +1,14 @@
 """Atomic directory checkpoints with model, optimizer, and RNG state."""
-from dataclasses import asdict
+
 import ctypes
 import json
 import os
-from pathlib import Path
 import random
 import shutil
 import sys
 import uuid
+from dataclasses import asdict
+from pathlib import Path
 
 import torch
 
@@ -16,26 +17,50 @@ from .model import PolicyValue
 from .representation import Vocabulary
 
 
-
-def save_checkpoint(path, model, vocabulary, optimizer=None, scheduler=None, *, training=None, progress=None, overwrite=False):
+def save_checkpoint(
+    path,
+    model,
+    vocabulary,
+    optimizer=None,
+    scheduler=None,
+    *,
+    training=None,
+    progress=None,
+    overwrite=False,
+):
     path = Path(path)
     if path.exists() and not overwrite:
-        raise FileExistsError("Use a new checkpoint directory; existing checkpoints are immutable")
+        raise FileExistsError(
+            "Use a new checkpoint directory; existing checkpoints are immutable"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     stage = path.with_name(path.name + ".staging-" + uuid.uuid4().hex)
     stage.mkdir()
     try:
-        manifest = {"format": 2, "model": asdict(model.config), "vocabulary": vocabulary.symbols,
-                    "training": asdict(training or TrainConfig()), "progress": progress or {},
-                    "torch_version": str(torch.__version__)}
+        manifest = {
+            "format": 2,
+            "model": asdict(model.config),
+            "vocabulary": vocabulary.symbols,
+            "training": asdict(training or TrainConfig()),
+            "progress": progress or {},
+            "torch_version": str(torch.__version__),
+        }
         torch.save(model.state_dict(), stage / "weights.pt")
         manifest["weights"] = ["weights.pt"]
         if optimizer:
             torch.save(optimizer.state_dict(), stage / "optimizer.pt")
             manifest["optimizer"] = "optimizer.pt"
-        torch.save({"torch": torch.get_rng_state(), "python": random.getstate(),
-                    "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
-                    "scheduler": scheduler.state_dict() if scheduler else None}, stage / "runtime.pt")
+        torch.save(
+            {
+                "torch": torch.get_rng_state(),
+                "python": random.getstate(),
+                "cuda": torch.cuda.get_rng_state_all()
+                if torch.cuda.is_available()
+                else [],
+                "scheduler": scheduler.state_dict() if scheduler else None,
+            },
+            stage / "runtime.pt",
+        )
         (stage / "manifest.json").write_text(json.dumps(manifest, indent=2))
         if path.exists():
             # Linux renameat2 exchanges two directories atomically: readers always
@@ -44,10 +69,18 @@ def save_checkpoint(path, model, vocabulary, optimizer=None, scheduler=None, *, 
             if sys.platform == "darwin":
                 exchange = libc.renamex_np
                 exchange.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-                result = exchange(os.fsencode(stage), os.fsencode(path), 2)  # RENAME_SWAP
+                result = exchange(
+                    os.fsencode(stage), os.fsencode(path), 2
+                )  # RENAME_SWAP
             else:
                 exchange = libc.renameat2
-                exchange.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+                exchange.argtypes = [
+                    ctypes.c_int,
+                    ctypes.c_char_p,
+                    ctypes.c_int,
+                    ctypes.c_char_p,
+                    ctypes.c_uint,
+                ]
                 result = exchange(-100, os.fsencode(stage), -100, os.fsencode(path), 2)
             if result != 0:
                 code = ctypes.get_errno()
@@ -63,8 +96,13 @@ def save_checkpoint(path, model, vocabulary, optimizer=None, scheduler=None, *, 
 def load_model(path, device="cpu"):
     path = Path(path)
     manifest = json.loads((path / "manifest.json").read_text())
-    if manifest.get("format") != 2 or manifest.get("model", {}).get("architecture_version") != 2:
-        raise ValueError("Checkpoint requires architecture v2 (Full Attention/SwiGLU); retrain old hybrid checkpoints")
+    if (
+        manifest.get("format") != 2
+        or manifest.get("model", {}).get("architecture_version") != 2
+    ):
+        raise ValueError(
+            "Checkpoint requires architecture v2 (Full Attention/SwiGLU); retrain old hybrid checkpoints"
+        )
     config = ModelConfig(**manifest["model"])
     # Allocate once on the destination without a second full CPU model.
     with torch.device("meta"):
@@ -91,7 +129,9 @@ def restore_training(path, optimizer, scheduler=None):
     if manifest.get("format") != 2 or "optimizer" not in manifest:
         raise ValueError("Checkpoint has no optimizer state")
     if isinstance(manifest["optimizer"], str):
-        restored = torch.load(path / manifest["optimizer"], map_location="cpu", weights_only=True)
+        restored = torch.load(
+            path / manifest["optimizer"], map_location="cpu", weights_only=True
+        )
     else:
         # Read checkpoints written before optimizer state was saved in one file.
         restored = {}

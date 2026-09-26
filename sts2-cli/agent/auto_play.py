@@ -1,28 +1,39 @@
 #!/usr/bin/env python3
 """Auto-play a full STS2 Necrobinder run via the bridge."""
-import json, sys, urllib.request, time, uuid
+
+import json
+import sys
+import time
+import urllib.request
+import uuid
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19234
 URL = f"http://localhost:{PORT}"
 
+
 def cmd(data):
     """Send command to bridge, return parsed JSON."""
     try:
-        req = urllib.request.Request(URL, json.dumps(data).encode(), {'Content-Type': 'application/json'})
+        req = urllib.request.Request(
+            URL, json.dumps(data).encode(), {"Content-Type": "application/json"}
+        )
         resp = urllib.request.urlopen(req, timeout=30)
         return json.loads(resp.read())
     except Exception as e:
         print(f"  ERR: {e}")
         return {"type": "error", "message": str(e)}
 
+
 def action(act, **args):
     return cmd({"cmd": "action", "action": act, "args": args})
+
 
 def play_card(ci, ti=None):
     args = {"card_index": ci}
     if ti is not None:
         args["target_index"] = ti
     return action("play_card", **args)
+
 
 def pick_best_card(hand, enemies, osty, energy, rnd, inc, player_block=0, player_hp=99):
     """Pick the single best card to play right now. Returns (hand_index, target_index_or_None) or None."""
@@ -31,8 +42,8 @@ def pick_best_card(hand, enemies, osty, energy, rnd, inc, player_block=0, player
 
     # Calculate block gap and survivability
     block_gap = inc - player_block
-    lethal = (block_gap >= player_hp)  # Will die if don't block
-    can_tank = (player_hp > inc * 2)  # Can afford to take a full hit
+    lethal = block_gap >= player_hp  # Will die if don't block
+    can_tank = player_hp > inc * 2  # Can afford to take a full hit
 
     for i, c in enumerate(hand):
         if not c.get("can_play"):
@@ -46,18 +57,30 @@ def pick_best_card(hand, enemies, osty, energy, rnd, inc, player_block=0, player
             continue
 
         # Skip status/curse
-        if ctype == "Status" or name in ["Slimed", "Burn", "Wound", "Dazed", "Infection"]:
+        if ctype == "Status" or name in [
+            "Slimed",
+            "Burn",
+            "Wound",
+            "Dazed",
+            "Infection",
+        ]:
             continue
 
         # Priority scoring (lower = play first)
-        is_block_card = ctype == "Skill" and tt != "AnyEnemy" and name not in ["Bodyguard", "Wisp", "Borrowed Time"]
-        block_val = (c.get("stats") or {}).get("block", 0)
+        is_block_card = (
+            ctype == "Skill"
+            and tt != "AnyEnemy"
+            and name not in ["Bodyguard", "Wisp", "Borrowed Time"]
+        )
+        (c.get("stats") or {}).get("block", 0)
 
         if cost == 0:
             p = 1  # 0-cost ALWAYS first (Wisp, Borrowed Time, etc)
         elif ctype == "Power":
             p = 5 + cost if inc < 25 else 30
-        elif name == "Bodyguard" and (rnd <= 2 or (osty.get("hp", 0) <= 1 and inc == 0)):
+        elif name == "Bodyguard" and (
+            rnd <= 2 or (osty.get("hp", 0) <= 1 and inc == 0)
+        ):
             p = 6  # Bodyguard R1-R2 or when safe and Osty needs growth
         elif name == "Enfeebling Touch" and inc > 10:
             p = 9
@@ -102,10 +125,13 @@ def pick_best_card(hand, enemies, osty, energy, rnd, inc, player_block=0, player
 
     return best
 
+
 def combat_turn(d):
     """Play one combat turn: pick and play cards ONE AT A TIME with fresh state. Returns state after end_turn."""
     rnd = d.get("round", 1)
-    enemies_str = " + ".join(f"{en['name']['zh']}{en['hp']}hp" for en in d.get("enemies", []))
+    enemies_str = " + ".join(
+        f"{en['name']['zh']}{en['hp']}hp" for en in d.get("enemies", [])
+    )
     max_plays = 8
     cards_played = []
     for _ in range(max_plays):
@@ -118,13 +144,15 @@ def combat_turn(d):
         # Calculate incoming
         inc = 0
         for en in enemies:
-            for intent in (en.get("intents") or []):
+            for intent in en.get("intents") or []:
                 if intent.get("type") == "Attack":
                     inc += min(intent.get("damage", 0), 60)
 
         player_block = d.get("player", {}).get("block", 0) if "player" in d else 0
         player_hp = d.get("player", {}).get("hp", 99) if "player" in d else 99
-        choice = pick_best_card(hand, enemies, osty, energy, rnd, inc, player_block, player_hp)
+        choice = pick_best_card(
+            hand, enemies, osty, energy, rnd, inc, player_block, player_hp
+        )
         if choice is None:
             break
 
@@ -151,6 +179,7 @@ def combat_turn(d):
     result = action("end_turn")
     return result
 
+
 def handle_card_reward(d):
     """Pick best card from reward, or skip."""
     cards = d.get("cards", [])
@@ -159,11 +188,23 @@ def handle_card_reward(d):
 
     # Priority cards for Necrobinder
     priority = {
-        "Calcify": 100, "Flatten": 90, "Sic 'Em": 85, "Fetch": 80,
-        "Bodyguard": 75, "Unleash": 70,
-        "Reave": 65, "Grave Warden": 60, "Wisp": 55, "Borrowed Time": 50,
-        "Enfeebling Touch": 45, "Drain Power": 40, "Defy": 35, "Haunt": 30,
-        "Capture Spirit": 28, "Melancholy": 25, "Deathbringer": 20
+        "Calcify": 100,
+        "Flatten": 90,
+        "Sic 'Em": 85,
+        "Fetch": 80,
+        "Bodyguard": 75,
+        "Unleash": 70,
+        "Reave": 65,
+        "Grave Warden": 60,
+        "Wisp": 55,
+        "Borrowed Time": 50,
+        "Enfeebling Touch": 45,
+        "Drain Power": 40,
+        "Defy": 35,
+        "Haunt": 30,
+        "Capture Spirit": 28,
+        "Melancholy": 25,
+        "Deathbringer": 20,
     }
 
     # Track existing cards in deck to avoid duplicates of non-core cards
@@ -204,6 +245,7 @@ def handle_card_reward(d):
         print(f"  SKIP card reward (deck={deck_size})")
         return action("skip_card_reward")
 
+
 def handle_shop(d):
     """Buy high-priority cards, remove strikes."""
     player = d["player"]
@@ -212,8 +254,19 @@ def handle_shop(d):
     removal_cost = d.get("card_removal_cost", 75)
 
     # Buy priority cards first
-    priority_names = {"Calcify", "Flatten", "Sic 'Em", "Fetch", "Wisp", "Borrowed Time",
-                      "Drain Power", "Enfeebling Touch", "Bodyguard", "Unleash", "Reave"}
+    priority_names = {
+        "Calcify",
+        "Flatten",
+        "Sic 'Em",
+        "Fetch",
+        "Wisp",
+        "Borrowed Time",
+        "Drain Power",
+        "Enfeebling Touch",
+        "Bodyguard",
+        "Unleash",
+        "Reave",
+    }
 
     for c in d.get("cards", []):
         if not c["is_stocked"]:
@@ -222,7 +275,7 @@ def handle_shop(d):
         cost = c["cost"]
         if name in priority_names and cost <= gold:
             print(f"  BUY: {c['name']['zh']} ({cost}g)")
-            result = action("buy_card", card_index=c["index"])
+            action("buy_card", card_index=c["index"])
             gold -= cost
             deck_size += 1
 
@@ -231,10 +284,11 @@ def handle_shop(d):
         print(f"  REMOVE: Strike ({removal_cost}g)")
         action("remove_card")
         # Select first Strike
-        result = action("select_cards", indices="0")
+        action("select_cards", indices="0")
         gold -= removal_cost
 
     return action("leave_room")
+
 
 def handle_rest(d):
     """Heal if HP < 75%, else smith."""
@@ -252,8 +306,14 @@ def handle_rest(d):
         if result.get("decision") == "card_select":
             # Upgrade priority: Calcify > Bodyguard > Unleash > Flatten > Drain Power
             cards = result.get("cards", [])
-            upgrade_priority = {"Calcify": 10, "Bodyguard": 9, "Unleash": 8, "Flatten": 7,
-                               "Drain Power": 6, "Enfeebling Touch": 5}
+            upgrade_priority = {
+                "Calcify": 10,
+                "Bodyguard": 9,
+                "Unleash": 8,
+                "Flatten": 7,
+                "Drain Power": 6,
+                "Enfeebling Touch": 5,
+            }
             best_idx = 0
             best_score = 0
             for c in cards:
@@ -265,6 +325,7 @@ def handle_rest(d):
             return action("select_cards", indices=str(best_idx))
         return result
 
+
 def handle_map(d):
     """Choose map node based on HP and available choices."""
     player = d["player"]
@@ -275,7 +336,7 @@ def handle_map(d):
 
     deck = player.get("deck", [])
     deck_names = {c["name"] for c in deck}
-    has_scaling = bool(deck_names & {"Calcify", "Flatten", "Sic 'Em", "Drain Power"})
+    bool(deck_names & {"Calcify", "Flatten", "Sic 'Em", "Drain Power"})
 
     # Priority: Treasure > RestSite > Shop > Monster > Unknown > Elite
     type_priority = {
@@ -284,7 +345,14 @@ def handle_map(d):
         "Shop": 70,
         "Unknown": 40,
         "Monster": 35 if hp_pct > 0.4 else 10,
-        "Elite": 50 if (hp_pct > 0.85 and "Calcify" in deck_names and len(deck) >= 14 and floor >= 12) else 1,
+        "Elite": 50
+        if (
+            hp_pct > 0.85
+            and "Calcify" in deck_names
+            and len(deck) >= 14
+            and floor >= 12
+        )
+        else 1,
         "Boss": 90,
     }
 
@@ -296,8 +364,11 @@ def handle_map(d):
         type_priority["Monster"] = 3
 
     best = max(choices, key=lambda c: type_priority.get(c["type"], 0))
-    print(f"  MAP: ({best['col']},{best['row']}) {best['type']} (HP={player['hp']}/{player['max_hp']})")
+    print(
+        f"  MAP: ({best['col']},{best['row']}) {best['type']} (HP={player['hp']}/{player['max_hp']})"
+    )
     return action("select_map_node", col=best["col"], row=best["row"])
+
 
 def handle_event(d):
     """Choose best event option."""
@@ -319,10 +390,11 @@ def handle_event(d):
     print(f"  EVENT: {options[0]['title']['zh']} (fallback)")
     return action("choose_option", option_index=0)
 
+
 def use_potions_at_boss(d):
     """Use all potions at boss/elite fights."""
     potions = d.get("potions", [])
-    enemies = d.get("enemies", [])
+    d.get("enemies", [])
     for pot in potions:
         tt = pot.get("target_type", "")
         pi = pot["index"]
@@ -330,6 +402,7 @@ def use_potions_at_boss(d):
             action("use_potion", potion_index=pi, target_index=0)
         elif tt in ("Self", "AnyPlayer"):
             action("use_potion", potion_index=pi)
+
 
 # Main game loop
 def play_game():
@@ -349,10 +422,10 @@ def play_game():
             hp = d["player"]["hp"]
             act = d["context"]["act"]
             floor = d["context"]["floor"]
-            print(f"\n{'VICTORY!' if victory else 'DEFEAT'} Act{act} F{floor} HP={hp}/{d['player']['max_hp']}")
-            if victory:
-                return True
-            return False
+            print(
+                f"\n{'VICTORY!' if victory else 'DEFEAT'} Act{act} F{floor} HP={hp}/{d['player']['max_hp']}"
+            )
+            return bool(victory)
 
         elif dec == "event_choice":
             d = handle_event(d)
@@ -402,32 +475,41 @@ def play_game():
     print("Max steps reached!")
     return False
 
+
 def restart_bridge():
     """Kill old bridge and start fresh one."""
-    import subprocess, signal, os
+    import os
+    import signal
+    import subprocess
+
     # Kill processes on PORT
     try:
-        result = subprocess.run(["lsof", "-ti", f":{PORT}"], capture_output=True, text=True)
+        result = subprocess.run(
+            ["lsof", "-ti", f":{PORT}"], capture_output=True, text=True
+        )
         for pid in result.stdout.strip().split("\n"):
             if pid:
                 os.kill(int(pid), signal.SIGKILL)
-    except: pass
+    except:
+        pass
     time.sleep(2)
     # Start new bridge
     log = f"/tmp/sts2_game_{PORT}.jsonl"
     proc = subprocess.Popen(
         ["python3", "agent/sts2_bridge.py", str(PORT), "--compact", "--log", log],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     time.sleep(6)
     return proc
 
+
 if __name__ == "__main__":
     max_attempts = 10
     for attempt in range(1, max_attempts + 1):
-        print(f"\n{'='*40}")
+        print(f"\n{'=' * 40}")
         print(f"ATTEMPT {attempt}/{max_attempts}")
-        print(f"{'='*40}")
+        print(f"{'=' * 40}")
         if attempt > 1:
             restart_bridge()
         if play_game():

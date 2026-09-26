@@ -1,4 +1,5 @@
 """Versioned, restorable reward accounting from confirmed engine events only."""
+
 from dataclasses import asdict, dataclass, field
 
 from .protocol import ProtocolError
@@ -11,7 +12,9 @@ class MilestoneLedger:
     bosses: set[int] = field(default_factory=set)
     paid: dict[int, float] = field(default_factory=dict)
     victory_paid: bool = False
-    components: dict[str, float] = field(default_factory=lambda: {"combat": 0., "boss": 0., "victory": 0.})
+    components: dict[str, float] = field(
+        default_factory=lambda: {"combat": 0.0, "boss": 0.0, "victory": 0.0}
+    )
 
     def apply(self, events):
         total = 0.0
@@ -20,7 +23,9 @@ class MilestoneLedger:
             if kind == "run_completed":
                 if event.get("victory") is True and not self.victory_paid:
                     if event.get("act") != 3 or not event.get("final_boss_defeated"):
-                        raise ProtocolError("Victory requires confirmation of the third-act boss")
+                        raise ProtocolError(
+                            "Victory requires confirmation of the third-act boss"
+                        )
                     self.victory_paid = True
                     self.components["victory"] += 1.0
                     total += 1.0
@@ -40,10 +45,13 @@ class MilestoneLedger:
                 if act in self.bosses:
                     continue
                 self.bosses.add(act)
-                reward = {1: .1, 2: .2, 3: 0.0}[act]
+                reward = {1: 0.1, 2: 0.2, 3: 0.0}[act]
                 self.components["boss"] += reward
             elif encounter_kind in {"normal", "event", "elite"}:
-                reward = min(.02 if encounter_kind == "elite" else .005, max(0, .1 - self.paid.get(act, 0)))
+                reward = min(
+                    0.02 if encounter_kind == "elite" else 0.005,
+                    max(0, 0.1 - self.paid.get(act, 0)),
+                )
                 self.paid[act] = self.paid.get(act, 0) + reward
                 self.components["combat"] += reward
             else:
@@ -52,8 +60,14 @@ class MilestoneLedger:
         return total
 
     def public(self, act):
-        return {"entity_type": "reward_progress", "act": act, "nonboss_paid": self.paid.get(act, 0),
-                "boss_1": 1 in self.bosses, "boss_2": 2 in self.bosses, "boss_3": 3 in self.bosses}
+        return {
+            "entity_type": "reward_progress",
+            "act": act,
+            "nonboss_paid": self.paid.get(act, 0),
+            "boss_1": 1 in self.bosses,
+            "boss_2": 2 in self.bosses,
+            "boss_3": 3 in self.bosses,
+        }
 
     def state_dict(self):
         data = asdict(self)

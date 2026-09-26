@@ -1,34 +1,65 @@
 """Audited complete-run data. Never invent candidates from a teacher's label."""
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+
 import json
 import math
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .protocol import CHARACTERS, SCHEMA, ProtocolError, clean_frame, segment_key, validate_frame
+from .protocol import (
+    CHARACTERS,
+    SCHEMA,
+    ProtocolError,
+    clean_frame,
+    segment_key,
+    validate_frame,
+)
 
 
 def validate_run(run, *, on_policy=False):
     recorder_bc = run.get("source") == "recorder_bc"
-    if recorder_bc and (on_policy or run.get("provenance", {}).get("bc_only") is not True
-                        or run.get("teacher_visibility") != "unverified"):
-        raise ProtocolError("Recorder Bootstrap data is supervised-only with unverified teacher visibility")
+    if recorder_bc and (
+        on_policy
+        or run.get("provenance", {}).get("bc_only") is not True
+        or run.get("teacher_visibility") != "unverified"
+    ):
+        raise ProtocolError(
+            "Recorder Bootstrap data is supervised-only with unverified teacher visibility"
+        )
     ascension = run.get("ascension")
-    if (run.get("schema") != SCHEMA or type(ascension) is not int
-            or not 0 <= ascension <= 10):
+    if (
+        run.get("schema") != SCHEMA
+        or type(ascension) is not int
+        or not 0 <= ascension <= 10
+    ):
         raise ProtocolError("Unsupported trajectory schema or ascension")
     if recorder_bc:
         if run.get("status") != "partial" or run.get("victory") is not None:
-            raise ProtocolError("Recorder Bootstrap decisions must not claim a complete outcome")
+            raise ProtocolError(
+                "Recorder Bootstrap decisions must not claim a complete outcome"
+            )
     elif run.get("status") != "complete" or type(run.get("victory")) is not bool:
         raise ProtocolError("Incomplete, erroneous or unresolved run")
     if run.get("character") not in CHARACTERS or not run.get("run_id"):
         raise ProtocolError("Missing character/run identity")
-    if run.get("source") not in {"demonstration", "recorder_bc", "on_policy", "evaluation"}:
+    if run.get("source") not in {
+        "demonstration",
+        "recorder_bc",
+        "on_policy",
+        "evaluation",
+    }:
         raise ProtocolError("Unknown trajectory source")
-    if on_policy and (run.get("source") != "on_policy" or run.get("sampling") != "full_distribution"):
-        raise ProtocolError("PPO requires autonomous full-distribution on-policy samples")
-    if not on_policy and run.get("source") == "demonstration" and run.get("teacher_visibility") != "public":
+    if on_policy and (
+        run.get("source") != "on_policy" or run.get("sampling") != "full_distribution"
+    ):
+        raise ProtocolError(
+            "PPO requires autonomous full-distribution on-policy samples"
+        )
+    if (
+        not on_policy
+        and run.get("source") == "demonstration"
+        and run.get("teacher_visibility") != "public"
+    ):
         raise ProtocolError("Teacher visibility has not been verified")
     seen = set()
     for macro in run.get("macros", []):
@@ -61,12 +92,16 @@ def validate_run(run, *, on_policy=False):
             raise ProtocolError("Forced-only macro must not be a training sample")
         if on_policy:
             for key in ("old_log_prob", "old_value", "return", "advantage", "reward"):
-                if not isinstance(macro.get(key), (float, int)) or not math.isfinite(macro[key]):
+                if not isinstance(macro.get(key), (float, int)) or not math.isfinite(
+                    macro[key]
+                ):
                     raise ProtocolError(f"Missing or non-finite PPO {key}")
             if abs(macro["advantage"] - (macro["return"] - macro["old_value"])) > 1e-5:
-                raise ProtocolError("Advantage must equal complete return minus old value")
+                raise ProtocolError(
+                    "Advantage must equal complete return minus old value"
+                )
     if on_policy:
-        total = 0.
+        total = 0.0
         for macro in reversed(run["macros"]):
             total += macro["reward"]
             if abs(total - macro["return"]) > 1e-5:
@@ -106,7 +141,9 @@ def load_runs(path):
     if path.is_dir():
         runs = [json.loads(p.read_text()) for p in sorted(path.glob("*.json"))]
     elif path.suffix == ".jsonl":
-        runs = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        runs = [
+            json.loads(line) for line in path.read_text().splitlines() if line.strip()
+        ]
     else:
         data = json.loads(path.read_text())
         runs = data if isinstance(data, list) else [data]
@@ -118,9 +155,10 @@ def load_runs(path):
     return runs
 
 
-def split_runs(runs, validation_fraction=.2):
+def split_runs(runs, validation_fraction=0.2):
     """Group every seed across characters/fragments; never split adjacent decisions."""
     from .protocol import fingerprint
+
     train, validation = [], []
     for run in runs:
         key = str(run.get("seed", run["run_id"]))
@@ -135,32 +173,54 @@ class Sample:
     character: str
     run_id: str
     weight: float
-    _lengths: tuple[tuple[int, int], ...] | None = field(default=None, repr=False, compare=False)
+    _lengths: tuple[tuple[int, int], ...] | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
-def samples(runs, *, ppo=False, horizon_scale=100.):
+def samples(runs, *, ppo=False, horizon_scale=100.0):
     result = []
     if ppo:
         counts = Counter(r["character"] for r in runs)
         if set(counts) != set(CHARACTERS) or len(set(counts.values())) != 1:
-            raise ProtocolError("PPO round requires equal complete-run counts for all five characters")
-        versions = {(r["policy_version"], r["precision"], r["vocabulary_hash"]) for r in runs}
+            raise ProtocolError(
+                "PPO round requires equal complete-run counts for all five characters"
+            )
+        versions = {
+            (r["policy_version"], r["precision"], r["vocabulary_hash"]) for r in runs
+        }
         if len(versions) != 1:
             raise ProtocolError("Mixed policy/precision/vocabulary rollout versions")
         from .protocol import fingerprint
+
         if len({fingerprint(r["contract"]) for r in runs}) != 1:
             raise ProtocolError("PPO round mixes engine/content/effect contracts")
         for run in runs:
             validate_run(run, on_policy=True)
             for macro in run["macros"]:
-                result.append(Sample(macro, run["character"], run["run_id"], 1 / (5 * counts[run["character"]] * horizon_scale)))
+                result.append(
+                    Sample(
+                        macro,
+                        run["character"],
+                        run["run_id"],
+                        1 / (5 * counts[run["character"]] * horizon_scale),
+                    )
+                )
     else:
-        counts = Counter((r["character"], m["phase"]) for r in runs for m in r["macros"])
+        counts = Counter(
+            (r["character"], m["phase"]) for r in runs for m in r["macros"]
+        )
         for run in runs:
             validate_run(run)
             for macro in run["macros"]:
-                result.append(Sample(macro, run["character"], run["run_id"],
-                                     1 / (len(counts) * counts[run["character"], macro["phase"]])))
+                result.append(
+                    Sample(
+                        macro,
+                        run["character"],
+                        run["run_id"],
+                        1 / (len(counts) * counts[run["character"], macro["phase"]]),
+                    )
+                )
     return result
 
 
@@ -172,6 +232,7 @@ def sample_pad_size(item, config):
     """Return the token bucket for a sample, caching only input dimensions."""
     if item._lengths is None:
         from .representation import observation
+
         lengths = []
         for step in item.macro["steps"]:
             if not step["forced"]:
@@ -181,7 +242,9 @@ def sample_pad_size(item, config):
     result = 0
     for tokens, actions in item._lengths:
         action_pad = bucket_size(actions, config.action_buckets)
-        result = max(result, bucket_size(tokens - actions + action_pad, config.token_buckets))
+        result = max(
+            result, bucket_size(tokens - actions + action_pad, config.token_buckets)
+        )
     return result
 
 
@@ -196,7 +259,11 @@ def microbatches(logical, config):
         n = sample_pad_size(item, config)
         candidate_n = max(max_n, n)
         count = len(batch) + 1
-        if batch and (count > config.microbatch_size or count * candidate_n > config.token_budget or count * candidate_n**2 > config.pair_budget):
+        if batch and (
+            count > config.microbatch_size
+            or count * candidate_n > config.token_budget
+            or count * candidate_n**2 > config.pair_budget
+        ):
             result.append(batch)
             batch, max_n = [], 0
         # Oversized samples remain whole; caller can checkpoint/recompute or report capacity.

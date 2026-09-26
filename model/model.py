@@ -1,6 +1,7 @@
 """Batched typed encoder, full map-aware Transformer, and multi-select GRU."""
-from dataclasses import dataclass
+
 import math
+from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -9,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 
 from .attention import MapAttention, MapAttentionBias, RelationAttention
 from .config import ModelConfig
-from .representation import Observation, Vocabulary, bucket, field_tensors, fields_of
+from .representation import Observation, bucket, field_tensors, fields_of
 
 
 class SwiGLU(nn.Module):
@@ -29,7 +30,9 @@ class GlobalBlock(nn.Module):
     def __init__(self, width, heads, ffn_size, *, backend="reference", relations=128):
         super().__init__()
         self.norm1 = nn.LayerNorm(width)
-        self.attention = MapAttention(width, heads, backend=backend, relations=relations)
+        self.attention = MapAttention(
+            width, heads, backend=backend, relations=relations
+        )
         self.norm2 = nn.LayerNorm(width)
         self.ffn = SwiGLU(width, ffn_size)
 
@@ -42,7 +45,9 @@ class LocalBlock(nn.Module):
     def __init__(self, width, heads, ffn_size, *, relations=128, backend="reference"):
         super().__init__()
         self.norm1 = nn.LayerNorm(width)
-        self.attention = RelationAttention(width, heads, relations=relations, backend=backend)
+        self.attention = RelationAttention(
+            width, heads, relations=relations, backend=backend
+        )
         self.norm2 = nn.LayerNorm(width)
         self.ffn = SwiGLU(width, ffn_size)
 
@@ -58,24 +63,43 @@ class SharedEncoder(nn.Module):
         local = config.local_size
         self.symbol = nn.Embedding(config.vocabulary_size, local, padding_idx=0)
         self.field = nn.Embedding(config.field_buckets, local, padding_idx=0)
-        self.numeric = nn.Sequential(nn.Linear(5, local), nn.GELU(), nn.Linear(local, local))
+        self.numeric = nn.Sequential(
+            nn.Linear(5, local), nn.GELU(), nn.Linear(local, local)
+        )
         self.field_norm = nn.LayerNorm(local)
         # 8*ceil(d/3) keeps SwiGLU near the parameter count of a 4d GELU FFN.
         local_ffn = 8 * math.ceil(local / 3)
-        self.local_blocks = nn.ModuleList([LocalBlock(local, config.local_heads, local_ffn,
-                                                     relations=config.relation_buckets, backend=config.backend)
-                                           for _ in range(config.local_layers)])
+        self.local_blocks = nn.ModuleList(
+            [
+                LocalBlock(
+                    local,
+                    config.local_heads,
+                    local_ffn,
+                    relations=config.relation_buckets,
+                    backend=config.backend,
+                )
+                for _ in range(config.local_layers)
+            ]
+        )
         self.reference = nn.Linear(local, local)
         self.program_binding = nn.Linear(local, local)
         self.local_norm = nn.LayerNorm(local)
         self.projection = nn.Linear(local, config.hidden_size)
 
     def fields(self, rows, vocabulary, length=None):
-        ids, kinds, nums, mask = field_tensors(rows, vocabulary, self.config.field_buckets,
-                                               self.symbol.weight.device, length)
+        ids, kinds, nums, mask = field_tensors(
+            rows,
+            vocabulary,
+            self.config.field_buckets,
+            self.symbol.weight.device,
+            length,
+        )
         x = self.symbol(ids) + self.field(kinds) + self.numeric(nums)
         # Sum retains multiplicity; sqrt normalization controls magnitude only.
-        return self.field_norm((x * mask.unsqueeze(-1)).sum(1) / mask.sum(1).clamp_min(1).sqrt().unsqueeze(-1))
+        return self.field_norm(
+            (x * mask.unsqueeze(-1)).sum(1)
+            / mask.sum(1).clamp_min(1).sqrt().unsqueeze(-1)
+        )
 
     def forward(self, observations, vocabulary):
         """Encode every token and effect program in one cross-session batch."""
@@ -97,22 +121,36 @@ class SharedEncoder(nn.Module):
                 if role in accepted:
                     reference_targets.append(token_offset + target)
                     reference_sources.append(token_offset + source)
-                    reference_roles.append(bucket("reference." + role, self.config.field_buckets))
+                    reference_roles.append(
+                        bucket("reference." + role, self.config.field_buckets)
+                    )
         fused = base
         if reference_targets:
-            targets = torch.tensor(reference_targets, dtype=torch.long, device=base.device)
-            sources = torch.tensor(reference_sources, dtype=torch.long, device=base.device)
+            targets = torch.tensor(
+                reference_targets, dtype=torch.long, device=base.device
+            )
+            sources = torch.tensor(
+                reference_sources, dtype=torch.long, device=base.device
+            )
             roles = torch.tensor(reference_roles, dtype=torch.long, device=base.device)
-            contributions = self.reference(base.index_select(0, sources) + self.field(roles))
+            contributions = self.reference(
+                base.index_select(0, sources) + self.field(roles)
+            )
             fused = fused.index_add(0, targets, contributions.to(fused.dtype))
 
         program_length = max(max(len(effect.nodes), 1) for effect in effects)
         rows = []
         for effect in effects:
-            rows.extend(list(effect.nodes) + [[]] * (program_length - len(effect.nodes)))
+            rows.extend(
+                list(effect.nodes) + [[]] * (program_length - len(effect.nodes))
+            )
         programs = self.fields(rows, vocabulary).view(len(effects), program_length, -1)
-        lengths = torch.tensor([len(effect.nodes) for effect in effects], device=base.device)
-        valid = torch.arange(program_length, device=base.device).unsqueeze(0) < lengths.unsqueeze(1)
+        lengths = torch.tensor(
+            [len(effect.nodes) for effect in effects], device=base.device
+        )
+        valid = torch.arange(program_length, device=base.device).unsqueeze(
+            0
+        ) < lengths.unsqueeze(1)
 
         binding_targets, binding_sources, binding_roles = [], [], []
         program_edges = []
@@ -122,25 +160,47 @@ class SharedEncoder(nn.Module):
                 for node, ref, role in effect.bindings:
                     if ref not in obs.refs:
                         raise ValueError("Unresolved effect-program entity reference")
-                    binding_targets.append((effect_offset + token) * program_length + node)
+                    binding_targets.append(
+                        (effect_offset + token) * program_length + node
+                    )
                     binding_sources.append(token_offset + obs.refs[ref])
-                    binding_roles.append(bucket("binding." + role, self.config.field_buckets))
-                program_edges.extend((effect_offset + token, source, target,
-                                      bucket(role, self.config.relation_buckets))
-                                     for source, target, role in effect.edges)
+                    binding_roles.append(
+                        bucket("binding." + role, self.config.field_buckets)
+                    )
+                program_edges.extend(
+                    (
+                        effect_offset + token,
+                        source,
+                        target,
+                        bucket(role, self.config.relation_buckets),
+                    )
+                    for source, target, role in effect.edges
+                )
             effect_offset += len(obs.effects)
 
         if binding_targets:
-            targets = torch.tensor(binding_targets, dtype=torch.long, device=base.device)
-            sources = torch.tensor(binding_sources, dtype=torch.long, device=base.device)
+            targets = torch.tensor(
+                binding_targets, dtype=torch.long, device=base.device
+            )
+            sources = torch.tensor(
+                binding_sources, dtype=torch.long, device=base.device
+            )
             roles = torch.tensor(binding_roles, dtype=torch.long, device=base.device)
-            additions = self.program_binding(base.index_select(0, sources) + self.field(roles))
+            additions = self.program_binding(
+                base.index_select(0, sources) + self.field(roles)
+            )
             flat_programs = programs.flatten(0, 1)
-            programs = flat_programs.index_add(0, targets, additions.to(flat_programs.dtype)).view_as(programs)
-        edges = torch.tensor(program_edges, dtype=torch.long, device=base.device).reshape(-1, 4)
+            programs = flat_programs.index_add(
+                0, targets, additions.to(flat_programs.dtype)
+            ).view_as(programs)
+        edges = torch.tensor(
+            program_edges, dtype=torch.long, device=base.device
+        ).reshape(-1, 4)
         for block in self.local_blocks:
             programs = block(programs, valid, edges)
-        pooled = (programs * valid.unsqueeze(-1)).sum(1) / valid.sum(1).clamp_min(1).sqrt().unsqueeze(-1)
+        pooled = (programs * valid.unsqueeze(-1)).sum(1) / valid.sum(1).clamp_min(
+            1
+        ).sqrt().unsqueeze(-1)
         local = self.local_norm(fused + programs[:, 0] + pooled)
         projected = self.projection(local)
 
@@ -183,9 +243,18 @@ class PolicyValue(nn.Module):
         self.config = config
         d, local = config.hidden_size, config.local_size
         self.encoder = SharedEncoder(config)
-        self.blocks = nn.ModuleList([GlobalBlock(d, config.num_heads, config.ffn_size,
-                                                backend=config.backend, relations=config.relation_buckets)
-                                     for _ in range(config.layers)])
+        self.blocks = nn.ModuleList(
+            [
+                GlobalBlock(
+                    d,
+                    config.num_heads,
+                    config.ffn_size,
+                    backend=config.backend,
+                    relations=config.relation_buckets,
+                )
+                for _ in range(config.layers)
+            ]
+        )
         self.final_norm = nn.LayerNorm(d)
         self.prefix_order = nn.GRUCell(local, local)
         self.prefix_projection = nn.Linear(local, d)
@@ -210,7 +279,9 @@ class PolicyValue(nn.Module):
     def _map_bias(self, observations, token_count, device):
         map_count = max(max(len(obs.map_floors) for obs in observations), 1)
         node_rows = [[-1] * token_count for _ in observations]
-        category_rows = [[[0] * map_count for _ in range(map_count)] for _ in observations]
+        category_rows = [
+            [[0] * map_count for _ in range(map_count)] for _ in observations
+        ]
         floor_rows = [[0] * map_count for _ in observations]
         for batch, obs in enumerate(observations):
             nodes = list(obs.map_floors)
@@ -220,11 +291,15 @@ class PolicyValue(nn.Module):
                 floor_rows[batch][slot] = obs.map_floors[node]
             for source, target, role in obs.edges:
                 if role.startswith("map_") and source in slots and target in slots:
-                    category_rows[batch][slots[source]][slots[target]] = bucket(role, self.config.relation_buckets)
+                    category_rows[batch][slots[source]][slots[target]] = bucket(
+                        role, self.config.relation_buckets
+                    )
         # One transfer per compact table avoids scalar CUDA assignments.
-        return MapAttentionBias(torch.tensor(node_rows, dtype=torch.long, device=device),
-                                torch.tensor(category_rows, dtype=torch.long, device=device),
-                                torch.tensor(floor_rows, dtype=torch.long, device=device))
+        return MapAttentionBias(
+            torch.tensor(node_rows, dtype=torch.long, device=device),
+            torch.tensor(category_rows, dtype=torch.long, device=device),
+            torch.tensor(floor_rows, dtype=torch.long, device=device),
+        )
 
     def encode(self, observations, vocabulary, *, pad_to=None):
         if not observations:
@@ -233,24 +308,34 @@ class PolicyValue(nn.Module):
         encoded = self.encoder(observations, vocabulary)
         n = max(max(len(o.tokens) for o in observations), pad_to or 0)
         hidden = torch.stack([F.pad(x, (0, 0, 0, n - x.shape[0])) for x, _ in encoded])
-        lengths = torch.tensor([len(obs.tokens) for obs in observations], device=hidden.device)
-        valid = torch.arange(n, device=hidden.device).unsqueeze(0) < lengths.unsqueeze(1)
+        lengths = torch.tensor(
+            [len(obs.tokens) for obs in observations], device=hidden.device
+        )
+        valid = torch.arange(n, device=hidden.device).unsqueeze(0) < lengths.unsqueeze(
+            1
+        )
         map_bias = self._map_bias(observations, n, hidden.device)
         for block in self.blocks:
-            if self.config.checkpoint_layers and self.training and torch.is_grad_enabled():
+            if (
+                self.config.checkpoint_layers
+                and self.training
+                and torch.is_grad_enabled()
+            ):
                 hidden = checkpoint(block, hidden, valid, map_bias, use_reentrant=False)
             else:
                 hidden = block(hidden, valid, map_bias)
         hidden = self.final_norm(hidden)
         result = []
         for b, obs in enumerate(observations):
-            h = hidden[b, :len(obs.tokens)]
+            h = hidden[b, : len(obs.tokens)]
             actions = h[obs.action_indices]
             result.append(Encoded(h, encoded[b][1], actions, self.key(actions), obs))
         return result
 
     def _prefix_batch(self, encoded_list, contexts, vocabulary):
-        local = self.encoder.fields([fields_of(context) for context in contexts], vocabulary)
+        local = self.encoder.fields(
+            [fields_of(context) for context in contexts], vocabulary
+        )
         prefixes = []
         for encoded, context, context_local in zip(encoded_list, contexts, local):
             selected = context.get("selected_refs", [])
@@ -258,20 +343,36 @@ class PolicyValue(nn.Module):
             if context.get("order_matters") and order_known:
                 state = torch.zeros_like(context_local)
                 for ref in selected:
-                    state = self.prefix_order(encoded.local[encoded.observation.refs[ref]], state)
+                    state = self.prefix_order(
+                        encoded.local[encoded.observation.refs[ref]], state
+                    )
                 context_local = context_local + state
             elif selected:
-                indices = torch.tensor([encoded.observation.refs[ref] for ref in selected],
-                                       dtype=torch.long, device=context_local.device)
-                context_local = context_local + encoded.local.index_select(0, indices).sum(0)
+                indices = torch.tensor(
+                    [encoded.observation.refs[ref] for ref in selected],
+                    dtype=torch.long,
+                    device=context_local.device,
+                )
+                context_local = context_local + encoded.local.index_select(
+                    0, indices
+                ).sum(0)
             prefixes.append(context_local)
         return self.prefix_projection(torch.stack(prefixes))
 
     def prefix(self, encoded, context, vocabulary):
         return self._prefix_batch([encoded], [context], vocabulary)[0]
 
-    def decode_batch(self, encoded_list, legal_masks, contexts, vocabulary, *,
-                     hidden=None, previous=None, value=None):
+    def decode_batch(
+        self,
+        encoded_list,
+        legal_masks,
+        contexts,
+        vocabulary,
+        *,
+        hidden=None,
+        previous=None,
+        value=None,
+    ):
         """Decode independent multi-select sessions with one batched head pass."""
         count = len(encoded_list)
         if not count or len(legal_masks) != count or len(contexts) != count:
@@ -290,8 +391,12 @@ class PolicyValue(nn.Module):
 
         self.decoder_calls += count
         prefix = self._prefix_batch(encoded_list, contexts, vocabulary)
-        starts = torch.stack([encoded.hidden[0] + encoded.actions[mask].mean(0) + item_prefix
-                              for encoded, mask, item_prefix in zip(encoded_list, legal_masks, prefix)])
+        starts = torch.stack(
+            [
+                encoded.hidden[0] + encoded.actions[mask].mean(0) + item_prefix
+                for encoded, mask, item_prefix in zip(encoded_list, legal_masks, prefix)
+            ]
+        )
         previous_embeddings = []
         for encoded, item in zip(encoded_list, previous):
             if item is None:
@@ -300,33 +405,74 @@ class PolicyValue(nn.Module):
                 previous_embeddings.append(item)
             else:
                 previous_embeddings.append(encoded.actions[item])
-        current = self.input_norm(starts + self.previous_projection(torch.stack(previous_embeddings)))
-        hidden_batch = torch.stack([torch.zeros_like(current_item) if state is None else state
-                                    for current_item, state in zip(current, hidden)])
+        current = self.input_norm(
+            starts + self.previous_projection(torch.stack(previous_embeddings))
+        )
+        hidden_batch = torch.stack(
+            [
+                torch.zeros_like(current_item) if state is None else state
+                for current_item, state in zip(current, hidden)
+            ]
+        )
         next_hidden = self.gru(current, hidden_batch)
         queries = self.query(next_hidden)
 
         max_actions = max(encoded.actions.shape[0] for encoded in encoded_list)
-        keys = torch.stack([F.pad(encoded.keys, (0, 0, 0, max_actions - encoded.keys.shape[0]))
-                            for encoded in encoded_list])
-        masks = torch.stack([F.pad(mask, (0, max_actions - mask.shape[0]), value=False)
-                             for mask in legal_masks])
+        keys = torch.stack(
+            [
+                F.pad(encoded.keys, (0, 0, 0, max_actions - encoded.keys.shape[0]))
+                for encoded in encoded_list
+            ]
+        )
+        masks = torch.stack(
+            [
+                F.pad(mask, (0, max_actions - mask.shape[0]), value=False)
+                for mask in legal_masks
+            ]
+        )
         with torch.autocast(device_type=queries.device.type, enabled=False):
-            logits = torch.bmm(queries.float().unsqueeze(1), keys.float().transpose(1, 2)).squeeze(1)
+            logits = torch.bmm(
+                queries.float().unsqueeze(1), keys.float().transpose(1, 2)
+            ).squeeze(1)
             logits = logits / math.sqrt(self.config.hidden_size)
             logits = logits.masked_fill(~masks, -float("inf"))
         values = self.value(starts).float().squeeze(-1) if any(value) else None
-        return [DecisionOutput(logits[index, :encoded.actions.shape[0]], next_hidden[index],
-                               values[index] if values is not None and value[index] else None)
-                for index, encoded in enumerate(encoded_list)]
+        return [
+            DecisionOutput(
+                logits[index, : encoded.actions.shape[0]],
+                next_hidden[index],
+                values[index] if values is not None and value[index] else None,
+            )
+            for index, encoded in enumerate(encoded_list)
+        ]
 
-    def decode(self, encoded, legal_mask, context, vocabulary, *, hidden=None, previous=None, value=True):
-        return self.decode_batch([encoded], [legal_mask], [context], vocabulary,
-                                 hidden=[hidden], previous=[previous], value=[value])[0]
+    def decode(
+        self,
+        encoded,
+        legal_mask,
+        context,
+        vocabulary,
+        *,
+        hidden=None,
+        previous=None,
+        value=True,
+    ):
+        return self.decode_batch(
+            [encoded],
+            [legal_mask],
+            [context],
+            vocabulary,
+            hidden=[hidden],
+            previous=[previous],
+            value=[value],
+        )[0]
 
     def parameter_report(self):
-        return {"total": sum(p.numel() for p in self.parameters()),
-                "backbone": sum(p.numel() for b in self.blocks for p in b.parameters()) + sum(p.numel() for p in self.final_norm.parameters()),
-                "gru": sum(p.numel() for p in self.gru.parameters()),
-                "full_layers": len(self.blocks),
-                "linear_layers": 0}
+        return {
+            "total": sum(p.numel() for p in self.parameters()),
+            "backbone": sum(p.numel() for b in self.blocks for p in b.parameters())
+            + sum(p.numel() for p in self.final_norm.parameters()),
+            "gru": sum(p.numel() for p in self.gru.parameters()),
+            "full_layers": len(self.blocks),
+            "linear_layers": 0,
+        }

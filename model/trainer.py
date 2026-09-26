@@ -1,7 +1,8 @@
 """Single-device Accelerate Bootstrap, value warmup, and complete-run macro-action PPO."""
-from collections import defaultdict
+
 import math
 import random
+from collections import defaultdict
 
 import torch
 
@@ -16,7 +17,9 @@ from .rollout import numeric_backend, precision_context
 def ppo_objective(new_log_prob, old_log_prob, advantage, clip_ratio):
     log_ratio = new_log_prob.float() - old_log_prob
     ratio = torch.exp(log_ratio)
-    actor = -torch.minimum(ratio * advantage, ratio.clamp(1 - clip_ratio, 1 + clip_ratio) * advantage)
+    actor = -torch.minimum(
+        ratio * advantage, ratio.clamp(1 - clip_ratio, 1 + clip_ratio) * advantage
+    )
     kl = (ratio - 1) - log_ratio
     clipped = ((ratio - 1).abs() > clip_ratio).float()
     return actor, kl, clipped
@@ -25,36 +28,47 @@ def ppo_objective(new_log_prob, old_log_prob, advantage, clip_ratio):
 class Learner:
     def __init__(self, model, vocabulary, config=None, *, policy_version=0):
         from accelerate import Accelerator
+
         self.config = config or TrainConfig()
-        self.accelerator = Accelerator(cpu=model.device.type == "cpu", mixed_precision=self.config.precision,
-                                       gradient_accumulation_steps=1)
+        self.accelerator = Accelerator(
+            cpu=model.device.type == "cpu",
+            mixed_precision=self.config.precision,
+            gradient_accumulation_steps=1,
+        )
         if self.accelerator.num_processes != 1:
-            raise ValueError("v1 uses one GPU learner; distributed reductions have not been enabled")
+            raise ValueError(
+                "v1 uses one GPU learner; distributed reductions have not been enabled"
+            )
         self.model, self.vocabulary = model, vocabulary
         self.optimizer = build_optimizer(model, self.config)
         # Explicit logical-batch boundaries prevent a short/variable microbatch from
         # receiving a different statistical weight. No automatic loss division.
         self.optimizer = self.accelerator.prepare(self.optimizer)
-        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer.optimizer, lambda _: 1.0)
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer.optimizer, lambda _: 1.0
+        )
         self.policy_version, self.updates = policy_version, 0
 
     def _optimize(self, items, mode, demonstrations=None):
         cfg = self.config
         self.model.train()
         total_metrics = defaultdict(float)
-        weights = 0.
-        groups = defaultdict(lambda: [0., 0.])
+        weights = 0.0
+        groups = defaultdict(lambda: [0.0, 0.0])
         value_sums = defaultdict(float)
         for start in range(0, len(items), cfg.logical_batch_size):
-            logical = items[start:start + cfg.logical_batch_size]
+            logical = items[start : start + cfg.logical_batch_size]
             self.optimizer.zero_grad(set_to_none=True)
             logical_rows = []
             logical_items = []
             for micro in microbatches(logical, cfg):
                 with precision_context(self.model, cfg.precision):
-                    outputs = replay_batch(self.model, self.vocabulary,
-                                           [item.macro["steps"] for item in micro],
-                                           pad_to=batch_pad_size(micro, cfg))
+                    outputs = replay_batch(
+                        self.model,
+                        self.vocabulary,
+                        [item.macro["steps"] for item in micro],
+                        pad_to=batch_pad_size(micro, cfg),
+                    )
                     losses, rows = [], []
                     for item, (log_prob, value, entropy) in zip(micro, outputs):
                         if mode == "bootstrap":
@@ -65,41 +79,73 @@ class Learner:
                         else:
                             macro = item.macro
                             actor, kl, clipped = ppo_objective(
-                                log_prob, macro["old_log_prob"], macro["advantage"], cfg.clip_ratio
+                                log_prob,
+                                macro["old_log_prob"],
+                                macro["advantage"],
+                                cfg.clip_ratio,
                             )
                             value_loss = (value.float() - macro["return"]) ** 2
-                            loss = (value_loss if mode == "value" else
-                                    actor + cfg.value_coef * value_loss - cfg.entropy_coef * entropy)
+                            loss = (
+                                value_loss
+                                if mode == "value"
+                                else actor
+                                + cfg.value_coef * value_loss
+                                - cfg.entropy_coef * entropy
+                            )
                             predicted = value.float()
                         losses.append(item.weight * loss)
-                        rows.append(torch.stack((loss.float(), value_loss.float(), entropy.float(),
-                                                 clipped.float(), kl.float(), predicted)))
+                        rows.append(
+                            torch.stack(
+                                (
+                                    loss.float(),
+                                    value_loss.float(),
+                                    entropy.float(),
+                                    clipped.float(),
+                                    kl.float(),
+                                    predicted,
+                                )
+                            )
+                        )
                     weighted_loss = torch.stack(losses).sum()
                 if not bool(torch.isfinite(weighted_loss)):
                     self.optimizer.zero_grad(set_to_none=True)
-                    raise FloatingPointError("Non-finite loss; optimizer update cancelled")
+                    raise FloatingPointError(
+                        "Non-finite loss; optimizer update cancelled"
+                    )
                 self.accelerator.backward(weighted_loss)
                 logical_rows.append(torch.stack(rows).detach())
                 logical_items.extend(micro)
             if demonstrations and cfg.bootstrap_coef and mode == "ppo":
-                auxiliary = random.choices(demonstrations, weights=[x.weight for x in demonstrations], k=1)[0]
+                auxiliary = random.choices(
+                    demonstrations, weights=[x.weight for x in demonstrations], k=1
+                )[0]
                 with precision_context(self.model, cfg.precision):
-                    lp, _, _ = replay_batch(self.model, self.vocabulary, [auxiliary.macro["steps"]],
-                                            pad_to=batch_pad_size([auxiliary], cfg))[0]
+                    lp, _, _ = replay_batch(
+                        self.model,
+                        self.vocabulary,
+                        [auxiliary.macro["steps"]],
+                        pad_to=batch_pad_size([auxiliary], cfg),
+                    )[0]
                     auxiliary_loss = -cfg.bootstrap_coef * lp
                 self.accelerator.backward(auxiliary_loss)
-            norm = self.accelerator.clip_grad_norm_(self.model.parameters(), cfg.max_grad_norm)
+            norm = self.accelerator.clip_grad_norm_(
+                self.model.parameters(), cfg.max_grad_norm
+            )
             if not bool(torch.isfinite(norm)):
                 self.optimizer.zero_grad(set_to_none=True)
-                raise FloatingPointError("Non-finite gradients; optimizer update cancelled")
+                raise FloatingPointError(
+                    "Non-finite gradients; optimizer update cancelled"
+                )
             self.optimizer.step()
             self.scheduler.step()
             self.updates += 1
             total_metrics["last_grad_norm"] = float(norm)
             # Transfer all per-sample diagnostics for this logical batch once.
             host_rows = torch.cat(logical_rows).cpu().tolist()
-            batch_kl, batch_weight = 0., 0.
-            for item, (loss, value_loss, entropy, clipped, kl, predicted) in zip(logical_items, host_rows):
+            batch_kl, batch_weight = 0.0, 0.0
+            for item, (loss, value_loss, entropy, clipped, kl, predicted) in zip(
+                logical_items, host_rows
+            ):
                 w = item.weight
                 batch_kl += kl * w
                 batch_weight += w
@@ -119,24 +165,39 @@ class Learner:
                     value_sums["target2"] += w * target * target
                     value_sums["predicted"] += w * predicted
                     value_sums["predicted2"] += w * predicted * predicted
-                    value_sums["error"] += w * (target-predicted)
-                    value_sums["error2"] += w * (target-predicted)**2
+                    value_sums["error"] += w * (target - predicted)
+                    value_sums["error2"] += w * (target - predicted) ** 2
             if mode == "ppo" and batch_kl / max(batch_weight, 1e-12) > cfg.target_kl:
                 total_metrics["early_stop"] = 1
                 break
         for key in ("loss", "value_mse", "entropy", "clip_fraction", "kl"):
             total_metrics[key] /= max(weights, 1e-12)
-        total_metrics["kl_by_character_phase"] = {f"{c}/{p}": total / max(w, 1e-12) for (c, p), (total, w) in groups.items()}
+        total_metrics["kl_by_character_phase"] = {
+            f"{c}/{p}": total / max(w, 1e-12) for (c, p), (total, w) in groups.items()
+        }
         total_metrics["updates"] = self.updates
         if value_sums["weight"]:
             w = value_sums["weight"]
-            variance = max(0., value_sums["target2"]/w - (value_sums["target"]/w)**2)
-            error_variance = max(0., value_sums["error2"]/w - (value_sums["error"]/w)**2)
-            total_metrics["value_rmse"] = math.sqrt(value_sums["error2"]/w)
-            total_metrics["value_explained_variance"] = 1 - error_variance/variance if variance > 1e-12 else None
-            total_metrics["value_mse_over_constant_baseline"] = value_sums["error2"]/w/variance if variance > 1e-12 else None
+            variance = max(
+                0.0, value_sums["target2"] / w - (value_sums["target"] / w) ** 2
+            )
+            error_variance = max(
+                0.0, value_sums["error2"] / w - (value_sums["error"] / w) ** 2
+            )
+            total_metrics["value_rmse"] = math.sqrt(value_sums["error2"] / w)
+            total_metrics["value_explained_variance"] = (
+                1 - error_variance / variance if variance > 1e-12 else None
+            )
+            total_metrics["value_mse_over_constant_baseline"] = (
+                value_sums["error2"] / w / variance if variance > 1e-12 else None
+            )
             total_metrics["return_std"] = math.sqrt(variance)
-            total_metrics["value_std"] = math.sqrt(max(0., value_sums["predicted2"]/w-(value_sums["predicted"]/w)**2))
+            total_metrics["value_std"] = math.sqrt(
+                max(
+                    0.0,
+                    value_sums["predicted2"] / w - (value_sums["predicted"] / w) ** 2,
+                )
+            )
         return dict(total_metrics)
 
     def bootstrap(self, runs, epochs=1, on_epoch=None):
@@ -158,24 +219,45 @@ class Learner:
     def check_old_policy(self, runs, items):
         self.model.eval()
         for run in runs:
-            if run["policy_version"] != self.policy_version or run["precision"] != self.config.precision or run["vocabulary_hash"] != self.vocabulary.digest:
-                raise ProtocolError("Rollout policy/precision/vocabulary differs from learner")
+            if (
+                run["policy_version"] != self.policy_version
+                or run["precision"] != self.config.precision
+                or run["vocabulary_hash"] != self.vocabulary.digest
+            ):
+                raise ProtocolError(
+                    "Rollout policy/precision/vocabulary differs from learner"
+                )
             if run.get("numeric_backend") != numeric_backend(self.model):
-                raise ProtocolError("Rollout numeric backend differs from learner; collect fresh on-policy data")
-        largest = 0.
+                raise ProtocolError(
+                    "Rollout numeric backend differs from learner; collect fresh on-policy data"
+                )
+        largest = 0.0
         with precision_context(self.model, self.config.precision):
             for micro in microbatches(items, self.config):
-                outputs = replay_batch(self.model, self.vocabulary,
-                                       [item.macro["steps"] for item in micro],
-                                       pad_to=batch_pad_size(micro, self.config))
-                current = torch.stack([torch.stack((log_prob.float(), value.float()))
-                                       for log_prob, value, _ in outputs]).cpu().tolist()
+                outputs = replay_batch(
+                    self.model,
+                    self.vocabulary,
+                    [item.macro["steps"] for item in micro],
+                    pad_to=batch_pad_size(micro, self.config),
+                )
+                current = (
+                    torch.stack(
+                        [
+                            torch.stack((log_prob.float(), value.float()))
+                            for log_prob, value, _ in outputs
+                        ]
+                    )
+                    .cpu()
+                    .tolist()
+                )
                 for item, (log_prob, value) in zip(micro, current):
                     error = abs(log_prob - item.macro["old_log_prob"])
                     value_error = abs(value - item.macro["old_value"])
                     largest = max(largest, error, value_error)
         if largest > (0.02 if self.config.precision == "bf16" else 1e-4):
-            raise ProtocolError(f"Stored old probabilities/values do not replay: max error={largest}")
+            raise ProtocolError(
+                f"Stored old probabilities/values do not replay: max error={largest}"
+            )
         return largest
 
     def ppo(self, runs, demonstrations=None):
@@ -215,21 +297,31 @@ class Learner:
     @torch.no_grad()
     def evaluate_bootstrap(self, runs):
         self.model.eval()
-        metrics = defaultdict(lambda: {"nll": 0., "branches": 0, "macros": 0})
+        metrics = defaultdict(lambda: {"nll": 0.0, "branches": 0, "macros": 0})
         with precision_context(self.model, self.config.precision):
             items = samples(runs)
             for batch in microbatches(items, self.config):
-                outputs = replay_batch(self.model, self.vocabulary,
-                                       [item.macro["steps"] for item in batch],
-                                       pad_to=batch_pad_size(batch, self.config))
-                log_probs = torch.stack([output[0].float() for output in outputs]).cpu().tolist()
+                outputs = replay_batch(
+                    self.model,
+                    self.vocabulary,
+                    [item.macro["steps"] for item in batch],
+                    pad_to=batch_pad_size(batch, self.config),
+                )
+                log_probs = (
+                    torch.stack([output[0].float() for output in outputs])
+                    .cpu()
+                    .tolist()
+                )
                 for item, log_prob in zip(batch, log_probs):
                     macro = item.macro
                     group = metrics[item.character + "/" + macro["phase"]]
                     group["nll"] -= log_prob
                     group["branches"] += sum(not s["forced"] for s in macro["steps"])
                     group["macros"] += 1
-        return {key: dict(value, nll_per_branch=value["nll"] / value["branches"]) for key, value in metrics.items()}
+        return {
+            key: dict(value, nll_per_branch=value["nll"] / value["branches"])
+            for key, value in metrics.items()
+        }
 
 
 def evaluate_runs(runs):
@@ -241,13 +333,30 @@ def evaluate_runs(runs):
         rate = wins / n if n else None
         z = 1.96
         if n:
-            center = (rate + z*z/(2*n)) / (1 + z*z/n)
-            radius = z * math.sqrt(rate*(1-rate)/n + z*z/(4*n*n)) / (1 + z*z/n)
-            interval = [max(0., center-radius), min(1., center+radius)]
+            center = (rate + z * z / (2 * n)) / (1 + z * z / n)
+            radius = (
+                z
+                * math.sqrt(rate * (1 - rate) / n + z * z / (4 * n * n))
+                / (1 + z * z / n)
+            )
+            interval = [max(0.0, center - radius), min(1.0, center + radius)]
         else:
             interval = None
-        report[character] = {"attempts": len(group), "complete": n, "wins": wins, "win_rate": rate,
-                             "wilson_95": interval, "errors_or_unresolved": len(group)-n}
+        report[character] = {
+            "attempts": len(group),
+            "complete": n,
+            "wins": wins,
+            "win_rate": rate,
+            "wilson_95": interval,
+            "errors_or_unresolved": len(group) - n,
+        }
     rates = [x["win_rate"] for x in report.values()]
-    return {"characters": report, "equal_character_win_rate": sum(rates)/5 if all(r is not None for r in rates) else None,
-            "worst_character_win_rate": min(rates) if all(r is not None for r in rates) else None}
+    return {
+        "characters": report,
+        "equal_character_win_rate": sum(rates) / 5
+        if all(r is not None for r in rates)
+        else None,
+        "worst_character_win_rate": min(rates)
+        if all(r is not None for r in rates)
+        else None,
+    }
