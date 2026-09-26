@@ -1,31 +1,44 @@
 """One serial JSON-lines connection per engine process, with bounded I/O."""
+
 import json
 import os
-from pathlib import Path
 import queue
 import shutil
 import subprocess
 import tempfile
 import threading
+from pathlib import Path
 
 from .protocol import ProtocolError
 
 
 class CliEngine:
     def __init__(self, command=None, *, root=None, timeout=30.0):
-        self.root = Path(root or Path(__file__).resolve().parents[1] / "sts2-cli").resolve()
+        self.root = Path(
+            root or Path(__file__).resolve().parents[1] / "sts2-cli"
+        ).resolve()
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         self.timeout = timeout
         if command is None:
             dll = self.root / "src/Sts2Headless/bin/Debug/net9.0/Sts2Headless.dll"
             if not dll.exists():
-                raise FileNotFoundError(f"Build the engine first: dotnet build {self.root}/src/Sts2Headless")
+                raise FileNotFoundError(
+                    f"Build the engine first: dotnet build {self.root}/src/Sts2Headless"
+                )
             command = [shutil.which("dotnet") or "dotnet", str(dll)]
         env = dict(os.environ, STS2_GAME_DIR=str(self.root / "lib"))
         self.stderr = tempfile.TemporaryFile(mode="w+t")
-        self.proc = subprocess.Popen(command, cwd=self.root, env=env, stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=self.stderr, text=True, bufsize=1)
+        self.proc = subprocess.Popen(
+            command,
+            cwd=self.root,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr,
+            text=True,
+            bufsize=1,
+        )
         self.responses = queue.Queue(maxsize=32)
         self.closed = False
         self.lock = threading.Lock()
@@ -69,11 +82,23 @@ class CliEngine:
             return self._read()
 
     def reset(self, character, seed, ascension=10):
-        response = self.send({"cmd": "start_run", "character": character, "seed": str(seed),
-                              "ascension": ascension, "lang": "en", "decision_protocol": True})
+        response = self.send(
+            {
+                "cmd": "start_run",
+                "character": character,
+                "seed": str(seed),
+                "ascension": ascension,
+                "lang": "en",
+                "decision_protocol": True,
+            }
+        )
         if response.get("type") == "error":
             raise ProtocolError(str(response))
-        return response if response.get("type") == "decision_frame" else self.send({"cmd": "advance_to_boundary"})
+        return (
+            response
+            if response.get("type") == "decision_frame"
+            else self.send({"cmd": "advance_to_boundary"})
+        )
 
     def close(self):
         if self.closed:

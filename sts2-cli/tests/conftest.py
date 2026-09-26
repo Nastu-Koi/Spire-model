@@ -2,18 +2,23 @@
 
 import json
 import os
+import queue
 import shutil
 import subprocess
-import queue
 import tempfile
 import threading
+
 import pytest
 
 DOTNET = os.path.expanduser("~/.dotnet-arm64/dotnet")
 if not os.path.isfile(DOTNET):
     DOTNET = shutil.which("dotnet") or DOTNET
-PROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       "src", "Sts2Headless", "Sts2Headless.csproj")
+PROJECT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "src",
+    "Sts2Headless",
+    "Sts2Headless.csproj",
+)
 
 
 class Game:
@@ -23,13 +28,19 @@ class Game:
         env = os.environ.copy()
         # Match the interactive launcher's default: resolve dependencies from lib,
         # never silently borrow missing assemblies from the Steam installation.
-        env["STS2_GAME_DIR"] = os.path.join(os.path.dirname(os.path.dirname(PROJECT)), "..", "lib")
+        env["STS2_GAME_DIR"] = os.path.join(
+            os.path.dirname(os.path.dirname(PROJECT)), "..", "lib"
+        )
         # Engine diagnostics can fill a pipe while a test is waiting for JSON.
         self.stderr = tempfile.TemporaryFile(mode="w+t")
         self.proc = subprocess.Popen(
             [DOTNET, "run", "--no-build", "--project", PROJECT],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
-            text=True, bufsize=1, env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr,
+            text=True,
+            bufsize=1,
+            env=env,
         )
         self.responses = queue.Queue()
 
@@ -65,8 +76,15 @@ class Game:
         return self._read()
 
     def start(self, character="Ironclad", seed="test", ascension=0, lang="en"):
-        return self.send({"cmd": "start_run", "character": character,
-                          "seed": seed, "ascension": ascension, "lang": lang})
+        return self.send(
+            {
+                "cmd": "start_run",
+                "character": character,
+                "seed": seed,
+                "ascension": ascension,
+                "lang": lang,
+            }
+        )
 
     def act(self, action, **args):
         cmd = {"cmd": "action", "action": action}
@@ -109,7 +127,9 @@ class Game:
         """Play one card or end turn."""
         hand = state.get("hand", [])
         energy = state.get("energy", 0)
-        playable = [c for c in hand if c.get("can_play") and c.get("cost", 99) <= energy]
+        playable = [
+            c for c in hand if c.get("can_play") and c.get("cost", 99) <= energy
+        ]
         if playable:
             card = playable[0]
             args = {"card_index": card["index"]}
@@ -133,7 +153,9 @@ class Game:
         minimum = state["min_select"]
         if minimum == 0:
             return self.act("skip_select")
-        return self.act("select_cards", indices=",".join(str(i) for i in range(minimum)))
+        return self.act(
+            "select_cards", indices=",".join(str(i) for i in range(minimum))
+        )
 
     def skip_neow(self, state):
         """Skip the Neow event and all follow-up rewards until map_select."""

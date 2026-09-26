@@ -1,4 +1,5 @@
 """The same session evaluator serves rollout, deployment and differentiable replay."""
+
 from dataclasses import dataclass
 
 import torch
@@ -33,8 +34,14 @@ class SessionPolicy:
         self.last_state_version = None
 
     def choose(self, frame, *, teacher=None, sample=True, top_k=0, pad_to=None):
-        return choose_batch([self], [frame], teachers=[teacher], sample=sample,
-                            top_k=top_k, pad_to=pad_to)[0]
+        return choose_batch(
+            [self],
+            [frame],
+            teachers=[teacher],
+            sample=sample,
+            top_k=top_k,
+            pad_to=pad_to,
+        )[0]
 
 
 def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_to=None):
@@ -58,7 +65,10 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
     if not policies:
         return []
     model, vocabulary = policies[0].model, policies[0].vocabulary
-    if any(policy.model is not model or policy.vocabulary is not vocabulary for policy in policies[1:]):
+    if any(
+        policy.model is not model or policy.vocabulary is not vocabulary
+        for policy in policies[1:]
+    ):
         raise ValueError("A choice batch must share one model and vocabulary")
 
     results = [None] * len(policies)
@@ -67,15 +77,22 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
     cache_keys = []
     metadata = {}
     vocabulary_digest = vocabulary.digest
-    for batch_index, (policy, frame, teacher) in enumerate(zip(policies, frames, teachers)):
+    for batch_index, (policy, frame, teacher) in enumerate(
+        zip(policies, frames, teachers)
+    ):
         candidates = frame["legal"]["candidates"]
         segment = segment_key(frame)
         if policy.segment != segment:
             policy.reset()
             policy.segment = segment
         state_version = frame["routing"]["state_version"]
-        if policy.last_state_version is not None and state_version <= policy.last_state_version:
-            raise ProtocolError("Decoder requires a fresh state/prefix version after each action")
+        if (
+            policy.last_state_version is not None
+            and state_version <= policy.last_state_version
+        ):
+            raise ProtocolError(
+                "Decoder requires a fresh state/prefix version after each action"
+            )
         policy.last_state_version = state_version
         refs = {candidate["candidate_ref"]: candidate for candidate in candidates}
         if teacher is not None and teacher not in refs:
@@ -83,7 +100,10 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
         if len(candidates) == 1:
             chosen = candidates[0]
             policy.previous_slot = chosen["decoder_slot_ref"]
-            if policy.encoded and policy.previous_slot in policy.encoded.observation.slot_refs:
+            if (
+                policy.encoded
+                and policy.previous_slot in policy.encoded.observation.slot_refs
+            ):
                 index = policy.encoded.observation.slot_refs.index(policy.previous_slot)
                 policy.previous_embedding = policy.encoded.actions[index]
             else:
@@ -92,14 +112,27 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
             continue
 
         obs = observation(frame)
-        precision = (model.device.type, torch.is_autocast_enabled(model.device.type),
-                     str(torch.get_autocast_dtype(model.device.type)), model.config.backend)
+        precision = (
+            model.device.type,
+            torch.is_autocast_enabled(model.device.type),
+            str(torch.get_autocast_dtype(model.device.type)),
+            model.config.backend,
+        )
         if policy.precision is not None and policy.precision != precision:
-            raise ProtocolError("Cannot change numerical backend during a buffered session")
+            raise ProtocolError(
+                "Cannot change numerical backend during a buffered session"
+            )
         policy.precision = precision
         routing = frame["routing"]
-        cache_key = (segment, routing.get("base_public_version"), routing.get("action_bank_version"),
-                     obs.digest, policy.version, vocabulary_digest, precision)
+        cache_key = (
+            segment,
+            routing.get("base_public_version"),
+            routing.get("action_bank_version"),
+            obs.digest,
+            policy.version,
+            vocabulary_digest,
+            precision,
+        )
         if policy.cache_key != cache_key:
             pending.append(batch_index)
             observations.append(obs)
@@ -120,10 +153,18 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
         legal = {candidate["decoder_slot_ref"]: candidate for candidate in candidates}
         if not set(legal) <= set(slots):
             raise ProtocolError("Unrepresented legal candidate")
-        mask = torch.tensor([slot in legal for slot in slots], dtype=torch.bool, device=model.device)
-        prior = slots.index(policy.previous_slot) if policy.previous_slot in slots else policy.previous_embedding
+        mask = torch.tensor(
+            [slot in legal for slot in slots], dtype=torch.bool, device=model.device
+        )
+        prior = (
+            slots.index(policy.previous_slot)
+            if policy.previous_slot in slots
+            else policy.previous_embedding
+        )
         if policy.previous_slot is not None and prior is None:
-            raise ProtocolError("Previous forced action semantics disappeared from the buffered bank")
+            raise ProtocolError(
+                "Previous forced action semantics disappeared from the buffered bank"
+            )
         active.append(batch_index)
         masks.append(mask)
         contexts.append(obs.context)
@@ -132,31 +173,54 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
         needs_value.append(not policy.started)
 
     if active:
-        outputs = model.decode_batch([policies[i].encoded for i in active], masks, contexts, vocabulary,
-                                     hidden=hidden, previous=previous, value=needs_value)
+        outputs = model.decode_batch(
+            [policies[i].encoded for i in active],
+            masks,
+            contexts,
+            vocabulary,
+            hidden=hidden,
+            previous=previous,
+            value=needs_value,
+        )
         if len(outputs) != len(active):
             raise RuntimeError("decode_batch returned the wrong number of sessions")
         for batch_index, output in zip(active, outputs):
             policy = policies[batch_index]
             _, candidates, refs, teacher = metadata[batch_index]
             slots = policy.encoded.observation.slot_refs
-            legal = {candidate["decoder_slot_ref"]: candidate for candidate in candidates}
+            legal = {
+                candidate["decoder_slot_ref"]: candidate for candidate in candidates
+            }
             policy.hidden, policy.started = output.hidden, True
             distribution = output.distribution()
-            index = (slots.index(refs[teacher]["decoder_slot_ref"]) if teacher is not None else
-                     int(distribution.sample()) if sample else int(output.logits.argmax()))
+            index = (
+                slots.index(refs[teacher]["decoder_slot_ref"])
+                if teacher is not None
+                else int(distribution.sample())
+                if sample
+                else int(output.logits.argmax())
+            )
             chosen = legal[slots[index]]
             ranking = None
             if top_k:
                 indices, _ = output.topk(top_k)
-                ranking = [{"candidate_ref": legal[slots[i]]["candidate_ref"],
-                            "probability": float(distribution.probs[i].detach())}
-                           for i in indices.tolist()]
+                ranking = [
+                    {
+                        "candidate_ref": legal[slots[i]]["candidate_ref"],
+                        "probability": float(distribution.probs[i].detach()),
+                    }
+                    for i in indices.tolist()
+                ]
             policy.previous_slot = slots[index]
             policy.previous_embedding = policy.encoded.actions[index]
             index_tensor = torch.tensor(index, device=model.device)
-            results[batch_index] = Choice(chosen["candidate_ref"], distribution.log_prob(index_tensor),
-                                          distribution.entropy(), output.value, ranking)
+            results[batch_index] = Choice(
+                chosen["candidate_ref"],
+                distribution.log_prob(index_tensor),
+                distribution.entropy(),
+                output.value,
+                ranking,
+            )
     return results
 
 
@@ -184,7 +248,9 @@ def replay_batch(model, vocabulary, list_of_steps, *, pad_to=None):
                 raise ProtocolError("Macro crosses a decoder reset/reveal boundary")
             frames.append(frame)
             teachers.append(step["candidate_ref"])
-        choices = choose_batch([policies[i] for i in active], frames, teachers=teachers, pad_to=pad_to)
+        choices = choose_batch(
+            [policies[i] for i in active], frames, teachers=teachers, pad_to=pad_to
+        )
         for i, choice in zip(active, choices):
             if choice.log_prob is not None:
                 log_probs[i].append(choice.log_prob)
@@ -195,5 +261,7 @@ def replay_batch(model, vocabulary, list_of_steps, *, pad_to=None):
     for probabilities, value, entropy in zip(log_probs, values, entropies):
         if not probabilities:
             raise ProtocolError("All-forced macros are not training samples")
-        result.append((torch.stack(probabilities).sum(), value, torch.stack(entropy).sum()))
+        result.append(
+            (torch.stack(probabilities).sum(), value, torch.stack(entropy).sum())
+        )
     return result

@@ -1,5 +1,4 @@
 """Tests for map navigation."""
-import pytest
 
 
 class TestMapStructure:
@@ -33,8 +32,17 @@ class TestMapStructure:
     def test_node_types_valid(self, game):
         state = game.start(seed="ms4")
         state = game.skip_neow(state)
-        valid = {"Monster", "Elite", "Boss", "RestSite", "Shop",
-                 "Treasure", "Event", "Unknown", "Ancient"}
+        valid = {
+            "Monster",
+            "Elite",
+            "Boss",
+            "RestSite",
+            "Shop",
+            "Treasure",
+            "Event",
+            "Unknown",
+            "Ancient",
+        }
         for ch in state["choices"]:
             assert ch["type"] in valid
 

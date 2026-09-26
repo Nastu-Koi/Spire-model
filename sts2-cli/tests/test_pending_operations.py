@@ -6,8 +6,13 @@ import pytest
 def setup_player(game, seed):
     state = game.start(seed=seed)
     game.skip_neow(state)
-    game.set_player(hp=30, max_hp=80, gold=999, relics=[],
-                    deck=["STRIKE_IRONCLAD"] * 5 + ["DEFEND_IRONCLAD"] * 4 + ["BASH"])
+    game.set_player(
+        hp=30,
+        max_hp=80,
+        gold=999,
+        relics=[],
+        deck=["STRIKE_IRONCLAD"] * 5 + ["DEFEND_IRONCLAD"] * 4 + ["BASH"],
+    )
 
 
 @pytest.mark.parametrize("attempt", range(5))

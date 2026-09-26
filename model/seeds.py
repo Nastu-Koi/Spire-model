@@ -1,4 +1,5 @@
 """Random game-seed queues with a checkpointed, independent generation stream."""
+
 import random
 import secrets
 
@@ -6,13 +7,17 @@ from .protocol import CHARACTERS, fingerprint
 
 
 def validate_evaluation_seeds(seeds, progress):
-    if set(seeds) != set(CHARACTERS) or any(not isinstance(seeds[c], list) or not seeds[c] for c in CHARACTERS):
+    if set(seeds) != set(CHARACTERS) or any(
+        not isinstance(seeds[c], list) or not seeds[c] for c in CHARACTERS
+    ):
         raise ValueError("Evaluation requires a nonempty seed list for each character")
     values = [str(seed) for c in CHARACTERS for seed in seeds[c]]
     if len(values) != len(set(values)):
         raise ValueError("Evaluation seeds must be unique across characters")
     known = set(map(str, progress.get("training_seeds", [])))
-    known.update(map(str, (progress.get("random_seed_schedule") or {}).get("used_seeds", [])))
+    known.update(
+        map(str, (progress.get("random_seed_schedule") or {}).get("used_seeds", []))
+    )
     if known.intersection(values):
         raise ValueError("Evaluation seed overlaps checkpoint training seeds")
     return seeds
@@ -35,7 +40,12 @@ class RandomSeedSchedule:
             self.root = state["root"]
             self.next_round = state["next_round"]
             self.used = set(state["used_seeds"])
-            if not isinstance(self.root, str) or not self.root or type(self.next_round) is not int or self.next_round < 0:
+            if (
+                not isinstance(self.root, str)
+                or not self.root
+                or type(self.next_round) is not int
+                or self.next_round < 0
+            ):
                 raise ValueError("Invalid random seed schedule")
 
     def next(self):
@@ -55,6 +65,10 @@ class RandomSeedSchedule:
         return queue
 
     def state_dict(self):
-        return {"version": "random-game-seeds-v1", "root": self.root,
-                "next_round": self.next_round, "runs_per_character": self.runs_per_character,
-                "used_seeds": sorted(self.used)}
+        return {
+            "version": "random-game-seeds-v1",
+            "root": self.root,
+            "next_round": self.next_round,
+            "runs_per_character": self.runs_per_character,
+            "used_seeds": sorted(self.used),
+        }

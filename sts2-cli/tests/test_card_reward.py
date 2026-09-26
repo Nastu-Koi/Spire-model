@@ -1,4 +1,5 @@
 """Tests for card rewards."""
+
 import pytest
 
 
@@ -9,7 +10,12 @@ class TestCardReward:
         state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
         state = game.auto_play_combat(state)
         # After combat we expect card_reward (or bundle_select, card_select)
-        assert state["decision"] in ("card_reward", "bundle_select", "card_select", "map_select")
+        assert state["decision"] in (
+            "card_reward",
+            "bundle_select",
+            "card_select",
+            "map_select",
+        )
 
     def test_card_reward_structure(self, game):
         state = game.start(seed="cr2")

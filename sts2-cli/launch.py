@@ -2,6 +2,7 @@
 """
 sts2-cli 启动器：选择新游戏（角色、进阶）或读取存档，再进入 python/play.py。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -72,15 +73,17 @@ def _collect_save_entries() -> list[dict]:
             try:
                 with open(path, encoding="utf-8") as f:
                     d = json.load(f)
-                out.append({
-                    "kind": "replay",
-                    "path": path,
-                    "name": name,
-                    "mtime": st.st_mtime,
-                    "character": d.get("character", "?"),
-                    "seed": d.get("seed", "?"),
-                    "actions": len(d.get("actions", [])),
-                })
+                out.append(
+                    {
+                        "kind": "replay",
+                        "path": path,
+                        "name": name,
+                        "mtime": st.st_mtime,
+                        "character": d.get("character", "?"),
+                        "seed": d.get("seed", "?"),
+                        "actions": len(d.get("actions", [])),
+                    }
+                )
             except (json.JSONDecodeError, OSError):
                 pass
         elif name.endswith(".save"):
@@ -93,23 +96,27 @@ def _collect_save_entries() -> list[dict]:
                 pl = data.get("players", [])
                 if pl:
                     char_id = pl[0].get("character_id", "?")
-                out.append({
-                    "kind": "native",
-                    "path": path,
-                    "name": name,
-                    "mtime": st.st_mtime,
-                    "seed": seed,
-                    "ascension": asc,
-                    "character_id": char_id,
-                })
+                out.append(
+                    {
+                        "kind": "native",
+                        "path": path,
+                        "name": name,
+                        "mtime": st.st_mtime,
+                        "seed": seed,
+                        "ascension": asc,
+                        "character_id": char_id,
+                    }
+                )
             except (json.JSONDecodeError, OSError):
-                out.append({
-                    "kind": "native",
-                    "path": path,
-                    "name": name,
-                    "mtime": st.st_mtime,
-                    "broken": True,
-                })
+                out.append(
+                    {
+                        "kind": "native",
+                        "path": path,
+                        "name": name,
+                        "mtime": st.st_mtime,
+                        "broken": True,
+                    }
+                )
     out.sort(key=lambda x: -x["mtime"])
     return out
 
@@ -119,7 +126,9 @@ def _format_entry(titles: dict[str, str], e: dict) -> str:
     if e["kind"] == "replay":
         ch = str(e.get("character", "?"))
         zh = _char_zh(titles, ch)
-        return f"{e['name']}  |  {zh}  |  种子 {e['seed']}  |  {e['actions']} 步  |  {ts}"
+        return (
+            f"{e['name']}  |  {zh}  |  种子 {e['seed']}  |  {e['actions']} 步  |  {ts}"
+        )
     if e.get("broken"):
         return f"{e['name']}  |  （文件损坏或无法解析）  |  {ts}"
     cid = str(e.get("character_id", "?"))
@@ -149,14 +158,16 @@ def _menu_new_game(titles: dict[str, str], lang: str) -> None:
         10,
         default=0,
     )
-    print(f"\n启动：{ _char_zh(titles, character) }  |  进阶 {asc}\n")
+    print(f"\n启动：{_char_zh(titles, character)}  |  进阶 {asc}\n")
     _run_play(["--character", character, "--ascension", str(asc)], lang)
 
 
 def _menu_load_save(titles: dict[str, str], lang: str) -> None:
     entries = _collect_save_entries()
     if not entries:
-        print("\n  saves/ 下没有 .save 或 .json 存档。请先在对局中存档或退出时选择保存。\n")
+        print(
+            "\n  saves/ 下没有 .save 或 .json 存档。请先在对局中存档或退出时选择保存。\n"
+        )
         return
 
     print("\n── 读取存档（按修改时间从新到旧）──")
@@ -165,7 +176,7 @@ def _menu_load_save(titles: dict[str, str], lang: str) -> None:
     for i, e in enumerate(entries, 1):
         tag = "继续游戏" if e["kind"] == "native" else "操作回放"
         print(f"  {i:2}  [{tag}]  {_format_entry(titles, e)}")
-    print(f"\n  0  返回上一级")
+    print("\n  0  返回上一级")
     choice = _pick_int("\n输入编号: ", 0, len(entries))
     if choice == 0:
         return
@@ -181,14 +192,14 @@ def _menu_load_save(titles: dict[str, str], lang: str) -> None:
 
 def _main_interactive(lang: str) -> None:
     sys.path.insert(0, os.path.join(ROOT, "python"))
-    import play as play_mod  # noqa: PLC0415
+    import play as play_mod
 
     play_mod.ensure_setup()
     titles = _load_char_titles()
 
     while True:
         print(
-            f"""
+            """
 ╔══════════════════════════════════════╗
 ║       Slay the Spire 2  CLI          ║
 ╚══════════════════════════════════════╝

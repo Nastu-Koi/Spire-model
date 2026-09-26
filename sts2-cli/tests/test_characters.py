@@ -1,4 +1,5 @@
 """Tests for all 5 characters."""
+
 import pytest
 
 CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
@@ -42,12 +43,18 @@ class TestFullRun:
             elif dec == "combat_play":
                 state = game.auto_combat(state)
             elif dec == "map_select":
-                state = game.act("select_map_node",
-                                 col=state["choices"][0]["col"],
-                                 row=state["choices"][0]["row"])
+                state = game.act(
+                    "select_map_node",
+                    col=state["choices"][0]["col"],
+                    row=state["choices"][0]["row"],
+                )
             elif dec == "event_choice":
                 opts = [o for o in state["options"] if not o.get("is_locked")]
-                state = game.act("choose_option", option_index=opts[0]["index"]) if opts else game.act("leave_room")
+                state = (
+                    game.act("choose_option", option_index=opts[0]["index"])
+                    if opts
+                    else game.act("leave_room")
+                )
             elif dec == "card_reward":
                 state = game.act("skip_card_reward")
             elif dec == "bundle_select":

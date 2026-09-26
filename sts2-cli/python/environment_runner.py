@@ -5,9 +5,10 @@ reward implementation. A policy is never called for a forced action, including
 the final commit of a buffered selection.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from time import monotonic, sleep
-from typing import Callable, Protocol
+from typing import Protocol
 
 
 class Engine(Protocol):
@@ -37,9 +38,16 @@ class RunTrace:
 
 
 class EnvironmentRunner:
-    def __init__(self, engine: Engine, choose: Callable[[dict, list[dict]], str], *,
-                 allow_prototype: bool = False, max_steps: int = 10000,
-                 waiting_timeout: float = 30, poll_interval: float = 0.01):
+    def __init__(
+        self,
+        engine: Engine,
+        choose: Callable[[dict, list[dict]], str],
+        *,
+        allow_prototype: bool = False,
+        max_steps: int = 10000,
+        waiting_timeout: float = 30,
+        poll_interval: float = 0.01,
+    ):
         if max_steps < 1 or waiting_timeout <= 0 or poll_interval < 0:
             raise ValueError("Invalid runner limits")
         self.engine = engine
@@ -69,7 +77,9 @@ class EnvironmentRunner:
                 self.trace.terminal = frame
                 return self.trace
             if boundary == "error":
-                raise EnvironmentError(frame.get("error", {}).get("code", "engine_error"), frame)
+                raise EnvironmentError(
+                    frame.get("error", {}).get("code", "engine_error"), frame
+                )
             if steps >= self.max_steps:
                 raise EnvironmentError("unresolved_step_limit", frame)
             if boundary == "waiting":
@@ -101,8 +111,12 @@ class EnvironmentRunner:
                 if chosen not in refs:
                     raise EnvironmentError("policy_selected_unknown_candidate", frame)
             routing = frame["routing"]
-            command = {"cmd": "execute_candidate", "decision_id": routing["decision_id"],
-                       "state_version": routing["state_version"], "candidate_ref": chosen}
+            command = {
+                "cmd": "execute_candidate",
+                "decision_id": routing["decision_id"],
+                "state_version": routing["state_version"],
+                "candidate_ref": chosen,
+            }
             if "selection_revision" in routing:
                 command["selection_revision"] = routing["selection_revision"]
             self.trace.executions.append(Execution(frame, chosen, origin))

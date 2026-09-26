@@ -1,5 +1,4 @@
 """Tests for shop scenarios."""
-import pytest
 
 
 class TestShopStructure:
