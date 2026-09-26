@@ -182,9 +182,21 @@ def test_public_packet_has_no_internal_routing_or_rng(game):
     assert frame["public"]["selection_context"]["operation"] == "upgrade"
 
 
-def test_requires_verified_a10_run(game):
-    game.start(ascension=0)
-    assert advance(game)["error"]["code"] == "unverified_run_contract"
+@pytest.mark.parametrize("ascension", [0, 10])
+def test_accepts_verified_ascension_endpoints(game, ascension):
+    game.send(
+        {
+            "cmd": "start_run",
+            "character": "Ironclad",
+            "seed": "protocol_endpoints",
+            "ascension": ascension,
+            "decision_protocol": True,
+        }
+    )
+    frame = advance(game)
+    assert frame["boundary"] == "decision", frame
+    assert frame["contract"]["fixed_ascension"] == ascension
+    assert frame["contract"]["training_ready"] is True
 
 
 def test_public_selection_bank_ignores_deck_order(game):
