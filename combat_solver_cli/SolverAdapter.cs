@@ -14,6 +14,7 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
+using MegaCrit.Sts2.Core.Rooms;
 using Sts2Headless;
 
 namespace CombatSolverCli;
@@ -30,6 +31,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 
 	private bool _poisoned;
 	private string? _refinementFailure;
+	private int _effectiveBudgetMs;
 	private readonly Queue<object> _turnPlan = new();
 	private int _planTurn = -1;
 	private string? _planPolicy;
@@ -73,8 +75,24 @@ internal sealed class SolverAdapter(Assembly assembly)
 			execution = "engine-candidates-v1",
 			strategy = "optional_reuse_within_turn",
 			game = typeof(CardModel).Assembly.FullName,
-			combat_in_progress = CombatManager.Instance.IsInProgress
+			combat_in_progress = CombatManager.Instance.IsInProgress,
+			boss_combat = IsBossCombat()
 		};
+	}
+
+	private static bool IsBossCombat()
+	{
+		return CombatManager.Instance.IsInProgress
+			&& CombatManager.Instance.DebugOnlyGetState()?.RunState.CurrentRoom?.RoomType == RoomType.Boss;
+	}
+
+	private static int EffectiveBudget(JsonElement request)
+	{
+		int normal = request.TryGetProperty("budget_ms", out var normalValue) ? normalValue.GetInt32() : 1000;
+		int boss = request.TryGetProperty("boss_budget_ms", out var bossValue) ? bossValue.GetInt32() : normal;
+		if (normal < 1 || normal > 120000 || boss < 1 || boss > 120000)
+			throw new ArgumentOutOfRangeException("budget_ms / boss_budget_ms");
+		return IsBossCombat() ? boss : normal;
 	}
 
 	public void PrepareEngine()
@@ -137,7 +155,9 @@ internal sealed class SolverAdapter(Assembly assembly)
 			result_scope = Get(result, "ResultScope"),
 			expanded_nodes = Get(result, "ExpandedNodes"),
 			only_death_routes_found = Get(result, "OnlyDeathRoutesFound"),
-			refinement_failure = _refinementFailure
+			refinement_failure = _refinementFailure,
+			budget_ms = _effectiveBudgetMs,
+			boss_combat = IsBossCombat()
 		};
 	}
 
@@ -153,6 +173,14 @@ internal sealed class SolverAdapter(Assembly assembly)
 		if (!CombatManager.Instance.IsInProgress || val == null)
 		{
 			throw new InvalidOperationException("solver_step requires an active combat");
+		}
+		// Entry effects and replayed actions can expose choices without a solver plan.
+		// Return the unchanged boundary so the run search can retain every legal branch.
+		if (_selector == null &&
+			((frame.GetProperty("public").TryGetProperty("selection_context", out var selection) && selection.ValueKind == JsonValueKind.Object)
+			 || frame.GetProperty("public").GetProperty("phase").GetString() == "card_reward"))
+		{
+			return new { type = "solver_selection_required", frame = frame };
 		}
 		Player player = val.Players.Single();
 		object search = null;
@@ -175,7 +203,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 			}
 			bool reuse = request.TryGetProperty("reuse_turn_plan", out var reuseValue) && reuseValue.GetBoolean();
 			int turn = player.PlayerCombatState.TurnNumber;
-			string policy = string.Join("|", new[] { "budget_ms", "potions", "potion_policy", "beam_width", "beam_portfolio" }
+			string policy = string.Join("|", new[] { "budget_ms", "boss_budget_ms", "potions", "potion_policy", "beam_width", "beam_portfolio" }
 				.Select(k => request.TryGetProperty(k, out var v) ? v.GetRawText() : ""));
 			if (!reuse || _planTurn != turn || _planPolicy != policy) _turnPlan.Clear();
 			object obj2;
@@ -360,12 +388,8 @@ internal sealed class SolverAdapter(Assembly assembly)
 		{
 			Type("Entry").GetProperty("Logger", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).SetValue(null, New("CombatSolverLog", Path.Combine(Path.GetTempPath(), "combat-solver-cli", Environment.ProcessId.ToString())));
 		}
-		JsonElement value2;
-		int num = (request.TryGetProperty("budget_ms", out value2) ? value2.GetInt32() : 1000);
-		if (num < 1 || num > 120000)
-		{
-			throw new ArgumentOutOfRangeException("budget_ms");
-		}
+		int num = EffectiveBudget(request);
+		_effectiveBudgetMs = num;
 		Assembly assembly = Assembly.Load("sts2");
 		Type type = assembly.GetType("MegaCrit.Sts2.Core.Combat.CombatManager", throwOnError: true);
 		object value3 = type.GetProperty("Instance", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).GetValue(null);

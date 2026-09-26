@@ -52,15 +52,20 @@ def main():
         cmd.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
         cmd.add_argument('--output', type=Path, required=True)
         cmd.add_argument('--budget-ms', type=int, default=1000)
+        cmd.add_argument('--boss-budget-ms', type=int, default=5000)
+        cmd.add_argument('--early-route-diversity', action=argparse.BooleanOptionalAction, default=True)
         cmd.add_argument('--ascension', type=int, choices=range(11), default=10)
         cmd.add_argument('--weight', type=float, default=5)
         cmd.add_argument('--max-expansions', type=int, default=2000)
         cmd.add_argument('--max-seconds', type=float, default=3600)
         cmd.add_argument('--max-steps', type=int, default=10000)
         cmd.add_argument('--reuse-turn-plan', action='store_true')
-        cmd.add_argument('--rollout-decisions', type=int, default=0)
+        cmd.add_argument('--rollout-decisions', type=int, default=None, help='Rollout horizon: A* defaults to 0, MCTS to 256')
         cmd.add_argument('--search-lanes', type=int, choices=[1, 2, 4], default=2)
         if name == 'search':
+            cmd.add_argument('--algorithm', choices=['astar', 'mcts'], default='astar')
+            cmd.add_argument('--local-repair', action=argparse.BooleanOptionalAction, default=True)
+            cmd.add_argument('--risk-aware-rollout', action=argparse.BooleanOptionalAction, default=True)
             cmd.add_argument('--character', choices=CHARACTERS, default='Ironclad')
             cmd.add_argument('--seed', required=True)
             restore = cmd.add_mutually_exclusive_group()
@@ -74,6 +79,8 @@ def main():
     verify.add_argument('--prefix', type=Path, required=True)
     verify.add_argument('--output', type=Path, required=True)
     args = vars(parser.parse_args()); command = args.pop('command')
+    if 'rollout_decisions' in args and args['rollout_decisions'] is None:
+        args['rollout_decisions'] = 256 if args.get('algorithm') == 'mcts' else 0
     if command == 'configure':
         solver, lib = args['solver'].resolve(), args['lib'].resolve()
         if not solver.is_file() or not (lib/'sts2.dll').is_file(): raise FileNotFoundError('Solver or game DLL missing')
@@ -90,7 +97,14 @@ def main():
         result = [first_combat(args['config'], c, args['seed'], args['budget_ms'], args['reuse_turn_plan'], args['ascension']) for c in args['characters']]
         args['output'].parent.mkdir(parents=True, exist_ok=True); write_json(args['output'], result)
     elif command == 'search':
-        result = search(**args)
+        algorithm = args.pop('algorithm')
+        if algorithm == 'astar':
+            args.pop('local_repair');args.pop('risk_aware_rollout')
+        if algorithm == 'mcts':
+            from .mcts import search as run_search
+        else:
+            run_search = search
+        result = run_search(**args)
         print(json.dumps(result, ensure_ascii=False)); raise SystemExit(0 if result['status'] == 'verified_victory' else 2)
     elif command == 'batch':
         from .batch import generate

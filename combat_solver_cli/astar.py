@@ -11,6 +11,7 @@ import time
 
 from model.protocol import CHARACTERS, action_semantics, execution_command, fingerprint, validate_frame
 from .client import SolverEngine, InfrastructureError
+from .diversity import RouteDiversity
 
 
 class SearchLimit(RuntimeError): pass
@@ -68,17 +69,28 @@ def prefix_progress(prefix):
     return -1 if prefix is None else max(0, prefix.act-1)*20 + prefix.floor
 
 
-def pop_frontier(frontier, backtrack_before=None):
+def pop_frontier(frontier, backtrack_before=None, diversity=None):
     """Pop by A* score, optionally forcing an earlier unexplored decision."""
-    if backtrack_before is None:
+    if backtrack_before is None and diversity is None:
         return heapq.heappop(frontier)
-    eligible = [i for i, node in enumerate(frontier) if prefix_progress(node[3]) <= backtrack_before]
+    eligible = [i for i, node in enumerate(frontier)
+                if backtrack_before is None or prefix_progress(node[3]) <= backtrack_before]
     if not eligible:
-        return heapq.heappop(frontier)
-    index = min(eligible, key=frontier.__getitem__)
+        eligible = range(len(frontier))
+    index = min(eligible, key=lambda i: diversity.rank(frontier[i]) if diversity else frontier[i])
     item = frontier.pop(index)
     heapq.heapify(frontier)
     return item
+
+
+def failure_backtrack(act, floor, failures):
+    """Diversify after every native defeat, with independent depth per location."""
+    if type(act) is not int or type(floor) is not int:
+        return None
+    key = f'{act}:{floor}'
+    failures[key] = failures.get(key, 0) + 1
+    progress = max(0, act-1)*20 + floor
+    return max(0, progress - (3 + 2*(failures[key]-1)))
 
 
 def player(frame):
@@ -183,7 +195,7 @@ def preference(frame, candidate):
         if 'SMITH' in content: return 3 if hp > .45 else 0
     if verb == 'SELECT_ONE':
         operation = (frame['public'].get('selection_context') or {}).get('operation', '').lower()
-        if 'remove' in operation: return -card_value(source, deck)
+        if 'remove' in operation or operation == 'exhaust': return -card_value(source, deck)
         if 'upgrade' in operation: return card_value(source, []) + (not source.get('upgraded'))
         return card_value(source, deck)
     if 'BUY' in verb or 'PURCHASE' in verb:
@@ -204,11 +216,12 @@ def preference(frame, candidate):
 
 
 class ReplayWorker:
-    def __init__(self, config, character, seed, budget_ms, deadline, max_steps, reuse_turn_plan=False, ascension=10):
+    def __init__(self, config, character, seed, budget_ms, deadline, max_steps, reuse_turn_plan=False, ascension=10, boss_budget_ms=5000):
         self.config, self.character, self.seed = config, character, seed
         self.budget_ms, self.deadline, self.max_steps = budget_ms, deadline, max_steps
         self.reuse_turn_plan = reuse_turn_plan
         self.ascension = ascension
+        self.boss_budget_ms = boss_budget_ms
         self.engine = self.prefix = self.frame = None
         self.last_player = {}
         self.stop_path = None
@@ -247,7 +260,7 @@ class ReplayWorker:
     def restore(self, prefix):
         if self.engine is not None and self.prefix is prefix: return self.settle()
         self.close(); self.check()
-        self.engine = SolverEngine(self.config, timeout=max(30, self.budget_ms/1000+15))
+        self.engine = SolverEngine(self.config, timeout=max(30, max(self.budget_ms, self.boss_budget_ms)/1000+15))
         self.frame = self.engine.reset(self.character, self.seed, self.ascension)
         self.prefix = None
         for record in prefix.records() if prefix else []:
@@ -279,7 +292,14 @@ class ReplayWorker:
                 if info.get('type') != 'solver_info': raise ReplayMismatch(str(info))
                 in_combat = info['combat_in_progress']
             if in_combat:
-                result = self.engine.step(self.frame, budget_ms=self.budget_ms, potions=True, reuse_turn_plan=self.reuse_turn_plan)
+                result = self.engine.step(self.frame, budget_ms=self.budget_ms, boss_budget_ms=self.boss_budget_ms, potions=True, reuse_turn_plan=self.reuse_turn_plan)
+                if result.get('type') == 'solver_selection_required':
+                    if phase not in ('card_select', 'card_reward'):
+                        raise ReplayMismatch('Solver requested selection outside a selection boundary')
+                    if len(self.frame['legal']['candidates']) == 1:
+                        self.execute(action_semantics(self.frame['legal']['candidates'][0]), 'forced')
+                        continue
+                    return self.frame
                 if result.get('type') != 'solver_step': raise ReplayMismatch(str(result))
                 candidate = next(c for c in self.frame['legal']['candidates'] if c['candidate_ref'] == result['candidate_ref'])
                 self.prefix = append(self.prefix, self.frame, candidate, 'combat_solver')
@@ -331,13 +351,15 @@ def load_frontier(path, character, seed, weight, ascension=10, with_state=False)
 
 def search(config, character, seed, output, *, budget_ms=1000, weight=5., max_expansions=2000,
            max_seconds=3600, max_steps=10000, resume=None, prefix_path=None, reuse_turn_plan=False,
-           rollout_decisions=0, ascension=10, search_lanes=1):
+           rollout_decisions=0, ascension=10, search_lanes=1, boss_budget_ms=5000, early_route_diversity=True):
     if search_lanes not in (1, 2, 4): raise ValueError('search_lanes must be 1, 2 or 4')
     if character not in CHARACTERS: raise ValueError('Unsupported character')
     if type(ascension) is not int or not 0 <= ascension <= 10: raise ValueError('ascension must be an integer from 0 to 10')
     if any(not math.isfinite(x) or x <= 0 for x in (budget_ms, weight, max_expansions, max_seconds, max_steps)):
         raise ValueError('Search budgets must be finite and positive')
     if type(rollout_decisions) is not int or rollout_decisions < 0: raise ValueError('rollout_decisions must be a nonnegative integer')
+    if type(boss_budget_ms) is not int or not 1 <= boss_budget_ms <= 120000:
+        raise ValueError('boss_budget_ms must be an integer from 1 to 120000')
     if budget_ms > 120000: raise ValueError('CombatSolver budget_ms cannot exceed 120000')
     if resume and prefix_path: raise ValueError('Choose either a frontier or a prefix')
     if search_lanes > 1:
@@ -348,7 +370,8 @@ def search(config, character, seed, output, *, budget_ms=1000, weight=5., max_ex
                                resume=resume, prefix_path=prefix_path,
                                reuse_turn_plan=reuse_turn_plan,
                                rollout_decisions=rollout_decisions,
-                               ascension=ascension, search_lanes=search_lanes)
+                               ascension=ascension, search_lanes=search_lanes, boss_budget_ms=boss_budget_ms,
+                               early_route_diversity=early_route_diversity)
     resume_state = {}
     if resume:
         frontier, resume_state = load_frontier(resume, character, seed, weight, ascension, with_state=True)
@@ -361,7 +384,7 @@ def search(config, character, seed, output, *, budget_ms=1000, weight=5., max_ex
     output = Path(output); output.mkdir(parents=True, exist_ok=False)
     serial = itertools.count(max((x[1] for x in frontier), default=-1)+1)
     started = time.monotonic()
-    worker = ReplayWorker(config, character, seed, budget_ms, started+max_seconds, max_steps, reuse_turn_plan, ascension)
+    worker = ReplayWorker(config, character, seed, budget_ms, started+max_seconds, max_steps, reuse_turn_plan, ascension, boss_budget_ms)
     worker.stop_path = output/'STOP'
     expanded = deaths = errors = 0
     best, winner, active = (0, 0), None, None
@@ -369,9 +392,12 @@ def search(config, character, seed, output, *, budget_ms=1000, weight=5., max_ex
     probe_next, probe_left = None, 0
     backtrack_before = resume_state.get('backtrack_before')
     boss_failures = int(resume_state.get('boss_failures', 0))
+    failure_counts = dict(resume_state.get('failure_counts', {}))
+    diversity = RouteDiversity(resume_state.get('route_visits')) if early_route_diversity else None
     def checkpoint():
         save_frontier(output/'frontier.json', frontier, character, seed, weight, ascension,
-                      dict(backtrack_before=backtrack_before, boss_failures=boss_failures))
+                      dict(backtrack_before=backtrack_before, boss_failures=boss_failures, failure_counts=failure_counts,
+                           route_visits=diversity.visits if diversity else resume_state.get('route_visits', {})))
     with (output/'search.jsonl').open('w') as journal:
         def log(event):
             event.update(character=character, seed=seed, ascension=ascension)
@@ -385,9 +411,11 @@ def search(config, character, seed, output, *, budget_ms=1000, weight=5., max_ex
                     active = frontier.pop(index); heapq.heapify(frontier)
                     probe_left -= 1
                 else:
-                    active = pop_frontier(frontier, backtrack_before)
+                    active = pop_frontier(frontier, backtrack_before, diversity)
+                    if diversity: diversity.begin()
                     backtrack_before = None
                     probe_left = rollout_decisions
+                if diversity: diversity.observe(active)
                 probe_next = None
                 expanded += 1
                 f, _, g, parent, pending = active
@@ -403,9 +431,7 @@ def search(config, character, seed, output, *, budget_ms=1000, weight=5., max_ex
                         dead_act, dead_floor = dead.get('act'), dead.get('floor')
                         if isinstance(dead_act, int) and isinstance(dead_floor, int) and dead_floor >= 15:
                             boss_failures += 1
-                            failed_progress = max(0, dead_act-1)*20 + dead_floor
-                            jump = min(failed_progress, 3 + 2*(boss_failures-1))
-                            backtrack_before = failed_progress-jump
+                        backtrack_before = failure_backtrack(dead_act, dead_floor, failure_counts)
                         log(dict(expanded=expanded, result='native_defeat', act=dead_act, floor=dead_floor,
                                  prefix_steps=worker.prefix.length if worker.prefix else 0,
                                  boss_failures=boss_failures, backtrack_before=backtrack_before))
@@ -456,10 +482,12 @@ def search(config, character, seed, output, *, budget_ms=1000, weight=5., max_ex
             if winner is None: checkpoint()
     summary = dict(status=status, character=character, seed=seed, ascension=ascension, expanded=expanded, deaths=deaths,
                    unresolved_branches=errors, frontier=len(frontier), best_progress=best, solver_steps=worker.solver_steps,
-                   replayed_steps=worker.replayed, seconds=time.monotonic()-started, algorithm='weighted_astar_failure_backjump_v1' if rollout_decisions else 'weighted_astar_deferred_prefix_v1',
-                   heuristic_weight=weight, optimality_proven=False, budget_ms=budget_ms, reuse_turn_plan=reuse_turn_plan, rollout_decisions=rollout_decisions, boss_failures=boss_failures, stop_reason=reason)
+                   replayed_steps=worker.replayed, seconds=time.monotonic()-started, algorithm='weighted_astar_early_routes_v3' if diversity else 'weighted_astar_location_backjump_v2',
+                   heuristic_weight=weight, optimality_proven=False, budget_ms=budget_ms, reuse_turn_plan=reuse_turn_plan, rollout_decisions=rollout_decisions, boss_failures=boss_failures, failure_counts=failure_counts, stop_reason=reason,
+                   boss_budget_ms=boss_budget_ms, early_route_diversity=early_route_diversity,
+                   route_visits=diversity.visits if diversity else {})
     if winner is not None:
-        write_json(output/'winning_prefix.json', dict(character=character, seed=seed, ascension=ascension, records=winner.records(), search=dict(algorithm=summary['algorithm'], weight=weight, budget_ms=budget_ms, reuse_turn_plan=reuse_turn_plan, rollout_decisions=rollout_decisions)))
+        write_json(output/'winning_prefix.json', dict(character=character, seed=seed, ascension=ascension, records=winner.records(), search=dict(algorithm=summary['algorithm'], weight=weight, budget_ms=budget_ms, boss_budget_ms=boss_budget_ms, early_route_diversity=early_route_diversity, reuse_turn_plan=reuse_turn_plan, rollout_decisions=rollout_decisions)))
         try:
             from .trajectory import verify_and_export
             verify_and_export(config, output/'winning_prefix.json', output)

@@ -1,4 +1,4 @@
-"""Atomic directory checkpoints with bounded tensor staging and optimizer/RNG state."""
+"""Atomic directory checkpoints with model, optimizer, and RNG state."""
 from dataclasses import asdict
 import ctypes
 import json
@@ -16,30 +16,6 @@ from .model import PolicyValue
 from .representation import Vocabulary
 
 
-def _bytes(value):
-    if isinstance(value, torch.Tensor):
-        return value.numel() * value.element_size()
-    if isinstance(value, dict):
-        return sum(_bytes(x) for x in value.values())
-    return 0
-
-
-def _shards(items, directory, prefix, limit=64 * 1024**2):
-    names, shard, size = [], {}, 0
-    for key, value in items:
-        needed = _bytes(value)
-        if shard and size + needed > limit:
-            name = f"{prefix}-{len(names):05}.pt"
-            torch.save(shard, directory / name)
-            names.append(name)
-            shard, size = {}, 0
-        shard[key], size = value, size + needed
-    if shard:
-        name = f"{prefix}-{len(names):05}.pt"
-        torch.save(shard, directory / name)
-        names.append(name)
-    return names
-
 
 def save_checkpoint(path, model, vocabulary, optimizer=None, scheduler=None, *, training=None, progress=None, overwrite=False):
     path = Path(path)
@@ -52,18 +28,11 @@ def save_checkpoint(path, model, vocabulary, optimizer=None, scheduler=None, *, 
         manifest = {"format": 2, "model": asdict(model.config), "vocabulary": vocabulary.symbols,
                     "training": asdict(training or TrainConfig()), "progress": progress or {},
                     "torch_version": str(torch.__version__)}
-        manifest["weights"] = _shards(model.state_dict().items(), stage, "weights")
+        torch.save(model.state_dict(), stage / "weights.pt")
+        manifest["weights"] = ["weights.pt"]
         if optimizer:
-            state = optimizer.state_dict()
-            parts = {"single": state} if "param_groups" in state else state
-            manifest["optimizer"] = {}
-            for kind, part in parts.items():
-                if not isinstance(part, dict) or "param_groups" not in part:
-                    raise ValueError("Unsupported optimizer state format")
-                manifest["optimizer"][kind] = {
-                    "groups": part["param_groups"],
-                    "shards": _shards(part["state"].items(), stage, "optimizer-" + kind),
-                }
+            torch.save(optimizer.state_dict(), stage / "optimizer.pt")
+            manifest["optimizer"] = "optimizer.pt"
         torch.save({"torch": torch.get_rng_state(), "python": random.getstate(),
                     "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
                     "scheduler": scheduler.state_dict() if scheduler else None}, stage / "runtime.pt")
@@ -121,17 +90,23 @@ def restore_training(path, optimizer, scheduler=None):
     manifest = json.loads((path / "manifest.json").read_text())
     if manifest.get("format") != 2 or "optimizer" not in manifest:
         raise ValueError("Checkpoint has no optimizer state")
-    restored = {}
-    for kind, part in manifest["optimizer"].items():
-        state = {}
-        for name in part["shards"]:
-            shard = torch.load(path / name, map_location="cpu", weights_only=True)
-            if state.keys() & shard.keys():
-                raise ValueError("Duplicate optimizer checkpoint tensors")
-            state.update(shard)
-        restored[kind] = {"state": state, "param_groups": part["groups"]}
+    if isinstance(manifest["optimizer"], str):
+        restored = torch.load(path / manifest["optimizer"], map_location="cpu", weights_only=True)
+    else:
+        # Read checkpoints written before optimizer state was saved in one file.
+        restored = {}
+        for kind, part in manifest["optimizer"].items():
+            state = {}
+            for name in part["shards"]:
+                shard = torch.load(path / name, map_location="cpu", weights_only=True)
+                if state.keys() & shard.keys():
+                    raise ValueError("Duplicate optimizer checkpoint tensors")
+                state.update(shard)
+            restored[kind] = {"state": state, "param_groups": part["groups"]}
+        if set(restored) == {"single"}:
+            restored = restored["single"]
     # Delegate dtype/device restoration to the actual optimizer, including Muon.
-    optimizer.load_state_dict(restored["single"] if set(restored) == {"single"} else restored)
+    optimizer.load_state_dict(restored)
     runtime = torch.load(path / "runtime.pt", map_location="cpu", weights_only=True)
     torch.set_rng_state(runtime["torch"])
     random.setstate(runtime["python"])

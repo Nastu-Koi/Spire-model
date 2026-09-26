@@ -8,7 +8,7 @@
     "local_size": 64,
     "local_heads": 4,
     "local_layers": 1,
-    "vocabulary_size": 16384,
+    "vocabulary_size": 2048,
     "field_buckets": 512,
     "relation_buckets": 128,
     "backend": "auto",

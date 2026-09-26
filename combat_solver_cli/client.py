@@ -51,9 +51,10 @@ class SolverEngine(CliEngine):
         except (OSError, ProtocolError, TimeoutError) as exc:
             raise InfrastructureError(f"Worker transport failed: {exc}") from exc
 
-    def solver(self, command, frame, *, budget_ms=1000, potions=False, potion_policy=None, reuse_turn_plan=False, beam_width=60, beam_portfolio=True):
+    def solver(self, command, frame, *, budget_ms=1000, potions=False, potion_policy=None, reuse_turn_plan=False, beam_width=60, beam_portfolio=True, boss_budget_ms=None):
         routing = frame["routing"]
         return self.send(dict(cmd=command, budget_ms=budget_ms, potions=potions, reuse_turn_plan=reuse_turn_plan, beam_width=beam_width, beam_portfolio=beam_portfolio,
+            **({"boss_budget_ms": boss_budget_ms} if boss_budget_ms is not None else {}),
             **({"potion_policy": potion_policy} if potion_policy else {}),
             **{k: routing[k] for k in ("decision_id", "state_version", "selection_revision") if k in routing}))
 

@@ -8,6 +8,7 @@ import threading
 import time
 
 from .astar import load_frontier, save_frontier, write_json
+from .diversity import partition_routes
 
 
 def _copy_verified(source, output):
@@ -42,7 +43,15 @@ def _merge_checkpoints(outputs, inputs, results, character, seed, weight, ascens
                                   for s in states)
     thresholds = [s.get('backtrack_before') for s in states
                   if s.get('backtrack_before') is not None]
-    state = {'boss_failures': failures,
+    route_visits = dict(base_state.get('route_visits', {}))
+    for state in states:
+        for key, count in state.get('route_visits', {}).items():
+            route_visits[key] = route_visits.get(key, 0) + max(0, count-base_state.get('route_visits', {}).get(key, 0))
+    counts = dict(base_state.get('failure_counts', {}))
+    for state in states:
+        for key, count in state.get('failure_counts', {}).items():
+            counts[key] = counts.get(key, 0) + max(0, count-base_state.get('failure_counts', {}).get(key, 0))
+    state = {'boss_failures': failures, 'failure_counts': counts, 'route_visits': route_visits,
              'backtrack_before': min(thresholds) if thresholds else None}
     save_frontier(output/'frontier.json', frontier, character, seed, weight, ascension,
                   search_state=state)
@@ -53,7 +62,7 @@ def search_parallel(config, character, seed, output, *, budget_ms=1000, weight=5
                     max_expansions=2000, max_seconds=3600, max_steps=10000,
                     resume=None, prefix_path=None, reuse_turn_plan=False,
                     rollout_decisions=0, ascension=10, search_lanes=2,
-                    serial_search=None):
+                    serial_search=None, boss_budget_ms=5000, early_route_diversity=True):
     if search_lanes not in (2, 4):
         raise ValueError('Parallel search supports two or four lanes')
     if resume and prefix_path:
@@ -75,7 +84,8 @@ def search_parallel(config, character, seed, output, *, budget_ms=1000, weight=5
                              weight=weight, max_expansions=min(max_expansions, search_lanes-1),
                              max_seconds=max_seconds, max_steps=max_steps,
                              prefix_path=prefix_path, reuse_turn_plan=reuse_turn_plan,
-                             rollout_decisions=0, ascension=ascension, search_lanes=1)
+                             rollout_decisions=0, ascension=ascension, search_lanes=1,
+                             boss_budget_ms=boss_budget_ms, early_route_diversity=early_route_diversity)
         warm_expanded = int(warm.get('expanded', 0))
         if warm.get('status') in ('verified_victory', 'infrastructure_error', 'replay_failed', 'stopped'):
             if warm.get('status') == 'verified_victory':
@@ -98,7 +108,7 @@ def search_parallel(config, character, seed, output, *, budget_ms=1000, weight=5
         return summary
 
     ordered = sorted(frontier, key=lambda node: (node[0], node[1]))
-    shards = [ordered[index::search_lanes] for index in range(search_lanes)]
+    shards = partition_routes(frontier, search_lanes) if early_route_diversity else [ordered[index::search_lanes] for index in range(search_lanes)]
     inputs = output/'lane-inputs'; inputs.mkdir()
     lane_outputs = [output/f'lane-{index}' for index in range(search_lanes)]
     input_paths = []
@@ -113,7 +123,7 @@ def search_parallel(config, character, seed, output, *, budget_ms=1000, weight=5
                    max_seconds=max(0.001, max_seconds-(time.monotonic()-started)),
                    max_steps=max_steps, reuse_turn_plan=reuse_turn_plan,
                    rollout_decisions=rollout_decisions, ascension=ascension,
-                   search_lanes=1)
+                   search_lanes=1, boss_budget_ms=boss_budget_ms, early_route_diversity=early_route_diversity)
     stop_monitor = threading.Event()
 
     def propagate_stop():
@@ -175,13 +185,14 @@ def search_parallel(config, character, seed, output, *, budget_ms=1000, weight=5
     summary = dict(status=status, character=character, seed=seed, ascension=ascension,
                    search_lanes=search_lanes, expanded=expanded, deaths=deaths,
                    unresolved_branches=unresolved, frontier=frontier_size,
-                   algorithm=f'{search_lanes}_lane_sharded_weighted_astar_v1',
-                   heuristic_weight=weight, budget_ms=budget_ms,
+                   algorithm=f'{search_lanes}_lane_early_routes_v2' if early_route_diversity else f'{search_lanes}_lane_sharded_weighted_astar_v1',
+                   heuristic_weight=weight, budget_ms=budget_ms, boss_budget_ms=boss_budget_ms,
+                   early_route_diversity=early_route_diversity,
                    reuse_turn_plan=reuse_turn_plan,
                    rollout_decisions=rollout_decisions,
                    boss_failures=state.get('boss_failures', max(
                        (int(r.get('boss_failures', 0)) for r in results), default=0)),
                    recovered_lanes=recovered, lanes=results)
-    write_json(output/'lanes.json', dict(input_sizes=list(map(len, shards)), lanes=results))
+    write_json(output/'lanes.json', dict(input_sizes=list(map(len, shards)), partition_strategy="early_routes" if early_route_diversity else "score_stripes", lanes=results))
     write_json(output/'summary.json', summary)
     return summary
