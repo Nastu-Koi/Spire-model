@@ -1,0 +1,4645 @@
+{
+  "provenance": {
+    "game_version": "0.111.0",
+    "source_attempt": "public-a0-native-005/000008",
+    "step": 70,
+    "game_assembly_sha256": "6e142d54e4abc39298b7f5df292905c4ef4c261d6b51afbde90e61f447c05711"
+  },
+  "before": {
+    "public": {
+      "phase": "combat",
+      "entities": [
+        {
+          "ref": "player",
+          "entity_type": "player",
+          "character": "IRONCLAD",
+          "act": 1,
+          "floor": 8,
+          "hp": 58,
+          "max_hp": 80,
+          "block": 0,
+          "gold": 19,
+          "energy": 1,
+          "max_energy": 3,
+          "stars": 0,
+          "round": 5,
+          "capacity": 3
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.BASH",
+          "cost": 2,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 8,
+            "VulnerablePower": 2
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.BASH",
+            "coverage": "opaque"
+          },
+          "ref": "card:0",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.BATTLE_TRANCE",
+          "cost": 0,
+          "card_type": "Skill",
+          "rarity": "Uncommon",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Cards": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.BATTLE_TRANCE",
+            "coverage": "opaque"
+          },
+          "ref": "card:1",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:2",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:3",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:4",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:5",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.JUGGERNAUT",
+          "cost": 2,
+          "card_type": "Power",
+          "rarity": "Rare",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.JUGGERNAUT",
+            "coverage": "opaque"
+          },
+          "ref": "card:6",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.SECOND_WIND",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Uncommon",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.SECOND_WIND",
+            "coverage": "opaque"
+          },
+          "ref": "card:7",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.SPITE",
+          "cost": 0,
+          "card_type": "Attack",
+          "rarity": "Uncommon",
+          "upgraded": true,
+          "upgrade_level": 1,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 5,
+            "Repeat": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.SPITE",
+            "coverage": "opaque"
+          },
+          "ref": "card:8",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:9",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:10",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:11",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:12",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:13",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.TREMBLE",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Common",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Exhaust"
+          ],
+          "stats": {
+            "VulnerablePower": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.TREMBLE",
+            "coverage": "opaque"
+          },
+          "ref": "card:14",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "deck",
+          "count": 15,
+          "complete": true,
+          "order_known": false
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:15",
+          "zone": "hand",
+          "owner_ref": "player",
+          "position": 0
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:16",
+          "zone": "hand",
+          "owner_ref": "player",
+          "position": 1
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.SPITE",
+          "cost": 0,
+          "card_type": "Attack",
+          "rarity": "Uncommon",
+          "upgraded": true,
+          "upgrade_level": 1,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 5,
+            "Repeat": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.SPITE",
+            "coverage": "opaque"
+          },
+          "ref": "card:17",
+          "zone": "hand",
+          "owner_ref": "player",
+          "position": 2
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:18",
+          "zone": "hand",
+          "owner_ref": "player",
+          "position": 3
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "hand",
+          "count": 4,
+          "complete": true,
+          "order_known": true
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.BATTLE_TRANCE",
+          "cost": 0,
+          "card_type": "Skill",
+          "rarity": "Uncommon",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Cards": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.BATTLE_TRANCE",
+            "coverage": "opaque"
+          },
+          "ref": "card:19",
+          "zone": "draw_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:20",
+          "zone": "draw_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:21",
+          "zone": "draw_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "draw_pile",
+          "count": 3,
+          "complete": true,
+          "order_known": false
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.BASH",
+          "cost": 2,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 8,
+            "VulnerablePower": 2
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.BASH",
+            "coverage": "opaque"
+          },
+          "ref": "card:22",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:23",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:24",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:25",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:26",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:27",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:28",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.JUGGERNAUT",
+          "cost": 2,
+          "card_type": "Power",
+          "rarity": "Rare",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.JUGGERNAUT",
+            "coverage": "opaque"
+          },
+          "ref": "card:29",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.SECOND_WIND",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Uncommon",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.SECOND_WIND",
+            "coverage": "opaque"
+          },
+          "ref": "card:30",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:31",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:32",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:33",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "discard_pile",
+          "count": 12,
+          "complete": true,
+          "order_known": false
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:34",
+          "zone": "exhaust_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.TREMBLE",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Common",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Exhaust"
+          ],
+          "stats": {
+            "VulnerablePower": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.TREMBLE",
+            "coverage": "opaque"
+          },
+          "ref": "card:35",
+          "zone": "exhaust_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "exhaust_pile",
+          "count": 2,
+          "complete": true,
+          "order_known": false
+        },
+        {
+          "ref": "creature:1",
+          "entity_type": "enemy",
+          "content_id": "MONSTER.PHROG_PARASITE",
+          "hp": 8,
+          "max_hp": 62,
+          "block": 0,
+          "known": true
+        },
+        {
+          "entity_type": "intent",
+          "owner_ref": "creature:1",
+          "intent": "StatusCard"
+        },
+        {
+          "entity_type": "orb_slots",
+          "capacity": 0
+        },
+        {
+          "entity_type": "power",
+          "content_id": "POWER.INFESTED_POWER",
+          "owner_ref": "creature:1",
+          "stacks": 4
+        },
+        {
+          "entity_type": "power",
+          "content_id": "POWER.VULNERABLE_POWER",
+          "owner_ref": "creature:1",
+          "stacks": 2
+        },
+        {
+          "entity_type": "relic",
+          "content_id": "RELIC.BURNING_BLOOD",
+          "owner_ref": "player",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "RELIC.BURNING_BLOOD",
+            "coverage": "opaque"
+          }
+        },
+        {
+          "entity_type": "relic",
+          "content_id": "RELIC.FISHING_ROD",
+          "owner_ref": "player",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "RELIC.FISHING_ROD",
+            "coverage": "opaque"
+          }
+        },
+        {
+          "ref": "potion:0",
+          "entity_type": "potion",
+          "slot": 0,
+          "content_id": "POTION.WEAK_POTION",
+          "owner_ref": "player",
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "POTION.WEAK_POTION",
+            "coverage": "opaque"
+          }
+        },
+        {
+          "ref": "map:0:2",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 2,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:3",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 3,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:5",
+          "entity_type": "map_node",
+          "content_id": "Shop",
+          "floor": 5,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:6",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 6,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:8",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 8,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:9",
+          "entity_type": "map_node",
+          "content_id": "Treasure",
+          "floor": 9,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:11",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 11,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:12",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 12,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:13",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 13,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:14",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 14,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:15",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 15,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:1",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 1,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:4",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 4,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:7",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 7,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:10",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 10,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:13",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 13,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:1",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 1,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:2",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 2,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:3",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 3,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:5",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 5,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:6",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 6,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:11",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 11,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:12",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 12,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:13",
+          "entity_type": "map_node",
+          "content_id": "Shop",
+          "floor": 13,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:3",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 3,
+          "col": 3,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:3:4",
+          "entity_type": "map_node",
+          "content_id": "Shop",
+          "floor": 4,
+          "col": 3,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:3:9",
+          "entity_type": "map_node",
+          "content_id": "Treasure",
+          "floor": 9,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:10",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 10,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:11",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 11,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:12",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 12,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:14",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 14,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:15",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 15,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:1",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 1,
+          "col": 4,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:4:2",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 2,
+          "col": 4,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:4:5",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 5,
+          "col": 4,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:4:6",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 6,
+          "col": 4,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:4:8",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 8,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:10",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 10,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:11",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 11,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:13",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 13,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:14",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 14,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:3",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 3,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:6",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 6,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:7",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 7,
+          "col": 5,
+          "current": true,
+          "visited": true
+        },
+        {
+          "ref": "map:5:8",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 8,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:9",
+          "entity_type": "map_node",
+          "content_id": "Treasure",
+          "floor": 9,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:12",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 12,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:13",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 13,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:4",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 4,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:5",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 5,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:6",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 6,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:7",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 7,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:8",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 8,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:9",
+          "entity_type": "map_node",
+          "content_id": "Treasure",
+          "floor": 9,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:10",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 10,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:11",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 11,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:12",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 12,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:13",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 13,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:14",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 14,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:15",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 15,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:0",
+          "entity_type": "map_node",
+          "content_id": "Ancient",
+          "floor": 0,
+          "col": 3,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:3:16",
+          "entity_type": "map_node",
+          "content_id": "Boss",
+          "floor": 16,
+          "col": 3,
+          "current": false,
+          "visited": false
+        }
+      ],
+      "memory": [],
+      "relations": [
+        {
+          "source": "map:0:2",
+          "target": "map:0:3",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:3",
+          "target": "map:1:4",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:5",
+          "target": "map:0:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:6",
+          "target": "map:1:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:8",
+          "target": "map:0:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:9",
+          "target": "map:1:10",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:11",
+          "target": "map:0:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:12",
+          "target": "map:0:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:13",
+          "target": "map:0:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:14",
+          "target": "map:0:15",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:15",
+          "target": "map:3:16",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:1",
+          "target": "map:0:2",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:4",
+          "target": "map:2:5",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:4",
+          "target": "map:0:5",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:7",
+          "target": "map:0:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:10",
+          "target": "map:0:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:10",
+          "target": "map:2:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:13",
+          "target": "map:0:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:1",
+          "target": "map:2:2",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:2",
+          "target": "map:2:3",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:3",
+          "target": "map:1:4",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:5",
+          "target": "map:2:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:6",
+          "target": "map:1:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:11",
+          "target": "map:2:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:12",
+          "target": "map:1:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:12",
+          "target": "map:2:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:13",
+          "target": "map:3:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:3",
+          "target": "map:3:4",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:4",
+          "target": "map:4:5",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:9",
+          "target": "map:3:10",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:10",
+          "target": "map:3:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:11",
+          "target": "map:2:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:11",
+          "target": "map:3:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:12",
+          "target": "map:2:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:14",
+          "target": "map:3:15",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:15",
+          "target": "map:3:16",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:1",
+          "target": "map:4:2",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:2",
+          "target": "map:5:3",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:2",
+          "target": "map:3:3",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:5",
+          "target": "map:4:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:6",
+          "target": "map:5:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:8",
+          "target": "map:3:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:8",
+          "target": "map:5:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:10",
+          "target": "map:3:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:10",
+          "target": "map:4:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:11",
+          "target": "map:5:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:13",
+          "target": "map:4:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:14",
+          "target": "map:3:15",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:3",
+          "target": "map:6:4",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:6",
+          "target": "map:5:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:7",
+          "target": "map:5:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:7",
+          "target": "map:4:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:8",
+          "target": "map:5:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:8",
+          "target": "map:6:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:9",
+          "target": "map:4:10",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:12",
+          "target": "map:4:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:12",
+          "target": "map:5:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:13",
+          "target": "map:4:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:4",
+          "target": "map:6:5",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:5",
+          "target": "map:6:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:5",
+          "target": "map:5:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:6",
+          "target": "map:6:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:6",
+          "target": "map:5:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:7",
+          "target": "map:6:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:7",
+          "target": "map:5:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:8",
+          "target": "map:6:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:9",
+          "target": "map:6:10",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:10",
+          "target": "map:6:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:11",
+          "target": "map:5:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:11",
+          "target": "map:6:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:12",
+          "target": "map:6:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:13",
+          "target": "map:6:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:14",
+          "target": "map:6:15",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:15",
+          "target": "map:3:16",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:0",
+          "target": "map:1:1",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:0",
+          "target": "map:2:1",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:0",
+          "target": "map:4:1",
+          "role": "map_edge"
+        }
+      ]
+    },
+    "legal": {
+      "candidates": [
+        {
+          "verb": "PLAY_CARD",
+          "decoder_slot_ref": "play:card:16:none",
+          "source_refs": [
+            "card:16"
+          ],
+          "target_refs": [],
+          "effect_coverage": "opaque",
+          "candidate_ref": "c0"
+        },
+        {
+          "verb": "PLAY_CARD",
+          "decoder_slot_ref": "play:card:17:creature:1",
+          "source_refs": [
+            "card:17"
+          ],
+          "target_refs": [
+            "creature:1"
+          ],
+          "effect_coverage": "opaque",
+          "candidate_ref": "c1"
+        },
+        {
+          "verb": "PLAY_CARD",
+          "decoder_slot_ref": "play:card:18:creature:1",
+          "source_refs": [
+            "card:18"
+          ],
+          "target_refs": [
+            "creature:1"
+          ],
+          "effect_coverage": "opaque",
+          "candidate_ref": "c2"
+        },
+        {
+          "verb": "END_TURN",
+          "decoder_slot_ref": "end_turn",
+          "source_refs": [],
+          "target_refs": [],
+          "effect_coverage": "opaque",
+          "candidate_ref": "c3"
+        },
+        {
+          "verb": "DISCARD_POTION",
+          "decoder_slot_ref": "discard:potion:0",
+          "source_refs": [
+            "potion:0"
+          ],
+          "target_refs": [],
+          "effect_coverage": "opaque",
+          "candidate_ref": "c4"
+        },
+        {
+          "verb": "USE_POTION",
+          "decoder_slot_ref": "use:potion:0:creature:1",
+          "source_refs": [
+            "potion:0"
+          ],
+          "target_refs": [
+            "creature:1"
+          ],
+          "effect_coverage": "opaque",
+          "candidate_ref": "c5"
+        }
+      ]
+    }
+  },
+  "candidate": {
+    "verb": "PLAY_CARD",
+    "decoder_slot_ref": "play:card:17:creature:1",
+    "source_refs": [
+      "card:17"
+    ],
+    "target_refs": [
+      "creature:1"
+    ],
+    "effect_coverage": "opaque",
+    "candidate_ref": "c1"
+  },
+  "after": {
+    "public": {
+      "phase": "combat",
+      "entities": [
+        {
+          "ref": "player",
+          "entity_type": "player",
+          "character": "IRONCLAD",
+          "act": 1,
+          "floor": 8,
+          "hp": 58,
+          "max_hp": 80,
+          "block": 0,
+          "gold": 19,
+          "energy": 1,
+          "max_energy": 3,
+          "stars": 0,
+          "round": 5,
+          "capacity": 3
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.BASH",
+          "cost": 2,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 8,
+            "VulnerablePower": 2
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.BASH",
+            "coverage": "opaque"
+          },
+          "ref": "card:0",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.BATTLE_TRANCE",
+          "cost": 0,
+          "card_type": "Skill",
+          "rarity": "Uncommon",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Cards": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.BATTLE_TRANCE",
+            "coverage": "opaque"
+          },
+          "ref": "card:1",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:2",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:3",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:4",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:5",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.JUGGERNAUT",
+          "cost": 2,
+          "card_type": "Power",
+          "rarity": "Rare",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.JUGGERNAUT",
+            "coverage": "opaque"
+          },
+          "ref": "card:6",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.SECOND_WIND",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Uncommon",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.SECOND_WIND",
+            "coverage": "opaque"
+          },
+          "ref": "card:7",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.SPITE",
+          "cost": 0,
+          "card_type": "Attack",
+          "rarity": "Uncommon",
+          "upgraded": true,
+          "upgrade_level": 1,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 5,
+            "Repeat": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.SPITE",
+            "coverage": "opaque"
+          },
+          "ref": "card:8",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:9",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:10",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:11",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:12",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:13",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.TREMBLE",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Common",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Exhaust"
+          ],
+          "stats": {
+            "VulnerablePower": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.TREMBLE",
+            "coverage": "opaque"
+          },
+          "ref": "card:14",
+          "zone": "deck",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "deck",
+          "count": 15,
+          "complete": true,
+          "order_known": false
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:15",
+          "zone": "hand",
+          "owner_ref": "player",
+          "position": 0
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:16",
+          "zone": "hand",
+          "owner_ref": "player",
+          "position": 1
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:17",
+          "zone": "hand",
+          "owner_ref": "player",
+          "position": 2
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "hand",
+          "count": 3,
+          "complete": true,
+          "order_known": true
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.BATTLE_TRANCE",
+          "cost": 0,
+          "card_type": "Skill",
+          "rarity": "Uncommon",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Cards": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.BATTLE_TRANCE",
+            "coverage": "opaque"
+          },
+          "ref": "card:18",
+          "zone": "draw_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:19",
+          "zone": "draw_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:20",
+          "zone": "draw_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "draw_pile",
+          "count": 3,
+          "complete": true,
+          "order_known": false
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.BASH",
+          "cost": 2,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 8,
+            "VulnerablePower": 2
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.BASH",
+            "coverage": "opaque"
+          },
+          "ref": "card:21",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:22",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.DEFEND_IRONCLAD",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.DEFEND_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:23",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:24",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:25",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:26",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:27",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.JUGGERNAUT",
+          "cost": 2,
+          "card_type": "Power",
+          "rarity": "Rare",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.JUGGERNAUT",
+            "coverage": "opaque"
+          },
+          "ref": "card:28",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.SECOND_WIND",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Uncommon",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Block": 5
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "Self",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.SECOND_WIND",
+            "coverage": "opaque"
+          },
+          "ref": "card:29",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.SPITE",
+          "cost": 0,
+          "card_type": "Attack",
+          "rarity": "Uncommon",
+          "upgraded": true,
+          "upgrade_level": 1,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 5,
+            "Repeat": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.SPITE",
+            "coverage": "opaque"
+          },
+          "ref": "card:30",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:31",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:32",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.STRIKE_IRONCLAD",
+          "cost": 1,
+          "card_type": "Attack",
+          "rarity": "Basic",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [],
+          "stats": {
+            "Damage": 6
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.STRIKE_IRONCLAD",
+            "coverage": "opaque"
+          },
+          "ref": "card:33",
+          "zone": "discard_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "discard_pile",
+          "count": 13,
+          "complete": true,
+          "order_known": false
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.INFECTION",
+          "cost": 0,
+          "card_type": "Status",
+          "rarity": "Status",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Unplayable"
+          ],
+          "stats": {
+            "Damage": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "None",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.INFECTION",
+            "coverage": "opaque"
+          },
+          "ref": "card:34",
+          "zone": "exhaust_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "card",
+          "content_id": "CARD.TREMBLE",
+          "cost": 1,
+          "card_type": "Skill",
+          "rarity": "Common",
+          "upgraded": false,
+          "upgrade_level": 0,
+          "x_cost": false,
+          "star_cost": -1,
+          "base_star_cost": -1,
+          "stars_x": false,
+          "retain": false,
+          "exhaust_on_next_play": false,
+          "rider_effect": null,
+          "keywords": [
+            "Exhaust"
+          ],
+          "stats": {
+            "VulnerablePower": 3
+          },
+          "enchantment": null,
+          "affliction": null,
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "CARD.TREMBLE",
+            "coverage": "opaque"
+          },
+          "ref": "card:35",
+          "zone": "exhaust_pile",
+          "owner_ref": "player"
+        },
+        {
+          "entity_type": "pile_summary",
+          "zone": "exhaust_pile",
+          "count": 2,
+          "complete": true,
+          "order_known": false
+        },
+        {
+          "ref": "creature:1",
+          "entity_type": "enemy",
+          "content_id": "MONSTER.PHROG_PARASITE",
+          "hp": 1,
+          "max_hp": 62,
+          "block": 0,
+          "known": true
+        },
+        {
+          "entity_type": "intent",
+          "owner_ref": "creature:1",
+          "intent": "StatusCard"
+        },
+        {
+          "entity_type": "orb_slots",
+          "capacity": 0
+        },
+        {
+          "entity_type": "power",
+          "content_id": "POWER.INFESTED_POWER",
+          "owner_ref": "creature:1",
+          "stacks": 4
+        },
+        {
+          "entity_type": "power",
+          "content_id": "POWER.VULNERABLE_POWER",
+          "owner_ref": "creature:1",
+          "stacks": 2
+        },
+        {
+          "entity_type": "relic",
+          "content_id": "RELIC.BURNING_BLOOD",
+          "owner_ref": "player",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "RELIC.BURNING_BLOOD",
+            "coverage": "opaque"
+          }
+        },
+        {
+          "entity_type": "relic",
+          "content_id": "RELIC.FISHING_ROD",
+          "owner_ref": "player",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "RELIC.FISHING_ROD",
+            "coverage": "opaque"
+          }
+        },
+        {
+          "ref": "potion:0",
+          "entity_type": "potion",
+          "slot": 0,
+          "content_id": "POTION.WEAK_POTION",
+          "owner_ref": "player",
+          "target_type": "AnyEnemy",
+          "effect_coverage": "opaque",
+          "semantic_program": {
+            "kind": "effect",
+            "op": "OPAQUE_RULE",
+            "content_id": "POTION.WEAK_POTION",
+            "coverage": "opaque"
+          }
+        },
+        {
+          "ref": "map:0:2",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 2,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:3",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 3,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:5",
+          "entity_type": "map_node",
+          "content_id": "Shop",
+          "floor": 5,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:6",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 6,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:8",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 8,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:9",
+          "entity_type": "map_node",
+          "content_id": "Treasure",
+          "floor": 9,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:11",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 11,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:12",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 12,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:13",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 13,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:14",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 14,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:0:15",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 15,
+          "col": 0,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:1",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 1,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:4",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 4,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:7",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 7,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:10",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 10,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:1:13",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 13,
+          "col": 1,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:1",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 1,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:2",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 2,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:3",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 3,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:5",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 5,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:6",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 6,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:11",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 11,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:12",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 12,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:2:13",
+          "entity_type": "map_node",
+          "content_id": "Shop",
+          "floor": 13,
+          "col": 2,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:3",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 3,
+          "col": 3,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:3:4",
+          "entity_type": "map_node",
+          "content_id": "Shop",
+          "floor": 4,
+          "col": 3,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:3:9",
+          "entity_type": "map_node",
+          "content_id": "Treasure",
+          "floor": 9,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:10",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 10,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:11",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 11,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:12",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 12,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:14",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 14,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:15",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 15,
+          "col": 3,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:1",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 1,
+          "col": 4,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:4:2",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 2,
+          "col": 4,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:4:5",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 5,
+          "col": 4,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:4:6",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 6,
+          "col": 4,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:4:8",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 8,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:10",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 10,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:11",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 11,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:13",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 13,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:4:14",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 14,
+          "col": 4,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:3",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 3,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:6",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 6,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:7",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 7,
+          "col": 5,
+          "current": true,
+          "visited": true
+        },
+        {
+          "ref": "map:5:8",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 8,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:9",
+          "entity_type": "map_node",
+          "content_id": "Treasure",
+          "floor": 9,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:12",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 12,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:5:13",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 13,
+          "col": 5,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:4",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 4,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:5",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 5,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:6",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 6,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:7",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 7,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:8",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 8,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:9",
+          "entity_type": "map_node",
+          "content_id": "Treasure",
+          "floor": 9,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:10",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 10,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:11",
+          "entity_type": "map_node",
+          "content_id": "Unknown",
+          "floor": 11,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:12",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 12,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:13",
+          "entity_type": "map_node",
+          "content_id": "Monster",
+          "floor": 13,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:14",
+          "entity_type": "map_node",
+          "content_id": "Elite",
+          "floor": 14,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:6:15",
+          "entity_type": "map_node",
+          "content_id": "RestSite",
+          "floor": 15,
+          "col": 6,
+          "current": false,
+          "visited": false
+        },
+        {
+          "ref": "map:3:0",
+          "entity_type": "map_node",
+          "content_id": "Ancient",
+          "floor": 0,
+          "col": 3,
+          "current": false,
+          "visited": true
+        },
+        {
+          "ref": "map:3:16",
+          "entity_type": "map_node",
+          "content_id": "Boss",
+          "floor": 16,
+          "col": 3,
+          "current": false,
+          "visited": false
+        }
+      ],
+      "memory": [],
+      "relations": [
+        {
+          "source": "map:0:2",
+          "target": "map:0:3",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:3",
+          "target": "map:1:4",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:5",
+          "target": "map:0:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:6",
+          "target": "map:1:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:8",
+          "target": "map:0:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:9",
+          "target": "map:1:10",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:11",
+          "target": "map:0:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:12",
+          "target": "map:0:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:13",
+          "target": "map:0:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:14",
+          "target": "map:0:15",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:0:15",
+          "target": "map:3:16",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:1",
+          "target": "map:0:2",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:4",
+          "target": "map:2:5",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:4",
+          "target": "map:0:5",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:7",
+          "target": "map:0:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:10",
+          "target": "map:0:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:10",
+          "target": "map:2:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:1:13",
+          "target": "map:0:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:1",
+          "target": "map:2:2",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:2",
+          "target": "map:2:3",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:3",
+          "target": "map:1:4",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:5",
+          "target": "map:2:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:6",
+          "target": "map:1:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:11",
+          "target": "map:2:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:12",
+          "target": "map:1:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:12",
+          "target": "map:2:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:2:13",
+          "target": "map:3:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:3",
+          "target": "map:3:4",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:4",
+          "target": "map:4:5",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:9",
+          "target": "map:3:10",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:10",
+          "target": "map:3:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:11",
+          "target": "map:2:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:11",
+          "target": "map:3:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:12",
+          "target": "map:2:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:14",
+          "target": "map:3:15",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:15",
+          "target": "map:3:16",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:1",
+          "target": "map:4:2",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:2",
+          "target": "map:5:3",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:2",
+          "target": "map:3:3",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:5",
+          "target": "map:4:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:6",
+          "target": "map:5:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:8",
+          "target": "map:3:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:8",
+          "target": "map:5:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:10",
+          "target": "map:3:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:10",
+          "target": "map:4:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:11",
+          "target": "map:5:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:13",
+          "target": "map:4:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:4:14",
+          "target": "map:3:15",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:3",
+          "target": "map:6:4",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:6",
+          "target": "map:5:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:7",
+          "target": "map:5:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:7",
+          "target": "map:4:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:8",
+          "target": "map:5:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:8",
+          "target": "map:6:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:9",
+          "target": "map:4:10",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:12",
+          "target": "map:4:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:12",
+          "target": "map:5:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:5:13",
+          "target": "map:4:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:4",
+          "target": "map:6:5",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:5",
+          "target": "map:6:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:5",
+          "target": "map:5:6",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:6",
+          "target": "map:6:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:6",
+          "target": "map:5:7",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:7",
+          "target": "map:6:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:7",
+          "target": "map:5:8",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:8",
+          "target": "map:6:9",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:9",
+          "target": "map:6:10",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:10",
+          "target": "map:6:11",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:11",
+          "target": "map:5:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:11",
+          "target": "map:6:12",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:12",
+          "target": "map:6:13",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:13",
+          "target": "map:6:14",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:14",
+          "target": "map:6:15",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:6:15",
+          "target": "map:3:16",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:0",
+          "target": "map:1:1",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:0",
+          "target": "map:2:1",
+          "role": "map_edge"
+        },
+        {
+          "source": "map:3:0",
+          "target": "map:4:1",
+          "role": "map_edge"
+        }
+      ]
+    }
+  }
+}

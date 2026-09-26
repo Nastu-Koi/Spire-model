@@ -1,0 +1,8 @@
+{
+  "source": "combat_solver_cli/artifacts/public-a0-native-005/attempts/000008/decisions.jsonl",
+  "frames": 96,
+  "mismatched_steps": [],
+  "scope": "legacy extraction action and all root candidate scores",
+  "workspace_starting_head": "f88d05a1ce9e6d9af50974a75f548ec8b25ba9db",
+  "baseline_source_sha256": "2236f5ad7181d489853d3ddc078948fa94d2a07b74c654f94928926efbadf94a"
+}

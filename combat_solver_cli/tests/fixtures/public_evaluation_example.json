@@ -1,0 +1,26 @@
+{
+  "schema": "public-evaluation-v1",
+  "game_version": "0.111.0",
+  "seeds": {
+    "dev": ["BD1D31C2468C7C1F"],
+    "holdout": ["7BC36934C96A4B11"]
+  },
+  "profiles": [
+    {
+      "name": "baseline",
+      "depth": 3,
+      "beam_width": 16,
+      "effect_profile": "legacy"
+    }
+  ],
+  "repetitions": 2,
+  "sampling_seed": 1024,
+  "budget": {
+    "max_seconds_per_run": 60,
+    "max_steps": 10000
+  },
+  "stop": {
+    "complete_all_cases": true,
+    "abandon": true
+  }
+}

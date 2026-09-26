@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Combat.History.Entries;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Map;
@@ -61,6 +62,12 @@ public partial class RunSimulator
             ["block"] = player.Creature.Block, ["gold"] = player.Gold,
             ["energy"] = pcs?.Energy, ["max_energy"] = pcs?.MaxEnergy, ["stars"] = pcs?.Stars,
             ["round"] = combat?.RoundNumber, ["capacity"] = player.MaxPotionCount,
+            // Same visible, turn-scoped damage fact used by Spite's glow. Healing
+            // afterwards does not undo the event; no hidden history is exported.
+            ["lost_hp_this_turn"] = combat != null && CombatManager.Instance.IsInProgress
+                ? CombatManager.Instance.History.Entries.OfType<DamageReceivedEntry>().Any(e =>
+                    e.HappenedThisTurn(combat) && e.Receiver == player.Creature && e.Result.UnblockedDamage > 0)
+                : (bool?)null,
         });
         snapshot.Creatures[player.Creature] = "player";
         snapshot.AddPile(player.Deck.Cards, "deck");
@@ -129,6 +136,7 @@ public partial class RunSimulator
             snapshot.Potions[potion] = reference;
             snapshot.Entities.Add(new() { ["ref"] = reference, ["entity_type"] = "potion", ["slot"] = i,
                 ["content_id"] = potion.Id.ToString(), ["owner_ref"] = "player", ["target_type"] = potion.TargetType.ToString(),
+                ["stats"] = potion.DynamicVars.Values.ToDictionary(v => v.Name, v => (object?)v.BaseValue),
                 ["effect_coverage"] = "opaque", ["semantic_program"] = OpaqueProgram(potion.Id.ToString()) });
         }
         if (_runState.Map is { } map)

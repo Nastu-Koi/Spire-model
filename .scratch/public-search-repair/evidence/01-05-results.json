@@ -1,0 +1,1636 @@
+{
+  "schema": "public-evaluation-report-v1",
+  "split": "dev",
+  "game_version": "0.111.0",
+  "profiles": [
+    {
+      "name": "legacy",
+      "depth": 3,
+      "beam_width": 16,
+      "effect_profile": "legacy"
+    },
+    {
+      "name": "second_wind",
+      "depth": 3,
+      "beam_width": 16,
+      "effect_profile": "second_wind"
+    },
+    {
+      "name": "spite",
+      "depth": 3,
+      "beam_width": 16,
+      "effect_profile": "spite"
+    },
+    {
+      "name": "cards",
+      "depth": 3,
+      "beam_width": 16,
+      "effect_profile": "cards"
+    },
+    {
+      "name": "potions",
+      "depth": 3,
+      "beam_width": 16,
+      "effect_profile": "potions"
+    }
+  ],
+  "budget": {
+    "max_seconds_per_run": 60,
+    "max_steps": 10000
+  },
+  "stop": {
+    "complete_all_cases": true,
+    "abandon": true
+  },
+  "workers_per_run": 1,
+  "source_hashes": {
+    "planner_sha256": "0b5ec9e2ae0287167eeb56e641c28744e4b08a29c7c3d7bcca787cc9bf20ba45",
+    "effects_sha256": "4300b0e81545af2a6da0b87e53a80528d28f6872a3aa2984fda27c7e870964d7",
+    "generator_sha256": "296411dce306481b4728d67d5ea96f595f481236815b41a7853118ace1ae807c",
+    "representation_sha256": "2aee2b33f9f41330fc4c972a30f3be7a97eee75c09c3ee6b13196bbf7d7855a7",
+    "engine_sha256": "6dfbfb1227136d05530dd901bdc26e675523e0d1b162f6694adff8e4f78f31a7",
+    "game_sha256": "6e142d54e4abc39298b7f5df292905c4ef4c261d6b51afbde90e61f447c05711",
+    "evaluator_sha256": "f0575934231fccd5d95ca7339fd9c9bd03b04191d00cf4cfec9e1721ce392bad"
+  },
+  "source_hash_mismatch": false,
+  "manifest_sha256": "39c7a3040d0e8f1888b819d48dce0ec640485a0d20dd38f72f598816915a1076",
+  "cases": 40,
+  "counts": {
+    "verified_victory": 0,
+    "defeat": 40,
+    "abandoned": 0,
+    "limit": 0,
+    "error": 0,
+    "budget_stop": 0,
+    "native_error": 0,
+    "protocol_error": 0,
+    "replay_rejected": 0,
+    "other_error": 0
+  },
+  "boss_pass_counts": {
+    "1": 4,
+    "2": 0,
+    "3": 0
+  },
+  "combat_hp_scope": "Net player HP loss across adjacent public observations from combat on the same act/floor, including END_TURN; positive means loss. Unobserved edges are counted separately.",
+  "effect_comparison_scope": "Predicted minus observed net public deltas at the next same-round boundary; automatic effects can contribute. Unknown predictions are not comparable.",
+  "repeatability": {
+    "legacy": {
+      "status": "stable",
+      "first_difference": null,
+      "divergences": []
+    },
+    "second_wind": {
+      "status": "stable",
+      "first_difference": null,
+      "divergences": []
+    },
+    "spite": {
+      "status": "stable",
+      "first_difference": null,
+      "divergences": []
+    },
+    "cards": {
+      "status": "stable",
+      "first_difference": null,
+      "divergences": []
+    },
+    "potions": {
+      "status": "stable",
+      "first_difference": null,
+      "divergences": []
+    }
+  },
+  "wall_seconds": 129.15294250001898,
+  "wall_seconds_per_verified_victory": null,
+  "runs": [
+    {
+      "profile": "legacy",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 1,
+      "run_dir": "runs/000001",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 94,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 70,
+          "nonzero_error": 20,
+          "not_comparable": 4
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 81.0,
+      "combat_hp_observed_edges": 132,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.37623925000662
+    },
+    {
+      "profile": "legacy",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 2,
+      "run_dir": "runs/000002",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 94,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 70,
+          "nonzero_error": 20,
+          "not_comparable": 4
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 81.0,
+      "combat_hp_observed_edges": 132,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.1322804579976946
+    },
+    {
+      "profile": "legacy",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 1,
+      "run_dir": "runs/000003",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 60,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 31,
+          "nonzero_error": 5,
+          "not_comparable": 24
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 71.0,
+      "combat_hp_observed_edges": 79,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.5628437920240685
+    },
+    {
+      "profile": "legacy",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 2,
+      "run_dir": "runs/000004",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 60,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 31,
+          "nonzero_error": 5,
+          "not_comparable": 24
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 71.0,
+      "combat_hp_observed_edges": 79,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.575256333046127
+    },
+    {
+      "profile": "legacy",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 1,
+      "run_dir": "runs/000005",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 80,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 61,
+          "nonzero_error": 16,
+          "not_comparable": 3
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 85.0,
+      "combat_hp_observed_edges": 109,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.871264291985426
+    },
+    {
+      "profile": "legacy",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 2,
+      "run_dir": "runs/000006",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 80,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 61,
+          "nonzero_error": 16,
+          "not_comparable": 3
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 85.0,
+      "combat_hp_observed_edges": 109,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.8801674999995157
+    },
+    {
+      "profile": "legacy",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 1,
+      "run_dir": "runs/000007",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 127,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 84,
+          "nonzero_error": 9,
+          "not_comparable": 34
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 100.0,
+      "combat_hp_observed_edges": 169,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.5788907920359634
+    },
+    {
+      "profile": "legacy",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 2,
+      "run_dir": "runs/000008",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 127,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 84,
+          "nonzero_error": 9,
+          "not_comparable": 34
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 100.0,
+      "combat_hp_observed_edges": 169,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.5639742909697816
+    },
+    {
+      "profile": "second_wind",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 1,
+      "run_dir": "runs/000009",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 94,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 70,
+          "nonzero_error": 20,
+          "not_comparable": 4
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 81.0,
+      "combat_hp_observed_edges": 132,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.163703500002157
+    },
+    {
+      "profile": "second_wind",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 2,
+      "run_dir": "runs/000010",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 94,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 70,
+          "nonzero_error": 20,
+          "not_comparable": 4
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 81.0,
+      "combat_hp_observed_edges": 132,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.137059499975294
+    },
+    {
+      "profile": "second_wind",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 1,
+      "run_dir": "runs/000011",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 53,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 30,
+          "nonzero_error": 2,
+          "not_comparable": 21
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 56.0,
+      "combat_hp_observed_edges": 71,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.50387416704325
+    },
+    {
+      "profile": "second_wind",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 2,
+      "run_dir": "runs/000012",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 53,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 30,
+          "nonzero_error": 2,
+          "not_comparable": 21
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 56.0,
+      "combat_hp_observed_edges": 71,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.499821459001396
+    },
+    {
+      "profile": "second_wind",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 1,
+      "run_dir": "runs/000013",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 80,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 61,
+          "nonzero_error": 16,
+          "not_comparable": 3
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 85.0,
+      "combat_hp_observed_edges": 109,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.8508900000015274
+    },
+    {
+      "profile": "second_wind",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 2,
+      "run_dir": "runs/000014",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 80,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 61,
+          "nonzero_error": 16,
+          "not_comparable": 3
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 85.0,
+      "combat_hp_observed_edges": 109,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.8475849580136128
+    },
+    {
+      "profile": "second_wind",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 1,
+      "run_dir": "runs/000015",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 127,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 84,
+          "nonzero_error": 9,
+          "not_comparable": 34
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 100.0,
+      "combat_hp_observed_edges": 169,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.561925667047035
+    },
+    {
+      "profile": "second_wind",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 2,
+      "run_dir": "runs/000016",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 127,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 84,
+          "nonzero_error": 9,
+          "not_comparable": 34
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 100.0,
+      "combat_hp_observed_edges": 169,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.5682909580064006
+    },
+    {
+      "profile": "spite",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 1,
+      "run_dir": "runs/000017",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 94,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 70,
+          "nonzero_error": 20,
+          "not_comparable": 4
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 81.0,
+      "combat_hp_observed_edges": 132,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.146957667020615
+    },
+    {
+      "profile": "spite",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 2,
+      "run_dir": "runs/000018",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 94,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 70,
+          "nonzero_error": 20,
+          "not_comparable": 4
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 81.0,
+      "combat_hp_observed_edges": 132,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.1442276670131832
+    },
+    {
+      "profile": "spite",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 1,
+      "run_dir": "runs/000019",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 52,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 33,
+          "nonzero_error": 0,
+          "not_comparable": 19
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 48.0,
+      "combat_hp_observed_edges": 69,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.4783145409892313
+    },
+    {
+      "profile": "spite",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 2,
+      "run_dir": "runs/000020",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 52,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 33,
+          "nonzero_error": 0,
+          "not_comparable": 19
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 48.0,
+      "combat_hp_observed_edges": 69,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.4789011249667965
+    },
+    {
+      "profile": "spite",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 1,
+      "run_dir": "runs/000021",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 80,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 61,
+          "nonzero_error": 16,
+          "not_comparable": 3
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 85.0,
+      "combat_hp_observed_edges": 109,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.894459832983557
+    },
+    {
+      "profile": "spite",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 2,
+      "run_dir": "runs/000022",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 80,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 61,
+          "nonzero_error": 16,
+          "not_comparable": 3
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 85.0,
+      "combat_hp_observed_edges": 109,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.8560854170355015
+    },
+    {
+      "profile": "spite",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 1,
+      "run_dir": "runs/000023",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 127,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 84,
+          "nonzero_error": 9,
+          "not_comparable": 34
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 100.0,
+      "combat_hp_observed_edges": 169,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.5565364999929443
+    },
+    {
+      "profile": "spite",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 2,
+      "run_dir": "runs/000024",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 127,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "approximate": {
+          "zero_error": 84,
+          "nonzero_error": 9,
+          "not_comparable": 34
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        }
+      },
+      "potions_used": 4,
+      "combat_hp_net_loss_observed": 100.0,
+      "combat_hp_observed_edges": 169,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 3.4980499999946915
+    },
+    {
+      "profile": "cards",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 1,
+      "run_dir": "runs/000025",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 77,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 30,
+          "nonzero_error": 0,
+          "not_comparable": 2
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 45
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 53.0,
+      "combat_hp_observed_edges": 109,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 14,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.799669959000312
+    },
+    {
+      "profile": "cards",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 2,
+      "run_dir": "runs/000026",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 77,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 30,
+          "nonzero_error": 0,
+          "not_comparable": 2
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 45
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 53.0,
+      "combat_hp_observed_edges": 109,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 14,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.7936147919972427
+    },
+    {
+      "profile": "cards",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 1,
+      "run_dir": "runs/000027",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 53,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 18,
+          "nonzero_error": 0,
+          "not_comparable": 16
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 19
+        }
+      },
+      "potions_used": 0,
+      "combat_hp_net_loss_observed": 53.0,
+      "combat_hp_observed_edges": 71,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.4895262910285965
+    },
+    {
+      "profile": "cards",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 2,
+      "run_dir": "runs/000028",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 53,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 18,
+          "nonzero_error": 0,
+          "not_comparable": 16
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 19
+        }
+      },
+      "potions_used": 0,
+      "combat_hp_net_loss_observed": 53.0,
+      "combat_hp_observed_edges": 71,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.5012182500213385
+    },
+    {
+      "profile": "cards",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 1,
+      "run_dir": "runs/000029",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 78,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 18,
+          "nonzero_error": 0,
+          "not_comparable": 2
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 58
+        }
+      },
+      "potions_used": 0,
+      "combat_hp_net_loss_observed": 65.0,
+      "combat_hp_observed_edges": 106,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.766548875020817
+    },
+    {
+      "profile": "cards",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 2,
+      "run_dir": "runs/000030",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 78,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 18,
+          "nonzero_error": 0,
+          "not_comparable": 2
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 58
+        }
+      },
+      "potions_used": 0,
+      "combat_hp_net_loss_observed": 65.0,
+      "combat_hp_observed_edges": 106,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.775982541963458
+    },
+    {
+      "profile": "cards",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 1,
+      "run_dir": "runs/000031",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 259,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 36,
+          "nonzero_error": 0,
+          "not_comparable": 1
+        },
+        "approximate": {
+          "zero_error": 1,
+          "nonzero_error": 0,
+          "not_comparable": 1
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 220
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 189.0,
+      "combat_hp_observed_edges": 343,
+      "combat_hp_missing_edges": 1,
+      "bosses": [
+        1
+      ],
+      "final_act": 2,
+      "final_floor": 16,
+      "prediction_exceptions": 0,
+      "wall_seconds": 4.81301916699158
+    },
+    {
+      "profile": "cards",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 2,
+      "run_dir": "runs/000032",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 259,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 36,
+          "nonzero_error": 0,
+          "not_comparable": 1
+        },
+        "approximate": {
+          "zero_error": 1,
+          "nonzero_error": 0,
+          "not_comparable": 1
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 220
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 189.0,
+      "combat_hp_observed_edges": 343,
+      "combat_hp_missing_edges": 1,
+      "bosses": [
+        1
+      ],
+      "final_act": 2,
+      "final_floor": 16,
+      "prediction_exceptions": 0,
+      "wall_seconds": 4.850513459008653
+    },
+    {
+      "profile": "potions",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 1,
+      "run_dir": "runs/000033",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 86,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 26,
+          "nonzero_error": 0,
+          "not_comparable": 2
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 58
+        }
+      },
+      "potions_used": 2,
+      "combat_hp_net_loss_observed": 85.0,
+      "combat_hp_observed_edges": 126,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.926578957994934
+    },
+    {
+      "profile": "potions",
+      "seed": "BD1D31C2468C7C1F",
+      "sampling_seed": 848121033036601514,
+      "repetition": 2,
+      "run_dir": "runs/000034",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 86,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 26,
+          "nonzero_error": 0,
+          "not_comparable": 2
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 58
+        }
+      },
+      "potions_used": 2,
+      "combat_hp_net_loss_observed": 85.0,
+      "combat_hp_observed_edges": 126,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.9212695409660228
+    },
+    {
+      "profile": "potions",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 1,
+      "run_dir": "runs/000035",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 58,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 18,
+          "nonzero_error": 0,
+          "not_comparable": 20
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 20
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 68.0,
+      "combat_hp_observed_edges": 77,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.5772246249835007
+    },
+    {
+      "profile": "potions",
+      "seed": "5ADF5172BEF3142B",
+      "sampling_seed": 5479037822401239129,
+      "repetition": 2,
+      "run_dir": "runs/000036",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 58,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 18,
+          "nonzero_error": 0,
+          "not_comparable": 20
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 20
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 68.0,
+      "combat_hp_observed_edges": 77,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 8,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.5596434579929337
+    },
+    {
+      "profile": "potions",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 1,
+      "run_dir": "runs/000037",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 78,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 18,
+          "nonzero_error": 0,
+          "not_comparable": 2
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 58
+        }
+      },
+      "potions_used": 0,
+      "combat_hp_net_loss_observed": 65.0,
+      "combat_hp_observed_edges": 106,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.7656603750074282
+    },
+    {
+      "profile": "potions",
+      "seed": "D011001234ABCDEF",
+      "sampling_seed": 1532516894444718699,
+      "repetition": 2,
+      "run_dir": "runs/000038",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 78,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 18,
+          "nonzero_error": 0,
+          "not_comparable": 2
+        },
+        "approximate": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 0
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 58
+        }
+      },
+      "potions_used": 0,
+      "combat_hp_net_loss_observed": 65.0,
+      "combat_hp_observed_edges": 106,
+      "combat_hp_missing_edges": 1,
+      "bosses": [],
+      "final_act": 1,
+      "final_floor": 17,
+      "prediction_exceptions": 0,
+      "wall_seconds": 2.796798791969195
+    },
+    {
+      "profile": "potions",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 1,
+      "run_dir": "runs/000039",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 259,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 36,
+          "nonzero_error": 0,
+          "not_comparable": 1
+        },
+        "approximate": {
+          "zero_error": 1,
+          "nonzero_error": 0,
+          "not_comparable": 1
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 220
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 189.0,
+      "combat_hp_observed_edges": 343,
+      "combat_hp_missing_edges": 1,
+      "bosses": [
+        1
+      ],
+      "final_act": 2,
+      "final_floor": 16,
+      "prediction_exceptions": 0,
+      "wall_seconds": 4.8044683749903925
+    },
+    {
+      "profile": "potions",
+      "seed": "D011001234ABCDE0",
+      "sampling_seed": 6601625041520425454,
+      "repetition": 2,
+      "run_dir": "runs/000040",
+      "attempts": 1,
+      "status": "defeat",
+      "reason": null,
+      "error_category": null,
+      "effect_rows": 259,
+      "effect_comparison": {
+        "modeled": {
+          "zero_error": 36,
+          "nonzero_error": 0,
+          "not_comparable": 1
+        },
+        "approximate": {
+          "zero_error": 1,
+          "nonzero_error": 0,
+          "not_comparable": 1
+        },
+        "unknown": {
+          "zero_error": 0,
+          "nonzero_error": 0,
+          "not_comparable": 220
+        }
+      },
+      "potions_used": 1,
+      "combat_hp_net_loss_observed": 189.0,
+      "combat_hp_observed_edges": 343,
+      "combat_hp_missing_edges": 1,
+      "bosses": [
+        1
+      ],
+      "final_act": 2,
+      "final_floor": 16,
+      "prediction_exceptions": 0,
+      "wall_seconds": 4.909758583991788
+    }
+  ]
+}
