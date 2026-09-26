@@ -3,6 +3,34 @@
 import pytest
 
 
+def test_soul_nexus_death_without_godot_room_has_no_native_error(game):
+    """Death still resolves when its optional Spine animation has no scene."""
+    state = game.start(seed="headless_soul_nexus_death")
+    game.skip_neow(state)
+    game.set_player(hp=9999, max_hp=9999, relics=[], potions=[], deck=["BLUDGEON"] * 10)
+    state = game.enter_room("combat", encounter="SOUL_NEXUS_ELITE")
+    assert state.get("decision") == "combat_play", state
+    for _ in range(100):
+        if state.get("decision") != "combat_play":
+            break
+        attacks = [
+            c for c in state["hand"] if c.get("can_play") and c["type"] == "Attack"
+        ]
+        if attacks:
+            state = game.act(
+                "play_card",
+                card_index=attacks[0]["index"],
+                target_index=state["enemies"][0]["index"],
+            )
+        else:
+            state = game.act("end_turn")
+        assert state.get("type") != "error", state
+    assert state.get("decision") not in {"combat_play", "game_over"}, state
+    game.stderr.flush()
+    game.stderr.seek(0)
+    assert "[ERROR]" not in game.stderr.read()
+
+
 class TestCombatStructure:
     def test_combat_play_fields(self, game):
         state = game.start(seed="cs1")

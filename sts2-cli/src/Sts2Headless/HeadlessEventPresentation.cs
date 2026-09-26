@@ -1,8 +1,11 @@
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Monsters;
+using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
 
 namespace Sts2Headless;
 
@@ -33,7 +36,36 @@ internal static class HeadlessEventPresentation
         // calls; death handling, music progress and combat hooks still run.
         harmony.Patch(typeof(Crusher).GetMethod(nameof(Crusher.BeforeDeath))!, transpiler: transpiler);
         harmony.Patch(typeof(Rocket).GetMethod(nameof(Rocket.BeforeDeath))!, transpiler: transpiler);
+        // SoulNexus first unsubscribes its death callback, then clears a Spine
+        // animation. Preserve the callback cleanup and its existing null-node
+        // branch; only make the missing headless room lookup null-safe.
+        harmony.Patch(AccessTools.DeclaredMethod(typeof(SoulNexus), "AfterDeath", [typeof(Creature)])
+            ?? throw new MissingMethodException(typeof(SoulNexus).FullName, "AfterDeath"),
+            transpiler: new HarmonyMethod(typeof(HeadlessEventPresentation), nameof(GuardSoulNexusRoom)));
         _installed = true;
+    }
+
+    private static NCreature? GetCreatureNodeIfPresent(NCombatRoom? room, Creature creature) =>
+        room?.GetCreatureNode(creature);
+
+    private static IEnumerable<CodeInstruction> GuardSoulNexusRoom(IEnumerable<CodeInstruction> instructions)
+    {
+        var lookup = AccessTools.Method(typeof(NCombatRoom), nameof(NCombatRoom.GetCreatureNode), [typeof(Creature)]);
+        var guarded = AccessTools.Method(typeof(HeadlessEventPresentation), nameof(GetCreatureNodeIfPresent));
+        int replaced = 0;
+        foreach (var instruction in instructions)
+        {
+            if (instruction.opcode == OpCodes.Callvirt && Equals(instruction.operand, lookup))
+            {
+                // Same arguments/return value; retain all labels and exception blocks.
+                instruction.opcode = OpCodes.Call;
+                instruction.operand = guarded;
+                replaced++;
+            }
+            yield return instruction;
+        }
+        if (replaced != 1)
+            throw new InvalidOperationException("SoulNexus death presentation changed: expected one room lookup.");
     }
 
     private static bool SkipPortraitVfx() => false;
