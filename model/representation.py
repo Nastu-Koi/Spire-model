@@ -10,8 +10,6 @@ import math
 from dataclasses import dataclass, field
 from functools import lru_cache
 
-import torch
-
 from .protocol import ProtocolError, fingerprint
 
 ENTITY_FIELDS = {
@@ -31,6 +29,7 @@ ENTITY_FIELDS = {
     "stars",
     "turn",
     "round",
+    "lost_hp_this_turn",
     "cost",
     "base_cost",
     "star_cost",
@@ -161,6 +160,18 @@ STAT_FIELDS = {
     "min_select",
 }
 STAT_FIELDS.update({"passive", "evoke"})
+# Native card DynamicVars use these public display names, rather than the
+# shorter aliases above. Preserve health costs and status magnitudes too.
+STAT_FIELDS.update(
+    {
+        "hploss",
+        "strengthpower",
+        "dexteritypower",
+        "weakpower",
+        "vulnerablepower",
+        "calculationbase",
+    }
+)
 # Mad Science declares all of these public parameters on every variant. The
 # separate rider_effect and card_type identify which ones the card uses.
 STAT_FIELDS.update(
@@ -808,6 +819,8 @@ def symbols_from_frames(frames):
 
 
 def field_tensors(rows, vocabulary, field_buckets, device, length=None):
+    import torch
+
     n = len(rows) if length is None else length
     if n < len(rows):
         raise ValueError("Field tensor length cannot truncate rows")
