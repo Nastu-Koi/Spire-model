@@ -18,6 +18,12 @@ import sys
 
 from game_log import GameLogger
 
+# Resolve the shared runtime selector when launched directly from this folder.
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+from model.dotnet_runtime import find_runtime, find_sdk, runtime_command
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT = os.path.join(ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 LIB_DIR = os.path.join(ROOT, "lib")
@@ -25,22 +31,8 @@ SAVE_DIR = os.path.join(ROOT, "saves")
 
 
 def _find_dotnet():
-    """Find .NET SDK binary."""
-    candidates = [
-        os.path.expanduser("~/.dotnet-arm64/dotnet"),
-        os.path.expanduser("~/.dotnet/dotnet"),
-        "dotnet",
-    ]
-    for p in candidates:
-        try:
-            r = subprocess.run(
-                [p, "--version"], capture_output=True, text=True, timeout=5
-            )
-            if r.returncode == 0:
-                return p
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    return None
+    """Select a host with a compatible .NET 9 runtime, including runtime-only installs."""
+    return find_runtime()
 
 
 DOTNET = _find_dotnet()
@@ -148,10 +140,11 @@ def _patch_dll():
 
 def _build():
     """Build the C# project."""
-    if not DOTNET:
+    sdk = find_sdk()
+    if not sdk:
         return False
     r = subprocess.run(
-        [DOTNET, "build", PROJECT], capture_output=True, text=True, timeout=60
+        [sdk, "build", PROJECT], capture_output=True, text=True, timeout=60, check=False
     )
     return r.returncode == 0
 
@@ -159,10 +152,15 @@ def _build():
 def ensure_setup():
     """Check that everything is ready to run. Auto-setup if needed."""
 
-    # Check .NET SDK
+    # Running an already-built engine needs a .NET 9 runtime, not an SDK.
     if not DOTNET:
-        print("❌ .NET SDK not found.")
-        print("   Install .NET 9+ from https://dotnet.microsoft.com/download")
+        print(t("❌ .NET 9 runtime not found.", "❌ 未找到 .NET 9 运行时。"))
+        print(
+            t(
+                "   Install .NET 9 in ~/.dotnet-spire or set STS2_DOTNET to its dotnet host.",
+                "   请将 .NET 9 安装到 ~/.dotnet-spire，或用 STS2_DOTNET 指定其 dotnet 路径。",
+            )
+        )
         sys.exit(1)
 
     # Check lib/sts2.dll exists
@@ -1773,7 +1771,12 @@ def play(
     logger = GameLogger(character, actual_seed, enabled=log)
     action_log = []
     proc = subprocess.Popen(
-        [DOTNET, "run", "--no-build", "--project", PROJECT],
+        runtime_command(
+            os.path.join(
+                os.path.dirname(PROJECT), "bin", "Debug", "net9.0", "Sts2Headless.dll"
+            ),
+            runtime=DOTNET,
+        ),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

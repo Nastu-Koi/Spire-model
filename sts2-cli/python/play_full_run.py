@@ -25,26 +25,18 @@ import threading
 
 from game_log import GameLogger
 
+# Resolve the shared runtime selector when launched directly from this folder.
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+from model.dotnet_runtime import find_runtime, runtime_command
+
 VALID_CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
 
 
 def _find_dotnet():
-    for p in [
-        os.path.expanduser("~/.dotnet-arm64/dotnet"),
-        os.path.expanduser("~/.dotnet/dotnet"),
-        "dotnet",
-    ]:
-        try:
-            if (
-                subprocess.run(
-                    [p, "--version"], capture_output=True, timeout=5
-                ).returncode
-                == 0
-            ):
-                return p
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    return "dotnet"
+    """Select a host with a compatible .NET 9 runtime, including runtime-only installs."""
+    return find_runtime()
 
 
 DOTNET = _find_dotnet()
@@ -67,7 +59,12 @@ def play_run(
     rng = random.Random(seed)
     logger = GameLogger(character, seed, enabled=log)
     proc = subprocess.Popen(
-        [DOTNET, "run", "--no-build", "--project", PROJECT],
+        runtime_command(
+            os.path.join(
+                os.path.dirname(PROJECT), "bin", "Debug", "net9.0", "Sts2Headless.dll"
+            ),
+            runtime=DOTNET,
+        ),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL if not verbose else None,
