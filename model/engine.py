@@ -3,12 +3,12 @@
 import json
 import os
 import queue
-import shutil
 import subprocess
 import tempfile
 import threading
 from pathlib import Path
 
+from .dotnet_runtime import runtime_command
 from .protocol import ProtocolError
 
 
@@ -26,7 +26,7 @@ class CliEngine:
                 raise FileNotFoundError(
                     f"Build the engine first: dotnet build {self.root}/src/Sts2Headless"
                 )
-            command = [shutil.which("dotnet") or "dotnet", str(dll)]
+            command = runtime_command(dll)
         env = dict(os.environ, STS2_GAME_DIR=str(self.root / "lib"))
         self.stderr = tempfile.TemporaryFile(mode="w+t")
         self.proc = subprocess.Popen(

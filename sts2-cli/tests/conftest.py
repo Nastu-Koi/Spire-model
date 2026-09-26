@@ -3,16 +3,18 @@
 import json
 import os
 import queue
-import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+from pathlib import Path
 
 import pytest
 
-DOTNET = os.path.expanduser("~/.dotnet-arm64/dotnet")
-if not os.path.isfile(DOTNET):
-    DOTNET = shutil.which("dotnet") or DOTNET
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from model.dotnet_runtime import find_runtime, runtime_command
+
+DOTNET = find_runtime()
 PROJECT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "src",
@@ -34,7 +36,16 @@ class Game:
         # Engine diagnostics can fill a pipe while a test is waiting for JSON.
         self.stderr = tempfile.TemporaryFile(mode="w+t")
         self.proc = subprocess.Popen(
-            [DOTNET, "run", "--no-build", "--project", PROJECT],
+            runtime_command(
+                os.path.join(
+                    os.path.dirname(PROJECT),
+                    "bin",
+                    "Debug",
+                    "net9.0",
+                    "Sts2Headless.dll",
+                ),
+                runtime=DOTNET,
+            ),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self.stderr,

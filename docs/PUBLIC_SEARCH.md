@@ -27,7 +27,7 @@ python3 -m combat_solver_cli.public_generate \
 
 输出目录必须不存在。默认 worker 数为本机逻辑 CPU 数，不同 worker 执行不同的新 seed，每个 worker 持有自己的原生进程。线程数不是加速倍数保证，Python 规划还受解释器并发限制；需要通过本机吞吐实测决定最佳 worker 数。用 `--workers 1` 可做串行对照，`--no-abandon` 可禁用提前放弃。
 
-本次会话将 .NET 9.0.7 运行时安装在临时目录 `/tmp/spire-model-dotnet9`，未修改系统 .NET。若该目录仍存在，运行命令前设置 `export PATH="/tmp/spire-model-dotnet9:$PATH"`；长期使用应准备持久的 .NET 9 环境。
+本机已将 .NET 9.0.20 运行时持久安装到 `~/.dotnet-spire`，现有 .NET 10 SDK 保留用于构建。Python 入口会检查各 host 的 `--list-runtimes`，自动选择包含 .NET 9 的 host，并以 `--roll-forward Minor` 直接运行引擎 DLL；不再依赖临时目录或修改 PATH。可用 `STS2_DOTNET=/绝对路径/dotnet` 显式指定运行时；指定路径不含兼容的 .NET 9 时会直接报错。自动搜索顺序为该显式路径、`~/.dotnet-spire`、`~/.dotnet-arm64`、`~/.dotnet`、PATH。构建另行检查 SDK，支持 9 或更高版本。
 
 `--max-seconds` 是整个批次的运行预算，不是每局预算或五分钟产出保证；`--max-steps` 限制单局真实动作数。边界检查与原生 I/O 超时可能使实际结束晚于预算。达到目标或发生基础设施错误后停止发起新任务，并让其他 worker 在动作边界停止；已有成功数据和失败诊断保留。
 
