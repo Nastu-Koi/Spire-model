@@ -30,6 +30,11 @@ public partial class RunSimulator
         if (!CanActInCombat()) return NonDecisionBoundary("waiting");
         var snapshot = BuildPublicSnapshot();
         var player = _runState!.Players[0];
+        // Combat teardown may run asynchronously after the last enemy dies.
+        // An empty enemy snapshot is not a player decision; let the committed
+        // operation finish and publish the reward boundary on the next poll.
+        if (!snapshot.Creatures.Keys.Any(c => c.Side != player.Creature.Side))
+            return NonDecisionBoundary("waiting");
         var bindings = new List<CandidateBinding>();
         foreach (var card in player.PlayerCombatState!.Hand.Cards)
         {
@@ -63,6 +68,7 @@ public partial class RunSimulator
             finally { YieldPatches.SuppressYield = false; }
         }));
         AddPotionCandidates(snapshot, bindings);
+        if (!CanActInCombat()) return NonDecisionBoundary("waiting");
         return PublishSnapshot("combat", snapshot, bindings);
     }
 
