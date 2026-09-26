@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Models;
@@ -16,6 +17,7 @@ public partial class RunSimulator
     private long _selectionBaseVersion;
     private string? _protocolSelectionId;
     private bool _protocolTrainingRun;
+    private long _protocolTerminalWaitStarted;
     private static readonly Lazy<Dictionary<string, object?>> ProtocolContract = new(() => new()
     {
         ["adapter_version"] = "engine-candidates-v1",
@@ -50,6 +52,7 @@ public partial class RunSimulator
         _protocolMapVisible = false;
         _protocolEnabled = false;
         _protocolTrainingRun = false;
+        _protocolTerminalWaitStarted = 0;
         _protocolRewardsOffered.Clear();
         _protocolOpenedChests.Clear();
         _protocolFinishedChests.Clear();
@@ -165,7 +168,18 @@ public partial class RunSimulator
         var player = _runState!.Players[0];
         if (_protocolVictory || _protocolLoss || player.Creature.IsDead || RunManager.Instance.IsAbandoned)
             return NonDecisionBoundary("terminal", new { victory = _protocolVictory });
-        if (RunManager.Instance.IsGameOver) return ProtocolError("unconfirmed_terminal_outcome");
+        if (RunManager.Instance.IsGameOver)
+        {
+            // GameOver can become visible before the asynchronous death state
+            // and CombatEnded callback. Yield to boundary pumping, never infer
+            // victory or loss from this flag alone. A persistent gap is an error.
+            if (_protocolTerminalWaitStarted == 0)
+                _protocolTerminalWaitStarted = Stopwatch.GetTimestamp();
+            return Stopwatch.GetElapsedTime(_protocolTerminalWaitStarted) < TimeSpan.FromSeconds(3)
+                ? NonDecisionBoundary("waiting")
+                : ProtocolError("unconfirmed_terminal_outcome");
+        }
+        _protocolTerminalWaitStarted = 0;
         if (_cardSelector.HasPendingReward)
             return PublishCardRewardBoundary();
         if (_pendingBundles != null && _pendingBundleTcs is { Task.IsCompleted: false })

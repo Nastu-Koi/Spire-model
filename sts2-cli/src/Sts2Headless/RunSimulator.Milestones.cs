@@ -10,8 +10,8 @@ public partial class RunSimulator
 {
     private readonly ConcurrentQueue<object> _protocolEvents = new();
     private readonly HashSet<CombatRoom> _protocolWon = new(ReferenceEqualityComparer.Instance);
-    private bool _protocolVictory;
-    private bool _protocolLoss;
+    private volatile bool _protocolVictory;
+    private volatile bool _protocolLoss;
     private int _protocolEncounterSequence;
 
     private void RegisterProtocolMilestones()
@@ -47,8 +47,8 @@ public partial class RunSimulator
                 act, kind, result = "victory", final_in_act = final });
             if (act == 3 && final)
             {
-                _protocolVictory = true;
                 _protocolEvents.Enqueue(new { type = "run_completed", victory = true, act, final_boss_defeated = true });
+                _protocolVictory = true;
             }
         }
     }
@@ -59,9 +59,9 @@ public partial class RunSimulator
         lock (_protocolWon)
         {
             if (_protocolWon.Contains(room)) return;
-            _protocolLoss = true;
             _protocolEvents.Enqueue(new { type = "run_completed", victory = false,
                 act = _runState!.CurrentActIndex + 1, final_boss_defeated = false });
+            _protocolLoss = true;
         }
     }
 
