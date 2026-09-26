@@ -6,6 +6,13 @@
 
 v2 检查点不兼容旧 hybrid 权重，需要重新训练；采集数据可继续导入。批量训练、多引擎采样、RTX 基准及独立评估步骤见 [性能验证](docs/PERFORMANCE.md)。
 
+## 文档入口
+
+- [公开信息搜索：运行与当前限制](docs/PUBLIC_SEARCH.md)；[修复目标与验收](.scratch/public-search-repair/spec.md)；[实施工单](.scratch/public-search-repair/README.md)。
+- [模型架构](ARCHITECTURE.md)；[性能与正确性验证](docs/PERFORMANCE.md)。
+- [领域术语](CONTEXT.md)；[决策记录](docs/adr/)。
+- [工作区任务约定](docs/agents/issue-tracker.md)；[历史搜索实验](docs/archive/search/)。
+
 ## 1. 安装环境和 sts2-cli
 
 需要先通过 Steam 安装游戏，并安装 .NET 9 SDK。Python 环境：
