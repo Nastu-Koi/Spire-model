@@ -1,0 +1,168 @@
+[
+  {
+    "repeat": 0,
+    "seed": "UNIFICATION-HOLDOUT-01",
+    "index": 4,
+    "act": 1,
+    "floor": 2,
+    "before_hash": "7e1bf4c9f09a1250f1db328ac03f5954d003bd1a1ebd329441d9c7431a8e4d2f",
+    "budget_ms": 1000,
+    "restore_seconds": 2.381652500014752,
+    "combat_seconds": 2.0180936249671504,
+    "before_hp": 80,
+    "after_hp": 80,
+    "after_phase": "rewards",
+    "boundary": "decision",
+    "after_hash": "6207769a1602a74502e4a83a185b57f1a6a1fcfa5b5397e6cd9ff2b8c8d150d1",
+    "calls": [
+      {
+        "seconds": 0.6290679999510758,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.013710334023926407,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.004786624980624765,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.012656542006880045,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.8452737919869833,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.005642500007525086,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.002749042003415525,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.44591229100478813,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.007186167000327259,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.005445207993034273,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.002709291991777718,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.01250808296026662,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.018433457997161895,
+        "search": false,
+        "type": "solver_step"
+      }
+    ]
+  },
+  {
+    "repeat": 1,
+    "seed": "UNIFICATION-HOLDOUT-01",
+    "index": 4,
+    "act": 1,
+    "floor": 2,
+    "before_hash": "7e1bf4c9f09a1250f1db328ac03f5954d003bd1a1ebd329441d9c7431a8e4d2f",
+    "budget_ms": 1000,
+    "restore_seconds": 1.996689708030317,
+    "combat_seconds": 1.8877979580429383,
+    "before_hp": 80,
+    "after_hp": 80,
+    "after_phase": "rewards",
+    "boundary": "decision",
+    "after_hash": "6207769a1602a74502e4a83a185b57f1a6a1fcfa5b5397e6cd9ff2b8c8d150d1",
+    "calls": [
+      {
+        "seconds": 0.6459052499849349,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.015084999962709844,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.0053602500120177865,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.011941500008106232,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.775417041964829,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.005441415996756405,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.002784874988719821,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.3744262079708278,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.006171374989207834,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.004515542008448392,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.0025619579828344285,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.010652334021870047,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.016325207951013,
+        "search": false,
+        "type": "solver_step"
+      }
+    ]
+  }
+]
