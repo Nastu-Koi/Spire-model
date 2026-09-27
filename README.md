@@ -8,7 +8,7 @@ v2 检查点不兼容旧 hybrid 权重，需要重新训练；采集数据可继
 
 ## 文档入口
 
-- [公开信息搜索：运行与当前限制](docs/PUBLIC_SEARCH.md)；[修复目标与验收](.scratch/public-search-repair/spec.md)；[实施工单](.scratch/public-search-repair/README.md)。
+- [唯一搜索主线：MCTS＋CombatSolver](combat_solver_cli/README.md)；[合并目标与验收](.scratch/search-unification/spec.md)。教师允许真实回溯，学生仍使用每步公开输入；旧公开搜索与 A* 实验保存在历史记录中。
 - [模型架构](ARCHITECTURE.md)；[性能与正确性验证](docs/PERFORMANCE.md)。
 - [领域术语](CONTEXT.md)；[决策记录](docs/adr/)。
 - [工作区任务约定](docs/agents/issue-tracker.md)；[历史搜索实验](docs/archive/search/)。
@@ -20,8 +20,7 @@ v2 检查点不兼容旧 hybrid 权重，需要重新训练；采集数据可继
 ```bash
 conda create -n sts2 python=3.11 -y
 conda activate sts2
-pip install -r requirment.txt
-pip install -e .
+pip install -e '.[test]'
 ```
 设置 Steam 游戏安装目录。Linux 默认库通常在下面的位置；如果装在其他盘，改成实际目录。详情见原无头模拟器仓库：https://github.com/wuhao21/sts2-cli 
 

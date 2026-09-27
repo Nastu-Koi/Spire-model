@@ -3,7 +3,7 @@ import argparse
 import json
 import time
 from pathlib import Path
-from combat_solver_cli.astar import ReplayWorker, state_key, player
+from combat_solver_cli.search_support import ReplayWorker, state_key, player
 from combat_solver_cli.client import DEFAULT_CONFIG
 
 

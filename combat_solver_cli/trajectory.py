@@ -17,8 +17,8 @@ from model.protocol import (
 )
 from model.rewards import MilestoneLedger
 
-from .astar import ReplayMismatch, resolve, state_key
 from .client import SolverEngine, configuration
+from .search_support import ReplayMismatch, resolve, state_key
 
 
 def native_replay_error(engine):
@@ -189,7 +189,18 @@ def verify_and_export(config, prefix_path, output, timeout=600):
         raw_temp.replace(raw)
         accepted_temp.replace(accepted)
         return run
-    except BaseException:
-        raw_temp.unlink(missing_ok=True)
+    except BaseException as exc:
+        # Rejected replays are diagnosis evidence, never accepted training data.
+        if raw_temp.exists():
+            raw_temp.replace(output / "failed_replay_trace.jsonl")
+        (output / "verification_error.json").write_text(
+            json.dumps(
+                {"type": type(exc).__name__, "message": str(exc)},
+                ensure_ascii=False,
+                allow_nan=False,
+                indent=2,
+            )
+            + "\n"
+        )
         accepted_temp.unlink(missing_ok=True)
         raise

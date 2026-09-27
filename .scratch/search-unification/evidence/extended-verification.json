@@ -1,0 +1,92 @@
+[
+  {
+    "seed": "UNIFICATION-HOLDOUT-01",
+    "training_steps": 510,
+    "macros": 494,
+    "automatic_steps": 7,
+    "source": "recorder_bc",
+    "teacher_visibility": "unverified",
+    "status": "partial",
+    "victory": null,
+    "provenance": {
+      "bc_only": true,
+      "importer": "combat-solver-cli-v1",
+      "verified_outcome": "A0_final_boss_victory",
+      "verified_by": "fresh_native_seed_replay",
+      "bosses": [
+        1,
+        2,
+        3
+      ],
+      "actors": {
+        "mcts": 154,
+        "combat_solver": 356,
+        "forced": 7
+      },
+      "search": {
+        "algorithm": "mcts_uct_repair_risk_v2",
+        "budget_ms": 1000,
+        "boss_budget_ms": 5000,
+        "reuse_turn_plan": true,
+        "rollout_decisions": 256,
+        "exploration": 1.4142135623730951,
+        "rollout_epsilon": 0.1,
+        "local_repair": true,
+        "risk_aware_rollout": true
+      },
+      "raw_sha256": "a6edd7c89561d4b5369538ccf8e6b4c4caddfc60639fd58a8e43e1a4663e72e1",
+      "solver_sha256": "e9bacc377a830ce8640693fe50238cdb803cd73847787d8c6039929eadba5d51",
+      "game_sha256": "6e142d54e4abc39298b7f5df292905c4ef4c261d6b51afbde90e61f447c05711",
+      "engine_sha256": "e2a953f9f54bf5896bdf6189095980adec2a280196de90cfbdf55abfb405f224",
+      "godot_stubs_sha256": "b0e410a915f84c790318e75a5de6de84f6ba32c795a97508d43f1d3bbd6821a8",
+      "worker_sha256": "76ad9cc5649b3f7ebee94941a8e5cd7ba730c8d08df93b1c813fa3408627b1c8"
+    },
+    "accepted_path": "combat_solver_cli/artifacts/unification/extended-seeds/seed-01/accepted.jsonl",
+    "accepted_sha256": "e5aa39c8df726f3e14c209cfc7017bc864aa6d8eeed7bb5bdcd7c1ef2e953a37"
+  },
+  {
+    "seed": "UNIFICATION-HOLDOUT-02",
+    "training_steps": 461,
+    "macros": 446,
+    "automatic_steps": 7,
+    "source": "recorder_bc",
+    "teacher_visibility": "unverified",
+    "status": "partial",
+    "victory": null,
+    "provenance": {
+      "bc_only": true,
+      "importer": "combat-solver-cli-v1",
+      "verified_outcome": "A0_final_boss_victory",
+      "verified_by": "fresh_native_seed_replay",
+      "bosses": [
+        1,
+        2,
+        3
+      ],
+      "actors": {
+        "mcts": 157,
+        "combat_solver": 309,
+        "forced": 2
+      },
+      "search": {
+        "algorithm": "mcts_uct_repair_risk_v2",
+        "budget_ms": 1000,
+        "boss_budget_ms": 5000,
+        "reuse_turn_plan": true,
+        "rollout_decisions": 256,
+        "exploration": 1.4142135623730951,
+        "rollout_epsilon": 0.1,
+        "local_repair": true,
+        "risk_aware_rollout": true
+      },
+      "raw_sha256": "707d143103d8b7b7627111a8ee5fa524793485ae7dd80ad57a8835c95efe4c11",
+      "solver_sha256": "e9bacc377a830ce8640693fe50238cdb803cd73847787d8c6039929eadba5d51",
+      "game_sha256": "6e142d54e4abc39298b7f5df292905c4ef4c261d6b51afbde90e61f447c05711",
+      "engine_sha256": "e2a953f9f54bf5896bdf6189095980adec2a280196de90cfbdf55abfb405f224",
+      "godot_stubs_sha256": "b0e410a915f84c790318e75a5de6de84f6ba32c795a97508d43f1d3bbd6821a8",
+      "worker_sha256": "76ad9cc5649b3f7ebee94941a8e5cd7ba730c8d08df93b1c813fa3408627b1c8"
+    },
+    "accepted_path": "combat_solver_cli/artifacts/unification/extended-seeds/seed-02/accepted.jsonl",
+    "accepted_sha256": "749504f4bbd5994fcdda6d457453653c84460ef92c87bda170b3dbd008f5fea9"
+  }
+]

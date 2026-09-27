@@ -1,0 +1,118 @@
+{
+  "counts": {
+    "budget_exhausted": 3
+  },
+  "wall_seconds": 903.7650829589693,
+  "cost_per_success": null,
+  "source_hash_mismatch": false,
+  "runs": [
+    {
+      "seed": "UNIFICATION-HOLDOUT-01",
+      "profile": "mcts-default-reuse",
+      "status": "budget_exhausted",
+      "wall_seconds": 300.5465052499785,
+      "max_journal_progress": [
+        3,
+        5
+      ],
+      "terminal_events": {
+        "defeat": 6
+      },
+      "error_events": [],
+      "expanded": 420,
+      "simulations": 6,
+      "solver_steps": 903,
+      "replayed_steps": 937,
+      "search_seconds": 300.54531154199503,
+      "post_search_seconds": 0.0011937079834751785
+    },
+    {
+      "seed": "UNIFICATION-HOLDOUT-02",
+      "profile": "mcts-default-reuse",
+      "status": "budget_exhausted",
+      "wall_seconds": 301.0872255000286,
+      "max_journal_progress": [
+        3,
+        5
+      ],
+      "terminal_events": {
+        "defeat": 10
+      },
+      "error_events": [],
+      "expanded": 560,
+      "simulations": 10,
+      "solver_steps": 1216,
+      "replayed_steps": 1533,
+      "search_seconds": 301.0854283749941,
+      "post_search_seconds": 0.0017971250344999135
+    },
+    {
+      "seed": "UNIFICATION-HOLDOUT-03",
+      "profile": "mcts-default-reuse",
+      "status": "budget_exhausted",
+      "wall_seconds": 302.07983229198726,
+      "max_journal_progress": [
+        2,
+        12
+      ],
+      "terminal_events": {},
+      "error_events": [
+        {
+          "expanded": 96,
+          "error": "unsupported_event_view:COLORFUL_PHILOSOPHERS",
+          "seed": "UNIFICATION-HOLDOUT-03",
+          "character": "Ironclad",
+          "ascension": 0
+        },
+        {
+          "expanded": 194,
+          "error": "unsupported_event_view:COLORFUL_PHILOSOPHERS",
+          "seed": "UNIFICATION-HOLDOUT-03",
+          "character": "Ironclad",
+          "ascension": 0
+        },
+        {
+          "expanded": 261,
+          "error": "unsupported_event_view:COLORFUL_PHILOSOPHERS",
+          "seed": "UNIFICATION-HOLDOUT-03",
+          "character": "Ironclad",
+          "ascension": 0
+        },
+        {
+          "expanded": 362,
+          "error": "unsupported_event_view:COLORFUL_PHILOSOPHERS",
+          "seed": "UNIFICATION-HOLDOUT-03",
+          "character": "Ironclad",
+          "ascension": 0
+        },
+        {
+          "expanded": 429,
+          "error": "unsupported_event_view:COLORFUL_PHILOSOPHERS",
+          "seed": "UNIFICATION-HOLDOUT-03",
+          "character": "Ironclad",
+          "ascension": 0
+        },
+        {
+          "expanded": 489,
+          "error": "unsupported_event_view:COLORFUL_PHILOSOPHERS",
+          "seed": "UNIFICATION-HOLDOUT-03",
+          "character": "Ironclad",
+          "ascension": 0
+        },
+        {
+          "expanded": 584,
+          "error": "unsupported_event_view:COLORFUL_PHILOSOPHERS",
+          "seed": "UNIFICATION-HOLDOUT-03",
+          "character": "Ironclad",
+          "ascension": 0
+        }
+      ],
+      "expanded": 639,
+      "simulations": 7,
+      "solver_steps": 1382,
+      "replayed_steps": 5,
+      "search_seconds": 302.0786027919967,
+      "post_search_seconds": 0.0012294999905861914
+    }
+  ]
+}

@@ -1,17 +1,131 @@
-"""Independent MCTS trees on disjoint same-seed opening shards."""
+"""Parallel MCTS trees over disjoint native opening decisions."""
 
 import json
-import math
 import os
+import shutil
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
-from .astar import load_frontier, save_frontier, write_json
-from .astar import search as astar_search
+from model.protocol import fingerprint
+
 from .diversity import partition_routes
-from .lanes import _copy_verified
+from .search_support import write_json
+
+
+def _copy_verified(source, output):
+    for name in ("accepted.jsonl", "winning_prefix.json", "verified_trace.jsonl"):
+        path = source / name
+        if path.is_file():
+            shutil.copy2(path, output / name)
+
+
+def _opening_shards(
+    config,
+    character,
+    seed,
+    output,
+    prefix_path,
+    lanes,
+    options,
+    started,
+    warm_resume=None,
+):
+    """Expand the native MCTS root once, then preserve every legal child in one lane."""
+    from .mcts import Tree, load_tree, save_tree, search, search_identity
+
+    warm_options = dict(options)
+    warm_options.update(
+        max_expansions=1,
+        rollout_decisions=0,
+        max_seconds=max(0.001, options["max_seconds"] - (time.monotonic() - started)),
+    )
+    stop_monitor = threading.Event()
+
+    def propagate_stop():
+        while not stop_monitor.wait(0.25):
+            warmup = output / "warmup"
+            if (output / "STOP").exists() and warmup.is_dir():
+                (warmup / "STOP").touch()
+                return
+
+    thread = threading.Thread(target=propagate_stop, daemon=True)
+    thread.start()
+    try:
+        warm = search(
+            config,
+            character,
+            seed,
+            output / "warmup",
+            search_lanes=1,
+            prefix_path=prefix_path,
+            resume=warm_resume,
+            **warm_options,
+        )
+    finally:
+        stop_monitor.set()
+        thread.join(timeout=1)
+    if warm["status"] == "verified_victory":
+        return warm, []
+    warm_identity = search_identity(
+        character,
+        seed,
+        options["ascension"],
+        options["exploration"],
+        options["rollout_epsilon"],
+        0,
+        options["local_repair"],
+        options["risk_aware_rollout"],
+    )
+    tree, _ = load_tree(
+        output / "warmup" / "tree.json", warm_identity, options["exploration"]
+    )
+    if len(tree.roots) != 1:
+        raise ValueError("MCTS opening checkpoint must have one root")
+    root = tree.nodes[tree.roots[0]]
+    if not root.expanded or not root.children:
+        return warm, []
+    opening = [
+        (-tree.nodes[index].prior, order, 0, root.prefix, tree.nodes[index].pending)
+        for order, index in enumerate(root.children)
+    ]
+    if options["early_route_diversity"]:
+        shards = partition_routes(opening, lanes)
+    else:
+        ordered = sorted(opening, key=lambda item: (item[0], item[1]))
+        shards = [ordered[index::lanes] for index in range(lanes)]
+    identity = search_identity(
+        character,
+        seed,
+        options["ascension"],
+        options["exploration"],
+        options["rollout_epsilon"],
+        options["rollout_decisions"],
+        options["local_repair"],
+        options["risk_aware_rollout"],
+    )
+    inputs = output / "lane-inputs"
+    inputs.mkdir()
+    paths = []
+    for lane, shard in enumerate(shards):
+        lane_tree = Tree(
+            int(fingerprint([seed, "mcts", lane])[:16], 16), options["exploration"]
+        )
+        root_index = lane_tree.add(None, root.prefix, None)
+        lane_root = lane_tree.nodes[root_index]
+        lane_root.expanded = True
+        lane_root.value = root.value
+        lane_root.decision = root.decision
+        for _, order, _, prefix, pending in shard:
+            prior = tree.nodes[root.children[order]].prior
+            lane_tree.add(root_index, prefix, pending, prior)
+        if not lane_root.children:
+            lane_root.closed = True
+        path = inputs / f"lane-{lane}.json"
+        save_tree(path, lane_tree, identity, {})
+        paths.append(path.resolve())
+    return warm, paths
 
 
 def search_parallel(
@@ -25,136 +139,169 @@ def search_parallel(
     prefix_path=None,
     **options,
 ):
-    from .mcts import search
+    from .mcts import search, search_identity
 
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
-    warm_expanded = 0
     identity = {
-        "character": character,
-        "seed": seed,
-        "ascension": options["ascension"],
         "search_lanes": search_lanes,
+        "early_route_diversity": options["early_route_diversity"],
+        "tree": search_identity(
+            character,
+            seed,
+            options["ascension"],
+            options["exploration"],
+            options["rollout_epsilon"],
+            options["rollout_decisions"],
+            options["local_repair"],
+            options["risk_aware_rollout"],
+        ),
     }
-    paths = []
-    warm = None
+    warm, warm_expanded = None, 0
+    next_lane = 0
+    opening_resume = None
     if resume:
         data = json.loads(Path(resume).read_text())
-        if data["schema"] == "mcts-lanes-v1":
-            if data["identity"] != identity:
-                raise ValueError("MCTS lane identity differs")
-            paths = [(Path(resume).parent / p).resolve() for p in data["checkpoints"]]
-            if len(paths) != search_lanes:
-                raise ValueError("MCTS lane count differs")
-            if any(not p.is_file() for p in paths):
-                raise FileNotFoundError("MCTS lane checkpoint missing")
-        elif data["schema"] != "astar-frontier-v2":
+        if data.get("schema") != "mcts-lanes-v2":
             raise ValueError(
-                "Parallel MCTS requires a lane manifest or initial A* frontier"
+                "Parallel MCTS checkpoint is incompatible; expected mcts-lanes-v2"
             )
-    if not paths:
-        if resume:
-            source = resume
+        if data.get("identity") != identity:
+            raise ValueError("MCTS lane identity or policy differs")
+        stage = data.get("stage", "lanes")
+        if stage == "opening":
+            opening_resume = (
+                Path(resume).parent / data["opening_checkpoint"]
+            ).resolve()
+            if not opening_resume.is_file():
+                raise ValueError("MCTS opening checkpoint file is missing")
+        elif stage == "lanes":
+            paths = [
+                (Path(resume).parent / name).resolve() for name in data["checkpoints"]
+            ]
+            if len(paths) != search_lanes or any(not path.is_file() for path in paths):
+                raise ValueError("MCTS lane checkpoint count or files differ")
         else:
-            warm_options = {
-                k: v
-                for k, v in options.items()
-                if k
-                not in (
-                    "exploration",
-                    "rollout_epsilon",
-                    "local_repair",
-                    "risk_aware_rollout",
-                )
-            }
-            warm_options.update(
-                max_expansions=min(options["max_expansions"], search_lanes - 1),
-                rollout_decisions=0,
-            )
-            warm = astar_search(
-                config,
-                character,
-                seed,
-                output / "warmup",
-                search_lanes=1,
-                prefix_path=prefix_path,
-                **warm_options,
-            )
-            warm_expanded = warm["expanded"]
+            raise ValueError("MCTS lane checkpoint stage is invalid")
+        next_lane = data.get("next_lane", 0)
+        if type(next_lane) is not int or not 0 <= next_lane < search_lanes:
+            raise ValueError("MCTS lane checkpoint cursor is invalid")
+    if not resume or opening_resume is not None:
+        warm, paths = _opening_shards(
+            config,
+            character,
+            seed,
+            output,
+            prefix_path,
+            search_lanes,
+            options,
+            started,
+            warm_resume=opening_resume,
+        )
+        warm_expanded = int(warm.get("expanded", 0))
+        if not paths:
             if warm["status"] == "verified_victory":
                 _copy_verified(output / "warmup", output)
-                warm.update(
-                    algorithm="mcts_opening_warmup",
-                    search_lanes=search_lanes,
-                    seconds=time.monotonic() - started,
+            else:
+                write_json(
+                    output / "tree.json",
+                    {
+                        "schema": "mcts-lanes-v2",
+                        "identity": identity,
+                        "stage": "opening",
+                        "next_lane": next_lane,
+                        "opening_checkpoint": os.path.relpath(
+                            output / "warmup" / "tree.json", output
+                        ),
+                    },
                 )
-                write_json(output / "summary.json", warm)
-                return warm
-            source = output / "warmup" / "frontier.json"
-        frontier = load_frontier(
-            source, character, seed, options["weight"], options["ascension"]
-        )
-        if options["early_route_diversity"]:
-            shards = partition_routes(frontier, search_lanes)
-        else:
-            ordered = sorted(frontier, key=lambda n: (n[0], n[1]))
-            shards = [ordered[i::search_lanes] for i in range(search_lanes)]
-        inputs = output / "lane-inputs"
-        inputs.mkdir()
-        for i, shard in enumerate(shards):
-            path = inputs / f"lane-{i}.json"
-            save_frontier(
-                path, shard, character, seed, options["weight"], options["ascension"]
-            )
-            paths.append(path.resolve())
+            warm.update(search_lanes=search_lanes, seconds=time.monotonic() - started)
+            write_json(output / "summary.json", warm)
+            return warm
 
     def manifest(checkpoints):
         write_json(
             output / "tree.json",
             {
-                "schema": "mcts-lanes-v1",
+                "schema": "mcts-lanes-v2",
                 "identity": identity,
+                "stage": "lanes",
+                "next_lane": next_lane,
                 "checkpoints": [
-                    os.path.relpath(p, output.resolve()) for p in checkpoints
+                    os.path.relpath(path, output.resolve()) for path in checkpoints
                 ],
             },
         )
 
-    manifest(paths)
-    if warm and (
-        warm["status"] in ("infrastructure_error", "stopped", "replay_failed")
-        or warm_expanded >= options["max_expansions"]
-    ):
-        warm.update(
-            algorithm="mcts_opening_warmup",
-            search_lanes=search_lanes,
-            seconds=time.monotonic() - started,
-        )
+    if warm and warm["status"] in ("stopped", "infrastructure_error", "replay_failed"):
+        manifest(paths)
+        warm.update(search_lanes=search_lanes, seconds=time.monotonic() - started)
         write_json(output / "summary.json", warm)
         return warm
+
     directories = [output / f"lane-{i}" for i in range(search_lanes)]
-    run_options = dict(options)
-    run_options.update(
-        max_expansions=max(
-            1, math.ceil((options["max_expansions"] - warm_expanded) / search_lanes)
-        ),
-        max_seconds=max(0.001, options["max_seconds"] - (time.monotonic() - started)),
-    )
+    remaining_expansions = max(0, options["max_expansions"] - warm_expanded)
+    remaining_seconds = options["max_seconds"] - (time.monotonic() - started)
+    live = []
+    for lane, path in enumerate(paths):
+        checkpoint = json.loads(path.read_text())
+        if (
+            checkpoint.get("schema") != "mcts-tree-v1"
+            or checkpoint.get("identity") != identity["tree"]
+        ):
+            raise ValueError("MCTS lane tree checkpoint is incompatible")
+        if any(not checkpoint["nodes"][root]["closed"] for root in checkpoint["roots"]):
+            live.append(lane)
+    shares = [0] * search_lanes
+    for _ in range(remaining_expansions):
+        if not live:
+            break
+        lane = next((index for index in live if index >= next_lane), live[0])
+        shares[lane] += 1
+        next_lane = (lane + 1) % search_lanes
+    manifest(paths)
+    if remaining_seconds <= 0 or not any(shares) or (output / "STOP").exists():
+        status = (
+            "stopped"
+            if (output / "STOP").exists()
+            else "tree_exhausted"
+            if not live
+            else "budget_exhausted"
+        )
+        summary = {
+            "status": status,
+            "character": character,
+            "seed": seed,
+            "ascension": options["ascension"],
+            "search_lanes": search_lanes,
+            "expanded": warm_expanded,
+            "recovered_lanes": [],
+            "seconds": time.monotonic() - started,
+        }
+        write_json(output / "summary.json", summary)
+        return summary
+
     stop_monitor = threading.Event()
     halt = threading.Event()
 
     def monitor():
         while not stop_monitor.wait(0.25):
             if halt.is_set() or (output / "STOP").exists():
-                for d in directories:
-                    if d.is_dir():
-                        (d / "STOP").touch()
+                for directory in directories:
+                    if directory.is_dir():
+                        (directory / "STOP").touch()
 
     thread = threading.Thread(target=monitor, daemon=True)
     thread.start()
-    results = [None] * search_lanes
+    results = [
+        {"status": "budget_exhausted", "expanded": 0} for _ in range(search_lanes)
+    ]
+    checkpoints = list(paths)
+    recovered = []
     first_verified = None
+    run_options = dict(options)
+    run_options["max_seconds"] = max(0.001, remaining_seconds)
     try:
         with ThreadPoolExecutor(
             max_workers=search_lanes, thread_name_prefix="mcts-lane"
@@ -169,9 +316,15 @@ def search_parallel(
                     search_lanes=1,
                     resume=paths[i],
                     lane_index=i,
-                    **run_options,
+                    max_expansions=shares[i],
+                    **{
+                        key: value
+                        for key, value in run_options.items()
+                        if key != "max_expansions"
+                    },
                 ): i
                 for i in range(search_lanes)
+                if shares[i]
             }
             pending = set(futures)
             while pending:
@@ -180,8 +333,12 @@ def search_parallel(
                     i = futures[future]
                     try:
                         results[i] = future.result()
-                    except Exception as exc:
-                        results[i] = {"status": "lane_error", "error": str(exc)}
+                    except Exception as exc:  # noqa: BLE001 - isolate failed lanes
+                        results[i] = {
+                            "status": "lane_error",
+                            "error": str(exc),
+                            "expanded": 0,
+                        }
                     if (
                         results[i]["status"] == "verified_victory"
                         and first_verified is None
@@ -191,19 +348,22 @@ def search_parallel(
     finally:
         stop_monitor.set()
         thread.join(timeout=1)
-    checkpoints = []
-    recovered = []
     for i, result in enumerate(results):
         path = directories[i] / "tree.json"
-        if result["status"] == "lane_error" or not path.exists():
-            path = paths[i]
+        if shares[i] and result["status"] != "lane_error" and path.exists():
+            checkpoints[i] = path.resolve()
+        elif shares[i]:
             recovered.append(i)
-        checkpoints.append(path.resolve())
     manifest(checkpoints)
     winner = next(
-        (i for i, r in enumerate(results) if r["status"] == "verified_victory"), None
+        (
+            i
+            for i, result in enumerate(results)
+            if result["status"] == "verified_victory"
+        ),
+        None,
     )
-    statuses = {r["status"] for r in results}
+    statuses = {result["status"] for result in results}
     if winner is not None:
         _copy_verified(directories[winner], output)
         status = "verified_victory"
@@ -211,12 +371,12 @@ def search_parallel(
         status = "infrastructure_error"
     elif "replay_failed" in statuses:
         status = "replay_failed"
-    elif "stopped" in statuses:
+    elif "stopped" in statuses or (output / "STOP").exists():
         status = "stopped"
-    elif all(s.startswith("tree_exhausted") for s in statuses):
+    elif all(value.startswith("tree_exhausted") for value in statuses):
         status = (
             "tree_exhausted_with_unresolved"
-            if any("unresolved" in s for s in statuses)
+            if any("unresolved" in value for value in statuses)
             else "tree_exhausted"
         )
     else:
@@ -232,10 +392,13 @@ def search_parallel(
         "local_repair": options["local_repair"],
         "risk_aware_rollout": options["risk_aware_rollout"],
         "search_lanes": search_lanes,
-        "expanded": warm_expanded + sum(r.get("expanded", 0) for r in results),
-        "simulations": sum(r.get("simulations", 0) for r in results),
-        "deaths": sum(r.get("deaths", 0) for r in results),
-        "unresolved_branches": sum(r.get("unresolved_branches", 0) for r in results),
+        "expanded": warm_expanded
+        + sum(result.get("expanded", 0) for result in results),
+        "simulations": sum(result.get("simulations", 0) for result in results),
+        "deaths": sum(result.get("deaths", 0) for result in results),
+        "unresolved_branches": sum(
+            result.get("unresolved_branches", 0) for result in results
+        ),
         "budget_ms": options["budget_ms"],
         "boss_budget_ms": options["boss_budget_ms"],
         "rollout_decisions": options["rollout_decisions"],

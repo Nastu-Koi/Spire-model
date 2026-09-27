@@ -2,20 +2,18 @@
 
 本版本先提供小型 Full Attention/SwiGLU + Muon/AdamW 路径。目标是 RTX PRO 6000 Blackwell；本地 CPU 测试不能代替该 GPU 的兼容性或加速验证。
 
-本地验证记录：Python 3.11 / PyTorch 2.14 CPU，`tests` 与 `steam_recorder/tests` 合计 53 passed、5 skipped（1 个 CUDA 检查、4 个游戏程序集检查）。合成 Bootstrap→PPO→检查点重载通过；双优化器恢复后的下一次更新与连续训练一致。历史轨迹在约 503 万参数小模型上的 BF16 批量前后向与优化器更新已跑通。Flex 地图偏置反向图通过 PyTorch 图校验，但尚未在目标 GPU 编译或运行，不报告加速倍数及游戏胜率。
+历史验证记录（所述 `tests` 与 `steam_recorder/tests` 已不在当前工作区，以下成绩不代表当前版本复验结果）：Python 3.11 / PyTorch 2.14 CPU，`tests` 与 `steam_recorder/tests` 合计 53 passed、5 skipped（1 个 CUDA 检查、4 个游戏程序集检查）。合成 Bootstrap→PPO→检查点重载通过；双优化器恢复后的下一次更新与连续训练一致。历史轨迹在约 503 万参数小模型上的 BF16 批量前后向与优化器更新已跑通。Flex 地图偏置反向图通过 PyTorch 图校验，但尚未在目标 GPU 编译或运行，不报告加速倍数及游戏胜率。
 
 ## 环境
 
 使用 Python 3.11 和项目声明的 PyTorch 2.14 系列。目标机器需要安装与驱动兼容、包含该 GPU 架构的 CUDA wheel；CPU wheel 无法运行 CUDA 基准。运行报告记录 PyTorch、CUDA 构建、设备和计算能力，实际安装组合应随实验固定。
 
 ```bash
-python -m pip install -r requirment.txt
-python -m pip install -e .
-python -m pytest tests steam_recorder/tests
-python -m pytest -m cuda tests
+python -m pip install -e '.[test]'
+python -m pytest -q
 ```
 
-CUDA 测试必须在目标机器运行；CPU 环境将跳过这些测试。新检查点格式为 2，不能继续加载旧 hybrid 权重；原始采集数据仍可导入。
+当前默认 pytest 仅收集 `combat_solver_cli/tests` 的搜索回归，不覆盖本页历史模型／CUDA 测试。模型／CUDA 测试需恢复对应测试文件后在目标机器重新验证。新检查点格式为 2，不能继续加载旧 hybrid 权重；原始采集数据仍可导入。
 
 ## 可选 FlashAttention-4
 
@@ -29,7 +27,6 @@ CUDA 测试必须在目标机器运行；CPU 环境将跳过这些测试。新�
 ```bash
 python -m pip install --pre flash-attn-4
 # CUDA 13 环境按包的安装说明选择 flash-attn-4[cu13]
-python -m pytest tests/test_model_redesign.py -m cuda -q
 ```
 
 参考 [PyTorch FA4 接口说明](https://pytorch.org/blog/flexattention-flashattention-4-fast-and-flexible/)
@@ -47,8 +44,7 @@ FA4 的 SM120 实现也限制自定义 score modifier 的反向传播。因此�
 训练中的偏置。`actual_backend` 报告实际使用的 `flash` / `flex` / `reference`。
 现有 `benchmark` 测前向加反向，选择 `flash` 时测到的是训练回退路径，不能当成 FA4 推理基准。
 
-CUDA 测试覆盖带地图偏置和不等长 padding 的 FA4 推理、参数更新后重新推理，以及训练回退的
-梯度一致性。无 CUDA 或未安装 FA4 时，对应测试跳过；接入代码不代表已在目标 GPU 验证加速。
+历史 `tests/test_model_redesign.py` 曾覆盖带地图偏置和不等长 padding 的 FA4 推理、参数更新后重新推理，以及训练回退的梯度一致性。该文件当前缺失；接入代码不代表已在目标 GPU 验证加速。
 
 ## 快速反馈
 
