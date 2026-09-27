@@ -1,0 +1,208 @@
+[
+  {
+    "repeat": 0,
+    "seed": "UNIFICATION-HOLDOUT-01",
+    "index": 324,
+    "act": 3,
+    "floor": 2,
+    "before_hash": "18302eb8caa905a3dc7b5edcee6c8025b4166a06a471bb59d2ffb2fb06ffca46",
+    "budget_ms": 250,
+    "restore_seconds": 3.547604291990865,
+    "combat_seconds": 1.4544941670028493,
+    "before_hp": 105,
+    "after_hp": 95,
+    "after_phase": "rewards",
+    "boundary": "decision",
+    "after_hash": "6fb91cb1a37e17a0ccd4e9337c7cc0d76337e71da2d97ba425f85163c79a8ccf",
+    "calls": [
+      {
+        "seconds": 0.5394815420149826,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.012181167025119066,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.014504874998237938,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.0032854590099304914,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.35427654202794656,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.011332166963256896,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.013754042040091008,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.003214041003957391,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.33743108302587643,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.009953583008609712,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.009454999992158264,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.0029910419834777713,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.05648599995765835,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.018575208028778434,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.00976079102838412,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.013048875029198825,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.016210167028475553,
+        "search": true,
+        "type": "solver_step"
+      }
+    ]
+  },
+  {
+    "repeat": 1,
+    "seed": "UNIFICATION-HOLDOUT-01",
+    "index": 324,
+    "act": 3,
+    "floor": 2,
+    "before_hash": "18302eb8caa905a3dc7b5edcee6c8025b4166a06a471bb59d2ffb2fb06ffca46",
+    "budget_ms": 250,
+    "restore_seconds": 3.5819875830202363,
+    "combat_seconds": 1.4202015409828164,
+    "before_hp": 105,
+    "after_hp": 95,
+    "after_phase": "rewards",
+    "boundary": "decision",
+    "after_hash": "6fb91cb1a37e17a0ccd4e9337c7cc0d76337e71da2d97ba425f85163c79a8ccf",
+    "calls": [
+      {
+        "seconds": 0.5103974579833448,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.012071709032170475,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.014278040966019034,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.003244166960939765,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.35677116602892056,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.01174658298259601,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.023285584000404924,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.003284792008344084,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.32902529096463695,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.008982707979157567,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.009463624970521778,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.0030182499904185534,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.056750749994535,
+        "search": true,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.021088792011141777,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.01020395802333951,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.002940584032330662,
+        "search": false,
+        "type": "solver_step"
+      },
+      {
+        "seconds": 0.017903083004057407,
+        "search": true,
+        "type": "solver_step"
+      }
+    ]
+  }
+]

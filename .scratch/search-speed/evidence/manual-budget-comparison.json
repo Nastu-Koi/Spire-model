@@ -1,0 +1,81 @@
+{
+  "runs": [
+    {
+      "directory": "combat_solver_cli/artifacts/manual-budget250-20260927-131722",
+      "summary": {
+        "status": "verified_victory",
+        "character": "Ironclad",
+        "seed": "UNIFICATION-HOLDOUT-01",
+        "ascension": 0,
+        "algorithm": "mcts_uct_repair_risk_v2",
+        "local_repair": true,
+        "risk_aware_rollout": true,
+        "expanded": 1523,
+        "simulations": 23,
+        "deaths": 22,
+        "unresolved_branches": 0,
+        "nodes": 8988,
+        "best_progress": [
+          3,
+          15
+        ],
+        "solver_steps": 3409,
+        "replayed_steps": 3897,
+        "budget_ms": 250,
+        "boss_budget_ms": 5000,
+        "reuse_turn_plan": true,
+        "rollout_decisions": 256,
+        "exploration": 1.4142135623730951,
+        "rollout_epsilon": 0.1,
+        "search_seconds": 737.1448766249814,
+        "stop_reason": null,
+        "optimality_proven": false,
+        "seconds": 742.9068803749979
+      }
+    },
+    {
+      "directory": "combat_solver_cli/artifacts/manual-budget1000-20260927-133159",
+      "summary": {
+        "status": "stopped",
+        "character": "Ironclad",
+        "seed": "UNIFICATION-HOLDOUT-01",
+        "ascension": 0,
+        "algorithm": "mcts_uct_repair_risk_v2",
+        "local_repair": true,
+        "risk_aware_rollout": true,
+        "expanded": 1899,
+        "simulations": 30,
+        "deaths": 29,
+        "unresolved_branches": 1,
+        "nodes": 10972,
+        "best_progress": [
+          3,
+          15
+        ],
+        "solver_steps": 4202,
+        "replayed_steps": 4871,
+        "budget_ms": 1000,
+        "boss_budget_ms": 5000,
+        "reuse_turn_plan": true,
+        "rollout_decisions": 256,
+        "exploration": 1.4142135623730951,
+        "rollout_epsilon": 0.1,
+        "search_seconds": 1327.4459951660247,
+        "stop_reason": "STOP requested",
+        "optimality_proven": false,
+        "seconds": 1327.4459982910194
+      }
+    }
+  ],
+  "1000ms_errors": [
+    {
+      "expanded": 260,
+      "error": "native waiting boundary did not settle",
+      "seed": "UNIFICATION-HOLDOUT-01",
+      "character": "Ironclad",
+      "ascension": 0
+    }
+  ],
+  "stopping_rule": "User requested early stop after observing slower progress; not a pre-registered equal-budget benchmark.",
+  "250ms_replay_evidence_checked": true
+}
