@@ -19,7 +19,7 @@ spire-model = "model.cli:main"
 include = ["model*", "combat_solver_cli*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "steam_recorder/tests"]
+testpaths = ["combat_solver_cli/tests"]
 markers = ["engine: requires local headless engine and game assemblies", "cuda: requires a CUDA GPU"]
 
 [tool.setuptools.package-data]

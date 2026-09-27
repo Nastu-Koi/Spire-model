@@ -6,12 +6,18 @@ from pathlib import Path
 
 from model.protocol import CHARACTERS, execution_command, validate_frame
 
-from .astar import search, write_json
 from .client import DEFAULT_CONFIG, ROOT, SolverEngine
+from .mcts import search
+from .search_support import write_json
 
 
 def first_combat(
-    config, character, seed, budget_ms, reuse_turn_plan=False, ascension=10
+    config,
+    character="Ironclad",
+    seed="combat-solver-cli-smoke",
+    budget_ms=1000,
+    reuse_turn_plan=False,
+    ascension=0,
 ):
     count = selection = 0
     with SolverEngine(config) as engine:
@@ -67,7 +73,7 @@ def first_combat(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Native CombatSolver teacher and full-run weighted A*"
+        description="Native CombatSolver teacher and full-run MCTS"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     configure = sub.add_parser("configure")
@@ -77,7 +83,7 @@ def main():
     configure.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     smoke = sub.add_parser("smoke")
     smoke.add_argument(
-        "--characters", nargs="+", choices=CHARACTERS, default=list(CHARACTERS)
+        "--characters", nargs="+", choices=CHARACTERS, default=["Ironclad"]
     )
     smoke.add_argument("--seed", default="combat-solver-cli-smoke")
     smoke.add_argument(
@@ -85,7 +91,7 @@ def main():
     )
     smoke.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     smoke.add_argument("--budget-ms", type=int, default=1000)
-    smoke.add_argument("--ascension", type=int, choices=range(11), default=10)
+    smoke.add_argument("--ascension", type=int, choices=range(11), default=0)
     smoke.add_argument("--reuse-turn-plan", action="store_true")
     for name in ("search", "batch"):
         cmd = sub.add_parser(name)
@@ -93,13 +99,7 @@ def main():
         cmd.add_argument("--output", type=Path, required=True)
         cmd.add_argument("--budget-ms", type=int, default=1000)
         cmd.add_argument("--boss-budget-ms", type=int, default=5000)
-        cmd.add_argument(
-            "--early-route-diversity",
-            action=argparse.BooleanOptionalAction,
-            default=True,
-        )
-        cmd.add_argument("--ascension", type=int, choices=range(11), default=10)
-        cmd.add_argument("--weight", type=float, default=5)
+        cmd.add_argument("--ascension", type=int, choices=range(11), default=0)
         cmd.add_argument("--max-expansions", type=int, default=2000)
         cmd.add_argument("--max-seconds", type=float, default=3600)
         cmd.add_argument("--max-steps", type=int, default=10000)
@@ -108,11 +108,10 @@ def main():
             "--rollout-decisions",
             type=int,
             default=None,
-            help="Rollout horizon: A* defaults to 0, MCTS to 256",
+            help="MCTS rollout horizon (default: 256)",
         )
-        cmd.add_argument("--search-lanes", type=int, choices=[1, 2, 4], default=2)
+        cmd.add_argument("--search-lanes", type=int, choices=[1, 2, 4], default=1)
         if name == "search":
-            cmd.add_argument("--algorithm", choices=["astar", "mcts"], default="astar")
             cmd.add_argument(
                 "--local-repair", action=argparse.BooleanOptionalAction, default=True
             )
@@ -129,6 +128,8 @@ def main():
         else:
             cmd.add_argument("--jobs", type=Path, required=True)
             cmd.add_argument("--workers", type=int, choices=[1], default=1)
+            cmd.add_argument("--quiet", action="store_true")
+            cmd.add_argument("--progress-interval", type=float, default=10)
     verify = sub.add_parser("verify")
     verify.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     verify.add_argument("--prefix", type=Path, required=True)
@@ -136,7 +137,7 @@ def main():
     args = vars(parser.parse_args())
     command = args.pop("command")
     if "rollout_decisions" in args and args["rollout_decisions"] is None:
-        args["rollout_decisions"] = 256 if args.get("algorithm") == "mcts" else 0
+        args["rollout_decisions"] = 256
     if command == "configure":
         solver, lib = args["solver"].resolve(), args["lib"].resolve()
         if not solver.is_file() or not (lib / "sts2.dll").is_file():
@@ -147,9 +148,14 @@ def main():
         dependencies = [p.resolve() for p in args["dependency_dir"]]
         if any(not p.is_dir() for p in dependencies):
             raise FileNotFoundError("Dependency directory missing")
+        from model.dotnet_runtime import find_sdk
+
+        sdk = find_sdk()
+        if sdk is None:
+            raise RuntimeError("A .NET 9 or newer SDK is required to build the worker")
         subprocess.run(
             [
-                "dotnet",
+                sdk,
                 "build",
                 str(ROOT / "combat_solver_cli/CombatSolverCli.csproj"),
                 "--nologo",
@@ -189,21 +195,14 @@ def main():
         args["output"].parent.mkdir(parents=True, exist_ok=True)
         write_json(args["output"], result)
     elif command == "search":
-        algorithm = args.pop("algorithm")
-        if algorithm == "astar":
-            args.pop("local_repair")
-            args.pop("risk_aware_rollout")
-        if algorithm == "mcts":
-            from .mcts import search as run_search
-        else:
-            run_search = search
-        result = run_search(**args)
+        result = search(**args)
         print(json.dumps(result, ensure_ascii=False))
         raise SystemExit(0 if result["status"] == "verified_victory" else 2)
     elif command == "batch":
         from .batch import generate
 
         args["jobs"] = json.loads(args["jobs"].read_text())
+        args["progress"] = not args.pop("quiet")
         result = generate(**args)
         print(json.dumps(result, ensure_ascii=False))
         raise SystemExit(0 if result["verified_victories"] else 2)

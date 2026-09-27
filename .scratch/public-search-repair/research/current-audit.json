@@ -1,0 +1,113 @@
+{
+  "scope": "offline replay of four dev seeds, fixed profile, repetition 1",
+  "limitations": [
+    "Depth variants only rescore baseline observations, not their own trajectories.",
+    "Action changes do not establish better decisions or higher win rate.",
+    "Blocker occurrence counts overlap and do not attribute deaths.",
+    "No holdout, native engine, or wall-clock throughput experiment was run."
+  ],
+  "counts": {
+    "frames": 894,
+    "baseline_score_mismatches": 0,
+    "combat_frames": 656,
+    "unsupported_hook_frames": 476,
+    "depth_1_to_3_action_changes": 48,
+    "depth_3_to_6_action_changes": 2,
+    "depth_1_expanded": 5140,
+    "depth_3_expanded": 16813,
+    "depth_6_expanded": 23940,
+    "depth_1_to_3_action_changes_with_unsupported_hooks": 0,
+    "depth_3_to_6_action_changes_with_unsupported_hooks": 0
+  },
+  "root_play_or_potion_reasons": {
+    "modeled": 561,
+    "unsupported_effect": 184,
+    "unsupported_hooks": 2612,
+    "pile_change_unmodeled": 13,
+    "new_legality_requires_native_observation": 8
+  },
+  "blocker_frame_occurrences": {
+    "power:THORNS_POWER": 253,
+    "relic:BRONZE_SCALES": 250,
+    "relic:PAELS_HORN": 140,
+    "relic:ODDLY_SMOOTH_STONE": 104,
+    "relic:MINIATURE_CANNON": 78,
+    "relic:RIPPLE_BASIN": 65,
+    "power:SLIPPERY_POWER": 55,
+    "power:MINION_POWER": 53,
+    "relic:AMETHYST_AUBERGINE": 48,
+    "power:NO_DRAW_POWER": 41,
+    "power:RAGE_POWER": 28,
+    "power:TENDER_POWER": 26,
+    "power:SHRINK_POWER": 25,
+    "power:ARTIFACT_POWER": 23,
+    "power:INFESTED_POWER": 23,
+    "power:DRAW_CARDS_NEXT_TURN_POWER": 23,
+    "power:ENERGY_NEXT_TURN_POWER": 23,
+    "power:IMBALANCED_POWER": 21,
+    "power:ILLUSION_POWER": 20,
+    "power:ESCAPE_ARTIST_POWER": 19,
+    "power:PERSONAL_HIVE_POWER": 18,
+    "relic:WHITE_BEAST_STATUE": 15,
+    "power:CONSTRICT_POWER": 13,
+    "power:SWIPE_POWER": 13,
+    "power:FLUTTER_POWER": 11,
+    "power:DISINTEGRATION_POWER": 11,
+    "power:RUPTURE_POWER": 6
+  },
+  "executed_effect_coverage": {
+    "modeled": 123,
+    "unknown": 356,
+    "approximate": 2
+  },
+  "outside_all_equal_multiple_candidates": {
+    "event": 7,
+    "card_select": 1
+  },
+  "cases": [
+    {
+      "seed": "BD1D31C2468C7C1F",
+      "frames": 181,
+      "combat_frames": 127,
+      "depth_1_to_3_action_changes": 15,
+      "depth_3_to_6_action_changes": 0
+    },
+    {
+      "seed": "5ADF5172BEF3142B",
+      "frames": 101,
+      "combat_frames": 78,
+      "depth_1_to_3_action_changes": 12,
+      "depth_3_to_6_action_changes": 0
+    },
+    {
+      "seed": "D011001234ABCDEF",
+      "frames": 159,
+      "combat_frames": 107,
+      "depth_1_to_3_action_changes": 6,
+      "depth_3_to_6_action_changes": 2
+    },
+    {
+      "seed": "D011001234ABCDE0",
+      "frames": 453,
+      "combat_frames": 344,
+      "depth_1_to_3_action_changes": 15,
+      "depth_3_to_6_action_changes": 0
+    }
+  ],
+  "source_sha256": {
+    "combat_solver_cli/public_search.py": "078577d5e46e7d8494bfd50fe7cbf85805c4124ca2ca273dfafed514eb3fb5f3",
+    "combat_solver_cli/public_effects.py": "51dfd6db7f319c0b216b4dafa6e50cc71ff7d8fd773ecb9f93c005427e9e335f",
+    "combat_solver_cli/astar.py": "71dac7a7941a02e46dab9e4ac4eafc4ebd55de2a3f9eaafe40db23b88a14948e",
+    ".scratch/public-search-repair/research/audit_current.py": "d6f5b6fad6ad80a55d49bacb11736965f126a4f9ae57fc548008dc50687bef6f"
+  },
+  "input_sha256": {
+    "combat_solver_cli/artifacts/repair-11/evaluation-final/runs/000001/attempts/000001/decisions.jsonl": "bc7b9b61b74f663c2f748fdd0b65696b0d2dd9b61d67b80e74d79b216f5afda3",
+    "combat_solver_cli/artifacts/repair-11/evaluation-final/runs/000001/effects.jsonl": "5360094da06c88230ed1f34f7d466751ce3dd125169b28a11c87e14d1c8e24c6",
+    "combat_solver_cli/artifacts/repair-11/evaluation-final/runs/000003/attempts/000001/decisions.jsonl": "cc65951cb37c70796a0b2ef9d877f5495168b0f00a76e58d6e0a0c625ad7a1f5",
+    "combat_solver_cli/artifacts/repair-11/evaluation-final/runs/000003/effects.jsonl": "003c5f9a1a907fd720acc2a0cd9d66d3127ff6fe5c2de436fd948dd76d7bba7c",
+    "combat_solver_cli/artifacts/repair-11/evaluation-final/runs/000005/attempts/000001/decisions.jsonl": "74139b4cd625b7e3271c75ea8f781da7cfbb196843e6ba49dfe80a3eeefeae4d",
+    "combat_solver_cli/artifacts/repair-11/evaluation-final/runs/000005/effects.jsonl": "1bfeb911d33438a1efe4fd6d66bd75a7e9f82fc90e4a033554ef46bb55507e95",
+    "combat_solver_cli/artifacts/repair-11/evaluation-final/runs/000007/attempts/000001/decisions.jsonl": "a5873ca225184f03b62022f1540eec3735913c3c3b9e2f33af0d411995efa33b",
+    "combat_solver_cli/artifacts/repair-11/evaluation-final/runs/000007/effects.jsonl": "d0e38ba61e2d216178a65a0a1c79563272a936921ce56604483e19cb8142c7dc"
+  }
+}

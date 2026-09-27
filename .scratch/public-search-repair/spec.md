@@ -1,7 +1,9 @@
 # 修复公开信息搜索教师的效果估值与成功轨迹产出能力
 
-Status: ready-for-agent
-Progress: pending
+> 2026-09-26：纯公开模拟路线已退役，后续开发统一转入[搜索合并规格](../search-unification/spec.md)。下文保留历史目标及未通过的验收；resolved 表示此路线工单关闭，不表示五分钟成功产出已达标。
+
+Status: wontfix
+Progress: resolved
 
 本规格为公开搜索修复目标与验收条件的唯一维护位置；实施进度以各工单为准。
 

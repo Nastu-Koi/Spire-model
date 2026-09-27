@@ -12,7 +12,7 @@ from .client import DEFAULT_CONFIG
 from .target import generate_target
 
 
-def make_jobs(seeds_per_character, characters=CHARACTERS, seed_prefix=None):
+def make_jobs(seeds_per_character, characters=("Ironclad",), seed_prefix=None):
     if seeds_per_character < 1:
         raise ValueError("seeds_per_character must be positive")
     if seed_prefix:
@@ -38,7 +38,7 @@ def main():
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--ascension", type=int, choices=range(11), default=0)
     parser.add_argument(
-        "--characters", nargs="+", choices=CHARACTERS, default=list(CHARACTERS)
+        "--characters", nargs="+", choices=CHARACTERS, default=["Ironclad"]
     )
     parser.add_argument(
         "--seed-prefix", help="Use deterministic seeds for a reproducible experiment"
@@ -47,16 +47,29 @@ def main():
     count.add_argument("--target-trajectories", type=int)
     count.add_argument("--seeds-per-character", type=int)
     parser.add_argument("--workers", type=int, choices=[1], default=1)
-    parser.add_argument("--search-lanes", type=int, choices=[1, 2, 4], default=2)
+    parser.add_argument("--search-lanes", type=int, choices=[1, 2, 4], default=1)
     parser.add_argument("--budget-ms", type=int, default=2500)
-    parser.add_argument("--weight", type=float, default=12)
     parser.add_argument("--max-expansions", type=int, default=2000)
     parser.add_argument("--max-seconds", type=float, default=900)
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=1000,
+        help="Maximum search segments in target mode",
+    )
+    parser.add_argument(
+        "--max-total-seconds",
+        type=float,
+        default=3600,
+        help="Wall-clock limit for this target invocation",
+    )
     parser.add_argument("--max-steps", type=int, default=10000)
     parser.add_argument("--rollout-decisions", type=int, default=256)
     parser.add_argument(
         "--reuse-turn-plan", action=argparse.BooleanOptionalAction, default=True
     )
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--progress-interval", type=float, default=10)
     args = parser.parse_args()
     if args.seeds_per_character is not None:
         jobs = make_jobs(args.seeds_per_character, args.characters, args.seed_prefix)
@@ -65,6 +78,9 @@ def main():
         options.pop("seeds_per_character")
         options.pop("target_trajectories")
         options.pop("characters")
+        options.pop("max_attempts")
+        options.pop("max_total_seconds")
+        options["progress"] = not options.pop("quiet")
         result = generate(jobs=jobs, **options)
         success = bool(result["verified_victories"])
     else:
@@ -79,6 +95,7 @@ def main():
             "characters",
         ):
             options.pop(key)
+        options["progress"] = not options.pop("quiet")
         if args.seed_prefix:
             raise ValueError(
                 "--seed-prefix is only available with --seeds-per-character; target mode uses one random seed per trajectory"

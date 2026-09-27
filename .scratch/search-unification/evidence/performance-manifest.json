@@ -1,0 +1,37 @@
+{
+  "schema": "search-evaluation-v1",
+  "character": "Ironclad",
+  "ascension": 0,
+  "seeds": {
+    "dev": [
+      "BD1D31C2468C7C1F"
+    ],
+    "holdout": [
+      "UNIFICATION-HOLDOUT-01",
+      "UNIFICATION-HOLDOUT-02",
+      "UNIFICATION-HOLDOUT-03"
+    ]
+  },
+  "profiles": [
+    {
+      "name": "mcts-default-reuse",
+      "options": {
+        "budget_ms": 1000,
+        "boss_budget_ms": 5000,
+        "search_lanes": 1,
+        "reuse_turn_plan": true,
+        "rollout_decisions": 256,
+        "exploration": 1.4142135623730951,
+        "rollout_epsilon": 0.1,
+        "local_repair": true,
+        "risk_aware_rollout": true
+      }
+    }
+  ],
+  "repetitions": 1,
+  "budget": {
+    "max_seconds_per_run": 300,
+    "max_expansions": 100000,
+    "max_steps": 10000
+  }
+}

@@ -6,7 +6,7 @@ import argparse
 import json
 import time
 from pathlib import Path
-from combat_solver_cli.astar import ReplayWorker, from_records, state_key
+from combat_solver_cli.search_support import ReplayWorker, from_records, state_key
 from combat_solver_cli.client import DEFAULT_CONFIG
 from model.protocol import action_semantics
 

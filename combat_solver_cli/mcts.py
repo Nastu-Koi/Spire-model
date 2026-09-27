@@ -13,18 +13,19 @@ from pathlib import Path
 
 from model.protocol import CHARACTERS, action_semantics, fingerprint
 
-from .astar import (
+from .client import InfrastructureError
+from .search_support import (
     Prefix,
     ReplayWorker,
     SearchLimit,
     from_records,
-    load_frontier,
     player,
     preference,
     state_key,
     write_json,
 )
-from .client import InfrastructureError
+
+DEFAULT_EXPLORATION = math.sqrt(2)
 
 
 @dataclass
@@ -44,7 +45,7 @@ class Node:
 
 
 class Tree:
-    def __init__(self, rng_seed=0, exploration=math.sqrt(2)):
+    def __init__(self, rng_seed=0, exploration=DEFAULT_EXPLORATION):
         self.nodes = []
         self.roots = []
         self.rng = random.Random(rng_seed)
@@ -300,6 +301,33 @@ def load_tree(path, identity, exploration):
     return tree, data.get("stats", {})
 
 
+def search_identity(
+    character,
+    seed,
+    ascension,
+    exploration,
+    rollout_epsilon,
+    rollout_decisions,
+    local_repair,
+    risk_aware_rollout,
+):
+    identity = {
+        "character": character,
+        "seed": seed,
+        "ascension": ascension,
+        "exploration": exploration,
+        "rollout_epsilon": rollout_epsilon,
+        "rollout_decisions": rollout_decisions,
+    }
+    if local_repair or risk_aware_rollout:
+        identity.update(
+            policy="repair_risk_v2",
+            local_repair=local_repair,
+            risk_aware_rollout=risk_aware_rollout,
+        )
+    return identity
+
+
 def search(
     config,
     character,
@@ -319,7 +347,7 @@ def search(
     ascension=10,
     search_lanes=1,
     early_route_diversity=True,
-    exploration=math.sqrt(2),
+    exploration=DEFAULT_EXPLORATION,
     rollout_epsilon=0.1,
     lane_index=0,
     local_repair=True,
@@ -381,20 +409,16 @@ def search(
             prefix_path=prefix_path,
             **options,
         )
-    identity = {
-        "character": character,
-        "seed": seed,
-        "ascension": ascension,
-        "exploration": exploration,
-        "rollout_epsilon": rollout_epsilon,
-        "rollout_decisions": rollout_decisions,
-    }
-    if local_repair or risk_aware_rollout:
-        identity.update(
-            policy="repair_risk_v2",
-            local_repair=local_repair,
-            risk_aware_rollout=risk_aware_rollout,
-        )
+    identity = search_identity(
+        character,
+        seed,
+        ascension,
+        exploration,
+        rollout_epsilon,
+        rollout_decisions,
+        local_repair,
+        risk_aware_rollout,
+    )
     algorithm = (
         "mcts_uct_repair_risk_v2"
         if local_repair or risk_aware_rollout
@@ -403,15 +427,13 @@ def search(
     tree = Tree(int(fingerprint([seed, "mcts", lane_index])[:16], 16), exploration)
     prior_stats = {}
     if resume:
-        schema = json.loads(Path(resume).read_text())["schema"]
+        schema = json.loads(Path(resume).read_text()).get("schema")
         if schema == "mcts-tree-v1":
             tree, prior_stats = load_tree(resume, identity, exploration)
-        elif schema == "astar-frontier-v2":
-            queue = load_frontier(resume, character, seed, weight, ascension)
-            for f, _, _, prefix, pending in sorted(queue, key=lambda n: (n[0], n[1])):
-                tree.add(None, prefix, pending, -f / weight)
         else:
-            raise ValueError("Single-lane MCTS requires a tree or initial frontier")
+            raise ValueError(
+                "Single-lane MCTS checkpoint is incompatible; expected mcts-tree-v1"
+            )
     elif prefix_path:
         data = json.loads(Path(prefix_path).read_text())
         if (data["character"], data["seed"], data.get("ascension", 10)) != (
@@ -547,15 +569,14 @@ def search(
                             ),
                         )
                         for candidate in candidates:
-                            if candidate["verb"] != "ABANDON_RUN":
-                                tree.add(
-                                    index,
-                                    node.prefix,
-                                    action_semantics(candidate),
-                                    preference(frame, candidate),
-                                )
+                            tree.add(
+                                index,
+                                node.prefix,
+                                action_semantics(candidate),
+                                preference(frame, candidate),
+                            )
                         if not node.children:
-                            raise ValueError("Decision has no non-abandon candidates")
+                            raise ValueError("Decision has no legal candidates")
                         log(
                             {
                                 "expanded": expanded,
@@ -675,7 +696,7 @@ def search(
 
             verify_and_export(config, output / "winning_prefix.json", output)
             summary["status"] = "verified_victory"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - verification errors reject this win
             summary.update(status="replay_failed", verification_error=str(exc))
     summary["seconds"] = time.monotonic() - started
     write_json(output / "summary.json", summary)

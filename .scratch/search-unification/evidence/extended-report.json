@@ -1,0 +1,79 @@
+{
+  "runs": [
+    {
+      "seed": "UNIFICATION-HOLDOUT-01",
+      "prior_wall_seconds": 300.5465052499785,
+      "extension_wall_seconds": 682.3597118339967,
+      "cumulative_seed_wall_seconds": 982.9062170839752,
+      "result": {
+        "status": "verified_victory",
+        "character": "Ironclad",
+        "seed": "UNIFICATION-HOLDOUT-01",
+        "ascension": 0,
+        "algorithm": "mcts_uct_repair_risk_v2",
+        "local_repair": true,
+        "risk_aware_rollout": true,
+        "expanded": 935,
+        "simulations": 16,
+        "deaths": 15,
+        "unresolved_branches": 0,
+        "nodes": 7894,
+        "best_progress": [
+          3,
+          15
+        ],
+        "solver_steps": 2031,
+        "replayed_steps": 2344,
+        "budget_ms": 1000,
+        "boss_budget_ms": 5000,
+        "reuse_turn_plan": true,
+        "rollout_decisions": 256,
+        "exploration": 1.4142135623730951,
+        "rollout_epsilon": 0.1,
+        "search_seconds": 676.5859512499883,
+        "stop_reason": null,
+        "optimality_proven": false,
+        "seconds": 682.1649875829462
+      }
+    },
+    {
+      "seed": "UNIFICATION-HOLDOUT-02",
+      "prior_wall_seconds": 301.0872255000286,
+      "extension_wall_seconds": 690.067750666989,
+      "cumulative_seed_wall_seconds": 991.1549761670176,
+      "result": {
+        "status": "verified_victory",
+        "character": "Ironclad",
+        "seed": "UNIFICATION-HOLDOUT-02",
+        "ascension": 0,
+        "algorithm": "mcts_uct_repair_risk_v2",
+        "local_repair": true,
+        "risk_aware_rollout": true,
+        "expanded": 904,
+        "simulations": 17,
+        "deaths": 14,
+        "unresolved_branches": 2,
+        "nodes": 8631,
+        "best_progress": [
+          3,
+          14
+        ],
+        "solver_steps": 1989,
+        "replayed_steps": 2962,
+        "budget_ms": 1000,
+        "boss_budget_ms": 5000,
+        "reuse_turn_plan": true,
+        "rollout_decisions": 256,
+        "exploration": 1.4142135623730951,
+        "rollout_epsilon": 0.1,
+        "search_seconds": 684.720245665987,
+        "stop_reason": null,
+        "optimality_proven": false,
+        "seconds": 689.8907565000118
+      }
+    }
+  ],
+  "extension_batch_wall_seconds": 690.0691609170171,
+  "verified_victories": 2,
+  "source_hash_mismatch": false
+}

@@ -1,13 +1,15 @@
 # 12: 选择并行度并验证安全缓存收益
 
+> 2026-09-26：纯公开模拟路线已退役，后续开发统一转入[搜索合并规格](../../search-unification/spec.md)。下文保留历史目标及未通过的验收；resolved 表示此路线工单关闭，不表示五分钟成功产出已达标。
+
 **Parent:** [公开信息搜索教师修复规格](../spec.md)。
 
 **What to build:** 在决策质量与预算策略冻结后，实测本机并行度与可复用计算，选择真实成功产出成本更低的运行配置。
 
 **Blocked by:** [11：根据决策难度分配搜索预算](11-adaptive-budget.md)
 
-Status: ready-for-agent
-Progress: pending
+Status: wontfix
+Progress: resolved
 
 - [ ] 在相同机器和无额外调试负载下比较预先指定的 worker 配置，记录实际总墙钟与每局结果，worker 累计时间不得当作总墙钟。
 - [ ] 先测量瓶颈，仅在存在可重复收益时引入缓存或执行优化；不要求无证据地新增缓存或重写并发架构。
