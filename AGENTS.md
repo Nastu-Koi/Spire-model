@@ -10,4 +10,4 @@
 
 ### Domain docs
 
-使用 single-context 布局；探索代码前按 `docs/agents/domain.md` 读取术语与相关 ADR。
+使用 single-context 布局；探索代码前按 `docs/agents/domain.md` 读取术语与设计文档。

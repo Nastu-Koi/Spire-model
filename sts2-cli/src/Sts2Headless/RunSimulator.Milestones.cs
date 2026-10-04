@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Runs;
@@ -12,6 +13,8 @@ public partial class RunSimulator
     private readonly HashSet<CombatRoom> _protocolWon = new(ReferenceEqualityComparer.Instance);
     private volatile bool _protocolVictory;
     private volatile bool _protocolLoss;
+    private volatile bool _protocolPlayerDied;
+    private Creature? _protocolPlayerCreature;
     private int _protocolEncounterSequence;
 
     private void RegisterProtocolMilestones()
@@ -23,7 +26,14 @@ public partial class RunSimulator
         manager.CombatEnded += ProtocolCombatEnded;
         RunManager.Instance.ActionExecutor.AfterActionExecuted -= ProtocolActionEnded;
         RunManager.Instance.ActionExecutor.AfterActionExecuted += ProtocolActionEnded;
+        // HP can reach zero before death prevention (Lizard Tail) runs; only the
+        // native Died event, raised after every preventer declined, is a death.
+        if (_protocolPlayerCreature != null) _protocolPlayerCreature.Died -= ProtocolPlayerDied;
+        _protocolPlayerCreature = _runState!.Players[0].Creature;
+        _protocolPlayerCreature.Died += ProtocolPlayerDied;
     }
+
+    private void ProtocolPlayerDied(Creature creature) => _protocolPlayerDied = true;
 
     private void ProtocolActionEnded(GameAction action)
     {

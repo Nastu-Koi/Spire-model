@@ -8,6 +8,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Promote hot methods to optimized code without the default 100 ms quiet period.
+         A run keeps meeting new cards, monsters and events, so that period kept being
+         restarted and the per-frame snapshot and hook code stayed unoptimized. -->
+    <RuntimeHostConfigurationOption Include="System.Runtime.TieredCompilation.CallCountingDelayMs" Value="0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Our GodotStubs (outputs as GodotSharp.dll to satisfy sts2.dll references) -->
     <ProjectReference Include="..\GodotStubs\GodotStubs.csproj" />
   </ItemGroup>

@@ -41,9 +41,21 @@ internal class LocLookup
 
     public LocLookup()
     {
-        var baseDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..");
+        var baseDir = DataRoot();
         Load(Path.Combine(baseDir, "localization_eng"), _eng);
         Load(Path.Combine(baseDir, "localization_zhs"), _zhs);
+    }
+
+    internal static string DataRoot()
+    {
+        // CombatSolverCli hosts the engine at a different executable depth.
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+            for (var directory = new DirectoryInfo(start); directory != null; directory = directory.Parent)
+                foreach (var root in new[] { directory.FullName, Path.Combine(directory.FullName, "sts2-cli") })
+                    if (File.Exists(Path.Combine(root, "localization_eng", "events.json"))
+                        && File.Exists(Path.Combine(root, "localization_eng", "characters.json")))
+                        return root;
+        throw new DirectoryNotFoundException("Cannot locate sts2-cli/localization_eng game data");
     }
 
     private static void Load(string dir, Dictionary<string, Dictionary<string, string>> target)
@@ -157,6 +169,7 @@ public partial class RunSimulator
     private static bool _modelDbInitialized;
     private static readonly InlineSynchronizationContext _syncCtx = new();
     private readonly ManualResetEventSlim _turnStarted = new(false);
+    private readonly ManualResetEventSlim _playerTurnStarted = new(false);
     private readonly ManualResetEventSlim _combatEnded = new(false);
     private static readonly LocLookup _loc = new();
     private bool _eventOptionChosen;
@@ -179,6 +192,13 @@ public partial class RunSimulator
         _cardSelector.PendingChanged += _pendingOperation.NotifyProgress;
     }
 
+    // TurnStarted fires for both sides; only the player's start ends an enemy turn.
+    private void OnTurnStarted(CombatState state)
+    {
+        if (state.CurrentSide == CombatSide.Player) _playerTurnStarted.Set();
+        _turnStarted.Set();
+    }
+
     private bool HasPendingInteraction() => _cardSelector.HasPending
         || _cardSelector.HasPendingReward
         || HasProtocolRewardMenu
@@ -188,8 +208,22 @@ public partial class RunSimulator
     private void WaitForPendingOperation() => _pendingOperation.WaitForBoundary(
         _syncCtx.Pump, HasPendingInteraction, TimeSpan.FromSeconds(3));
 
+    // Untracked native work (NativeContinuations) has no completion event to wait
+    // on; pump until it finishes or opens a prompt. A timeout publishes "waiting".
+    private void WaitForNativeContinuations()
+    {
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        while (NativeContinuations.Pending && !HasPendingInteraction())
+        {
+            if (timer.Elapsed > TimeSpan.FromSeconds(3))
+                throw new TimeoutException("Native continuation did not reach a decision boundary within 3 seconds.");
+            _syncCtx.Pump();
+            Thread.Sleep(1);
+        }
+    }
+
     public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null, string lang = "en",
-        bool decisionProtocol = false)
+        bool decisionProtocol = false, IReadOnlyList<string>? actIds = null)
     {
         ResetDecisionProtocol(ascension);
         _protocolTrainingRun = decisionProtocol && ascension is >= 0 and <= 10;
@@ -208,6 +242,7 @@ public partial class RunSimulator
             // Use CreateForTest which properly handles mutable copies internally
             _runState = RunState.CreateForTest(
                 players: new[] { player },
+                acts: actIds?.Select(id => ModelDb.GetById<ActModel>(new ModelId("ACT", id.StartsWith("ACT.") ? id[4..] : id))).ToArray(),
                 ascensionLevel: ascension,
                 seed: seedStr
             );
@@ -229,7 +264,7 @@ public partial class RunSimulator
             Log("Run launched");
 
             // Register event handlers for combat turn transitions
-            CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
+            CombatManager.Instance.TurnStarted += OnTurnStarted;
             CombatManager.Instance.CombatEnded += _ => _combatEnded.Set();
 
             // Finalize starting relics
@@ -453,7 +488,7 @@ public partial class RunSimulator
     }
 
     // ─── Game actions ───
-    public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en")
+    public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en", bool diagnosticProtocol = false)
     {
         // A loaded save needs a separate contract audit before training use.
         ResetDecisionProtocol(null);
@@ -484,7 +519,7 @@ public partial class RunSimulator
             RunManager.Instance.SetUpSavedSingleplayer(_runState, save).GetAwaiter().GetResult();
             LocalContext.NetId = netService.NetId;
 
-            CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
+            CombatManager.Instance.TurnStarted += OnTurnStarted;
             CombatManager.Instance.CombatEnded += _ => _combatEnded.Set();
             CardSelectCmd.UseSelector(_cardSelector);
             LocPatches._bundleSimRef = this;
@@ -534,6 +569,11 @@ public partial class RunSimulator
             {
                 Log($"Preserving saved room: {savedRoom.GetType().Name}");
             }
+
+            // Diagnostic probes may drive combat through the decision protocol,
+            // but a loaded save is never marked training-ready.
+            if (diagnosticProtocol)
+                _protocolAscension = save.Ascension;
 
             return DetectDecisionPoint();
         }
@@ -2981,6 +3021,7 @@ public partial class RunSimulator
         _modelDbInitialized = true;
 
         TestMode.IsOn = true;
+        HeadlessMerchantParity.Install();
 
         // The current engine requires mod discovery and assembly metadata even
         // for unmodded runs. TestMode skips filesystem/workshop mod loading.
@@ -3028,6 +3069,7 @@ public partial class RunSimulator
         PatchTalkCmd();
         SelectionMetadata.Install();
         HeadlessEventPresentation.Install();
+        NativeContinuations.Install();
 
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
@@ -3438,7 +3480,7 @@ public partial class RunSimulator
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
             var tables = new Dictionary<string, LocTable>();
 
-            var locDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "localization_eng");
+            var locDir = Path.Combine(LocLookup.DataRoot(), "localization_eng");
             if (Directory.Exists(locDir))
             {
                 foreach (var file in Directory.GetFiles(locDir, "*.json"))
@@ -3641,8 +3683,8 @@ public partial class RunSimulator
                 PatchMethod(harmony, locStringExists, nameof(LocPatches.HasEntryPrefix));
             }
 
-            // Patch LocTable.GetLocStringsWithPrefix to return empty list
-            PatchMethod(harmony, typeof(LocTable), "GetLocStringsWithPrefix", nameof(LocPatches.GetLocStringsWithPrefixPrefix));
+            // Keep native prefix enumeration: the public catalog needs the
+            // identities in the real localization tables loaded above.
         }
         catch (Exception ex)
         {
@@ -3762,12 +3804,6 @@ public partial class RunSimulator
 
         // Static reference so Harmony patch can access the simulator instance
         internal static RunSimulator? _bundleSimRef;
-
-        public static bool GetLocStringsWithPrefixPrefix(ref IReadOnlyList<LocString> __result)
-        {
-            __result = new List<LocString>();
-            return false;
-        }
     }
 
     private static void Log(string message)
@@ -3852,12 +3888,37 @@ public partial class RunSimulator
         }
         catch { }
 
+        // Read-only act encounter pools for diagnostic probes; not part of the decision protocol.
+        var encounterPools = new List<Dictionary<string, object?>>();
+        try
+        {
+            static List<string> Ids(IEnumerable<EncounterModel> encounters) =>
+                encounters.Select(e => e.Id.Entry).Distinct().ToList();
+            var acts = _runState.Acts;
+            for (int i = 0; i < acts.Count; i++)
+            {
+                var act = acts[i];
+                encounterPools.Add(new Dictionary<string, object?>
+                {
+                    ["act"] = i + 1,
+                    ["id"] = act.Id.Entry,
+                    ["boss"] = act.BossEncounter?.Id?.Entry,
+                    ["weak"] = Ids(act.AllWeakEncounters),
+                    ["regular"] = Ids(act.AllRegularEncounters),
+                    ["elite"] = Ids(act.AllEliteEncounters),
+                    ["bosses"] = Ids(act.AllBossEncounters),
+                });
+            }
+        }
+        catch (Exception ex) { Log($"encounter_pools unavailable: {ex.Message}"); }
+
         return new Dictionary<string, object?>
         {
             ["type"] = "map",
             ["context"] = RunContext(),
             ["rows"] = rows,
             ["boss"] = bossNode,
+            ["encounter_pools"] = encounterPools,
             ["current_coord"] = currentCoord.HasValue ? new Dictionary<string, object?>
             {
                 ["col"] = (int)currentCoord.Value.col,

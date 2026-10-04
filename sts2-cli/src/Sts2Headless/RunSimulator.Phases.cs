@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -5,6 +6,7 @@ using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models.Potions;
 using MegaCrit.Sts2.Core.Rooms;
@@ -52,7 +54,10 @@ public partial class RunSimulator
         bindings.Add(new(Candidate("END_TURN", "end_turn"), CanActInCombat, () =>
         {
             _turnStarted.Reset();
+            _playerTurnStarted.Reset();
             _combatEnded.Reset();
+            bool Settled() => HasPendingInteraction() || _combatEnded.IsSet
+                || player.Creature.IsDead || !CombatManager.Instance.IsInProgress;
             YieldPatches.SuppressYield = true;
             try
             {
@@ -60,30 +65,43 @@ public partial class RunSimulator
                 for (int i = 0; i < 1000; i++)
                 {
                     _syncCtx.Pump();
-                    if (HasPendingInteraction() || _turnStarted.IsSet || _combatEnded.IsSet
-                        || player.Creature.IsDead || !CombatManager.Instance.IsInProgress) break;
-                    Thread.Sleep(1);
+                    if (Settled() || _turnStarted.IsSet) break;
+                    _turnStarted.Wait(1);
                 }
             }
             finally { YieldPatches.SuppressYield = false; }
+            // The enemy turn runs on the combat turn loop's own task. Stay until the
+            // player can act again rather than publishing "waiting" for the client to
+            // poll; a turn that outlasts the bound still surfaces as "waiting".
+            var enemyTurn = Stopwatch.StartNew();
+            while (!Settled() && !_playerTurnStarted.IsSet && enemyTurn.Elapsed < TimeSpan.FromSeconds(3))
+            {
+                _syncCtx.Pump();
+                _playerTurnStarted.Wait(1);
+            }
         }));
         AddPotionCandidates(snapshot, bindings);
         if (!CanActInCombat()) return NonDecisionBoundary("waiting");
         return PublishSnapshot("combat", snapshot, bindings);
     }
 
-    private void AddPotionCandidates(PublicSnapshot snapshot, List<CandidateBinding> bindings)
+    private void AddPotionCandidates(PublicSnapshot snapshot, List<CandidateBinding> bindings,
+        Func<bool>? available = null, Action<PotionModel>? discard = null)
     {
         var player = _runState!.Players[0];
         foreach (var (potion, source) in snapshot.Potions)
         {
-            bool Present() => player.CanUseOrRemovePotions && player.Potions.Contains(potion);
+            bool Present() => (available?.Invoke() ?? true) && player.CanUseOrRemovePotions && player.Potions.Contains(potion);
             bool Usable() => Present() && (potion.Usage == PotionUsage.AnyTime
                 || potion.Usage == PotionUsage.CombatOnly && CanActInCombat())
                 && potion.PassesCustomUsabilityCheck;
             if (!Present()) continue;
             bindings.Add(new(Candidate("DISCARD_POTION", "discard:" + source, source), Present,
-                () => _pendingOperation.Start("discard potion", () => PotionCmd.Discard(potion))));
+                () =>
+                {
+                    if (discard != null) discard(potion);
+                    else _pendingOperation.Start("discard potion", () => PotionCmd.Discard(potion));
+                }));
             if (!Usable()) continue;
             foreach (var target in new Creature?[] { null }.Concat(snapshot.Creatures.Keys))
             {

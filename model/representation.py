@@ -1,7 +1,10 @@
-"""Typed public fields, local effect programs and reference-only entity handles.
+"""Typed public fields, local programs and reference-only entity handles.
 
 Packing indices never become features. Piles remain full unordered multisets.
 Symbols are a frozen, checkpointed vocabulary; unknown content is explicit.
+The act map is compressed: only the current node and its frontier stay
+entities, and each frontier node carries the map reachable from it as a local
+program.
 """
 
 import hashlib
@@ -116,6 +119,7 @@ ENTITY_FIELDS.update(
     ["enabled", "base_star_cost", "current_star_cost", "source", "amount"]
 )
 ENTITY_FIELDS.update(["rider_effect", "retain", "stars_x", "exhaust_on_next_play"])
+ENTITY_FIELDS.update(["counter", "free_travel", "ascension"])
 CONTAINERS = {
     "stats",
     "keywords",
@@ -363,6 +367,8 @@ def _program(value):
 
 
 def clean_entity(value, *, action=False):
+    from . import rules
+
     allowed = (
         ACTION_FIELDS
         if action
@@ -380,10 +386,12 @@ def clean_entity(value, *, action=False):
         elif key == "cards":
             result[key] = [clean_entity(x) for x in item]
         elif key == "stats":
+            # A value the content's own description displays is public with it.
+            displayed = rules.variables(value.get("content_id"))
             stats = {
                 k: _public_value(v)
                 for k, v in item.items()
-                if k.lower().replace("_", "") in STAT_FIELDS
+                if k.lower().replace("_", "") in STAT_FIELDS or k in displayed
             }
             if stats:
                 result[key] = stats
@@ -454,14 +462,64 @@ def clean_public(public):
     return result
 
 
-def bucket(text, size):
-    return 1 + int.from_bytes(
-        hashlib.blake2s(text.encode(), digest_size=4).digest(), "big"
-    ) % (size - 1)
+class Table:
+    """Indices for a frozen set of names; row 0 is padding.
+
+    Registered names receive exact, collision-free rows. A name which was not
+    registered when the table was frozen hashes into the spare rows, so it
+    stays distinguishable from the registered ones and is recorded in
+    ``unregistered`` instead of silently sharing a row with one of them.
+    """
+
+    def __init__(self, names, capacity):
+        self.names = tuple(sorted(set(names)))
+        self.capacity = capacity
+        self.spare = capacity - 1 - len(self.names)
+        if self.spare < 1:
+            raise ValueError(
+                "Name table exceeds configured capacity; increase capacity explicitly"
+            )
+        self.lookup = {name: i + 1 for i, name in enumerate(self.names)}
+        self.unregistered = {}
+
+    def encode(self, name):
+        index = self.lookup.get(name)
+        if index is None:
+            index = self.unregistered.get(name)
+            if index is None:
+                digest = hashlib.blake2s(name.encode(), digest_size=4).digest()
+                index = 1 + len(self.names) + int.from_bytes(digest, "big") % self.spare
+                self.unregistered[name] = index
+        return index
+
+
+REFERENCE_ROLES = ("source", "target", "option", "owner")
+# Roles of the relations the engine publishes between entities.
+ENGINE_RELATIONS = ("map_edge", "offers")
+MAP_RELATIONS = (
+    "self",
+    "forward_direct",
+    "reverse_direct",
+    "forward_indirect",
+    "reverse_indirect",
+    "free_direct",
+    "free_reverse",
+    "unreachable",
+)
+PROGRAM_RELATIONS = (
+    "program_child",
+    "program_parent",
+    "binds_variable",
+    "variable_from",
+    "same_variable",
+)
 
 
 class Vocabulary:
-    def __init__(self, symbols=None, capacity=16384):
+    """Frozen, checkpointed tables: field symbols, field names and relation roles."""
+
+    def __init__(self, symbols=None, capacity=16384, *, fields=(), relations=(),
+                 field_capacity=512, relation_capacity=128):
         self.symbols = tuple(
             ["<pad>", "<unknown>"] + sorted(set(symbols or []) - {"<pad>", "<unknown>"})
         )
@@ -471,10 +529,41 @@ class Vocabulary:
             )
         self.capacity = capacity
         self.lookup = {s: i for i, s in enumerate(self.symbols)}
-        self._digest = fingerprint(self.symbols)
+        self.fields = Table(fields, field_capacity)
+        self.relations = Table(relations, relation_capacity)
+        self._reported = set()
+        self._digest = fingerprint(
+            [self.symbols, self.fields.names, field_capacity, self.relations.names, relation_capacity]
+        )
+
+    @classmethod
+    def from_frames(cls, frames, config):
+        symbols, fields, relations = names_from_frames(frames)
+        return cls(symbols, config.vocabulary_size, fields=fields, relations=relations,
+                   field_capacity=config.field_size, relation_capacity=config.relation_size)
+
+    @classmethod
+    def from_state(cls, state, config):
+        return cls(state["symbols"], config.vocabulary_size, fields=state["fields"],
+                   relations=state["relations"], field_capacity=config.field_size,
+                   relation_capacity=config.relation_size)
+
+    def state(self):
+        return {"symbols": list(self.symbols), "fields": list(self.fields.names),
+                "relations": list(self.relations.names)}
 
     def encode(self, symbol):
         return self.lookup.get(symbol, 1)
+
+    def unregistered(self):
+        """Field names and relation roles met after the tables were frozen."""
+        return sorted(
+            self._reported | self.fields.unregistered.keys() | self.relations.unregistered.keys()
+        )
+
+    def report(self, names):
+        """Record unregistered names met in another process."""
+        self._reported.update(names)
 
     @property
     def digest(self):
@@ -485,7 +574,8 @@ class Vocabulary:
 class Field:
     name: str
     symbol: str
-    number: tuple[float, float, float, float, float]
+    # (value, known, applicable, is_numeric); the model derives its own scales.
+    number: tuple[float, float, float, float]
 
 
 def fields_of(value, prefix=""):
@@ -553,26 +643,35 @@ def fields_of(value, prefix=""):
 def scalar_field(name, value, known=True, applicable=True):
     known = bool(known and value is not None and applicable)
     if not known:
-        return Field(name, "<unknown>", (0, 0, 0, float(applicable), 0))
+        return Field(name, "<unknown>", (0, 0, float(applicable), 0))
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if not math.isfinite(value):
             raise ProtocolError("Non-finite public number")
-        scale = (
-            100.0 if any(x in name for x in ("hp", "gold", "damage", "block")) else 10.0
-        )
-        return Field(
-            name,
-            name + "=<number>",
-            (value / scale, math.copysign(math.log1p(abs(value)), value), 1, 1, 1),
-        )
-    return Field(name, f"{name}={value}", (0, 0, 1, 1, 0))
+        return Field(name, name + "=<number>", (value, 1, 1, 1))
+    return Field(name, f"{name}={value}", (0, 1, 1, 0))
 
 
 @dataclass
 class Effect:
+    """A local program: field rows, relations between them and entity bindings."""
+
     nodes: list[list[Field]] = field(default_factory=list)
     edges: list[tuple[int, int, str]] = field(default_factory=list)
     bindings: list[tuple[int, str, str]] = field(default_factory=list)
+    _tables: dict = field(default_factory=dict, repr=False, compare=False)
+
+    def edge_table(self, vocabulary):
+        """Rows of (source, target, relation index), built once per vocabulary."""
+        table = self._tables.get(vocabulary.digest)
+        if table is None:
+            import torch
+
+            encode = vocabulary.relations.encode
+            table = torch.tensor(
+                [(i, j, encode(role)) for i, j, role in self.edges], dtype=torch.long
+            ).reshape(-1, 3)
+            self._tables[vocabulary.digest] = table
+        return table
 
 
 def effect_tree(program):
@@ -656,18 +755,31 @@ class Observation:
     action_indices: list[int]
     slot_refs: list[str]
     edges: list[tuple[int, int, str]]
-    map_floors: dict[int, int]
     context: dict
     digest: str
 
 
 def observation(frame):
     public = clean_public(frame["public"])
-    entities = [{"entity_type": "global", "phase": public["phase"]}]
+    context = public.get("selection_context") or {}
+    # Selection progress lives in the input: the global token carries
+    # bounds and counts, selected entities are marked (with their order when it
+    # matters). No decoder state survives between decisions.
+    progress = {k: v for k, v in context.items() if k != "selected_refs"}
+    entities = [dict(progress, entity_type="global", phase=public["phase"])]
     entities += public["entities"] + public["memory"]
+    selected = context.get("selected_refs", [])
+    order_known = (context.get("known_masks") or {}).get("order_matters", True)
+    ordered = bool(context.get("order_matters")) and order_known
+    by_ref = {item.get("ref"): item for item in entities if item.get("ref")}
+    for index, ref in enumerate(selected):
+        if ref not in by_ref:
+            raise ProtocolError("Selected reference is not a public entity")
+        by_ref[ref]["selected"] = True
+        if ordered:
+            by_ref[ref]["selected_order"] = index + 1
     if public.get("event_context"):
         entities.append(dict(public["event_context"], entity_type="event_context"))
-    edges = []
     # Bundle contents stay separate entities, linked to their containing bundle.
     for item in list(entities):
         for i, card in enumerate(item.pop("cards", [])):
@@ -676,8 +788,12 @@ def observation(frame):
     bank = public.get("decoder_bank") or [
         clean_entity(c, action=True) for c in frame["legal"]["candidates"]
     ]
-    action_start = len(entities)
     entities += [dict(c, entity_type="action") for c in bank]
+    effects = [entity_program(x) for x in entities]
+    entities, effects, relations, map_keys = _compress_map(
+        entities, effects, public["relations"], selected
+    )
+    action_start = len(entities) - len(bank)
     refs = {}
     for i, item in enumerate(entities):
         ref = item.get("ref")
@@ -685,6 +801,7 @@ def observation(frame):
             if ref in refs:
                 raise ProtocolError("Duplicate public entity reference")
             refs[ref] = i
+    edges = []
     for i, item in enumerate(entities):
         for role in ("source", "target", "option", "owner"):
             bindings = item.get(role + "_refs", [])
@@ -694,35 +811,185 @@ def observation(frame):
                 if ref not in refs:
                     raise ProtocolError(f"Unresolved public {role} reference")
                 edges += [(i, refs[ref], role), (refs[ref], i, "reverse_" + role)]
-    for edge in public["relations"]:
+    for edge in relations:
         if edge.get("source") not in refs or edge.get("target") not in refs:
             raise ProtocolError("Unresolved relation")
-        edges.append((refs[edge["source"]], refs[edge["target"]], edge["role"]))
-    floors = {
-        i: int(x.get("floor", 0))
-        for i, x in enumerate(entities)
-        if x.get("entity_type") == "map_node"
-    }
-    edges += map_relations(floors, edges)
-    context = public.get("selection_context") or {}
+        source, target = refs[edge["source"]], refs[edge["target"]]
+        edges += [
+            (source, target, edge["role"]),
+            (target, source, "reverse_" + edge["role"]),
+        ]
     # Dynamic prefix/mask never contaminates cached Transformer input.
-    digest = fingerprint({"entities": entities, "edges": edges})
+    digest = fingerprint({"entities": entities, "edges": edges, "map": map_keys})
     return Observation(
         [fields_of(x) for x in entities],
-        [effect_tree(x.get("semantic_program") or x.get("program")) for x in entities],
+        effects,
         refs,
         list(range(action_start, len(entities))),
         [c["decoder_slot_ref"] for c in bank],
         edges,
-        floors,
         context,
         digest,
     )
 
 
-def map_relations(floors, edges):
-    direct = {(i, j) for i, j, role in edges if role == "map_edge"}
-    adjacency = {i: {j for a, j in direct if a == i} for i in floors}
+def entity_program(entity):
+    """The engine's program, or the public rule text where the engine has none."""
+    from . import rules
+
+    program = entity.get("semantic_program") or entity.get("program")
+    if not program or program.get("op") == "OPAQUE_RULE":
+        text = rules.program(entity)
+        if text is not None:
+            return text
+    return effect_tree(program)
+
+
+MAP_DYNAMIC_FIELDS = {"ref", "current", "visited", "selectable"}
+
+
+def _compress_map(entities, effects, relations, selected):
+    """Keep the current map node and its frontier; fold the rest into programs.
+
+    The frontier is every successor of the current node (the entry nodes when
+    no node is current) plus any map node another entity still refers to. Each
+    frontier node receives the map reachable from it as its local program, so
+    nodes which can no longer be reached, and the path already taken, leave
+    the observation. While the player may ignore paths (``free_travel``), every
+    node of the next floor is a successor.
+    """
+    nodes = {
+        x["ref"]: x
+        for x in entities
+        if x.get("entity_type") == "map_node" and x.get("ref")
+    }
+    if not nodes:
+        return entities, effects, relations, {}
+    forward = {ref: [] for ref in nodes}
+    entered = set()
+    referenced = set(selected)
+    for edge in relations:
+        source, target = edge.get("source"), edge.get("target")
+        if edge.get("role") == "map_edge" and source in nodes and target in nodes:
+            forward[source].append(target)
+            entered.add(target)
+        else:
+            referenced.update((source, target))
+    for item, effect in zip(entities, effects):
+        if item.get("entity_type") == "map_node":
+            continue
+        for role in ("source", "target", "option", "owner"):
+            referenced.update(item.get(role + "_refs", []))
+            referenced.add(item.get(role + "_ref"))
+        referenced.update(ref for _, ref, _ in effect.bindings)
+    free = any(x.get("free_travel") is True for x in entities)
+    if free:
+        floors = {}
+        for ref, x in nodes.items():
+            floors.setdefault(x.get("floor"), []).append(ref)
+        steps = {
+            ref: sorted(set(forward[ref]) | set(floors.get(x["floor"] + 1, ())))
+            if type(x.get("floor")) is int
+            else forward[ref]
+            for ref, x in nodes.items()
+        }
+    else:
+        steps = forward
+    current = [ref for ref, x in nodes.items() if x.get("current") is True]
+    frontier = (
+        {target for ref in current for target in steps[ref]}
+        if current
+        else set(nodes) - entered
+    )
+    keep = set(current) | frontier | (referenced & nodes.keys())
+    keys = {
+        ref: _map_key(ref, nodes, forward, steps)
+        for ref in sorted(keep - set(current))
+    }
+    kept_entities, kept_effects = [], []
+    for item, effect in zip(entities, effects):
+        if item.get("entity_type") == "map_node":
+            ref = item.get("ref")
+            if ref not in keep:
+                continue
+            if ref in keys:
+                effect = _map_program(keys[ref])
+        kept_entities.append(item)
+        kept_effects.append(effect)
+    kept_relations = [
+        edge
+        for edge in relations
+        if not (
+            edge.get("role") == "map_edge"
+            and edge.get("source") in nodes
+            and edge.get("target") in nodes
+            and not (edge["source"] in keep and edge["target"] in keep)
+        )
+    ]
+    return kept_entities, kept_effects, kept_relations, keys
+
+
+def _map_key(root, nodes, forward, steps):
+    """Canonical description of the map reachable from root; root is node 0.
+
+    ``forward`` holds the drawn paths and ``steps`` the moves actually allowed,
+    which also include every next-floor node during free travel.
+    """
+    reachable, stack = {root}, [root]
+    while stack:
+        for target in steps[stack.pop()]:
+            if target not in reachable:
+                reachable.add(target)
+                stack.append(target)
+    order = [root] + sorted(reachable - {root})
+    index = {ref: i for i, ref in enumerate(order)}
+    static = [
+        {k: v for k, v in nodes[ref].items() if k not in MAP_DYNAMIC_FIELDS}
+        for ref in order
+    ]
+    links = sorted(
+        (index[ref], index[target])
+        for ref in order
+        for target in forward[ref]
+        if target in index
+    )
+    free = sorted(
+        (index[ref], index[target])
+        for ref in order
+        for target in steps[ref]
+        if target not in forward[ref]
+    )
+    return json.dumps(
+        [static, links, free], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+
+
+@lru_cache(maxsize=4096)
+def _map_program(encoded):
+    """The reachable map as a program: a map is fixed for an act, so this is cached."""
+    static, links, free = json.loads(encoded)
+    effect = Effect()
+    base = static[0].get("floor")
+    for node in static:
+        floor = node.get("floor")
+        if all(type(x) in (int, float) for x in (base, floor)):
+            # Distance ahead of the frontier node, in floors.
+            node = dict(node, depth=floor - base)
+        effect.nodes.append(fields_of(node))
+    effect.edges.extend(
+        map_relations(len(static), [tuple(x) for x in links], [tuple(x) for x in free])
+    )
+    return effect
+
+
+def map_relations(count, links, free=()):
+    """Classify every ordered node pair of a map by reachability along its paths.
+
+    ``free`` pairs are single moves which no path provides; they are labelled
+    as such instead of unreachable.
+    """
+    direct, free = set(links), set(free)
+    adjacency = {i: [j for a, j in links if a == i] for i in range(count)}
     reachable = {}
 
     def reach(i, stack):
@@ -730,16 +997,16 @@ def map_relations(floors, edges):
             raise ProtocolError("Map must be a DAG")
         if i not in reachable:
             reachable[i] = set()
-            for j in adjacency.get(i, ()):
+            for j in adjacency[i]:
                 reachable[i].add(j)
                 reachable[i].update(reach(j, stack | {i}))
         return reachable[i]
 
-    for i in floors:
+    for i in range(count):
         reach(i, set())
     result = []
-    for i in floors:
-        for j in floors:
+    for i in range(count):
+        for j in range(count):
             role = (
                 "self"
                 if i == j
@@ -751,13 +1018,18 @@ def map_relations(floors, edges):
                 if j in reachable[i]
                 else "reverse_indirect"
                 if i in reachable[j]
+                else "free_direct"
+                if (i, j) in free
+                else "free_reverse"
+                if (j, i) in free
                 else "unreachable"
             )
             result.append((i, j, "map_" + role))
     return result
 
 
-def symbols_from_frames(frames):
+def names_from_frames(frames):
+    """Field symbols, field names and relation roles to freeze into a vocabulary."""
     # Schema categories are public constants. Initializing from only a Neow
     # snapshot must not collapse combat/map/shop phases to the same unknown ID.
     categories = {
@@ -804,8 +1076,30 @@ def symbols_from_frames(frames):
         "boss_1",
         "boss_2",
         "boss_3",
+        "selected",
     ]:
         symbols.update({f"{name}=True", f"{name}=False"})
+    # Selection progress on the global token and selected entities.
+    for name in ["selected_order", "min_total", "max_total", "selected_count", "remaining_required"]:
+        symbols.add(f"{name}=<number>")
+    from . import rules
+
+    symbols |= rules.symbols()
+    fields = set(ENTITY_FIELDS) | CONTAINERS | {"empty", "selected", "selected_order"}
+    fields.update(rules.TEXT_FIELDS)
+    # Every public field may be a number or a flag, whichever frames were seen.
+    for name in ENTITY_FIELDS:
+        symbols.update((f"{name}=<number>", f"{name}=True", f"{name}=False"))
+    # Values a description displays are exported under the same name in `stats`.
+    for name in rules.displayed() | {"passive", "evoke"}:
+        fields.add("stats." + name)
+        symbols.add(f"stats.{name}=<number>")
+    fields.update("reference." + role for role in REFERENCE_ROLES)
+    fields.update("binding." + role for role in BINDING_ROLES)
+    relations = {"map_" + role for role in MAP_RELATIONS} | set(PROGRAM_RELATIONS)
+    relations.update(rules.TEXT_RELATIONS)
+    for role in REFERENCE_ROLES + ENGINE_RELATIONS:
+        relations.update((role, "reverse_" + role))
     for frame in frames:
         obs = observation(frame)
         rows = (
@@ -815,27 +1109,36 @@ def symbols_from_frames(frames):
         )
         for row in rows:
             symbols.update(f.symbol for f in row)
-    return symbols
+            fields.update(f.name for f in row)
+        relations.update(role for _, _, role in obs.edges)
+        for effect in obs.effects:
+            relations.update(role for _, _, role in effect.edges)
+            fields.update("binding." + role for _, _, role in effect.bindings)
+    # A card names its enchantment or affliction by the content id of that model.
+    for symbol in list(symbols):
+        for kind in ("enchantment", "affliction"):
+            if symbol.startswith(f"content_id={kind.upper()}."):
+                symbols.add(kind + symbol[len("content_id"):])
+    return symbols, fields, relations
 
 
-def field_tensors(rows, vocabulary, field_buckets, device, length=None):
+def field_tensors(rows, vocabulary):
+    """Pack field rows into (symbol ids, field-name ids, numbers, mask) on the CPU."""
     import torch
 
-    n = len(rows) if length is None else length
-    if n < len(rows):
-        raise ValueError("Field tensor length cannot truncate rows")
     width = max(map(len, rows), default=1)
-    # Construct on CPU in one pass; transfer once instead of tiny CUDA assignments.
     raw_ids, raw_kinds, raw_nums, raw_mask = [], [], [], []
-    for row in rows + [[]] * (n - len(rows)):
+    symbol, name = vocabulary.encode, vocabulary.fields.encode
+    for row in rows:
         pad = width - len(row)
-        raw_ids.append([vocabulary.encode(f.symbol) for f in row] + [0] * pad)
-        raw_kinds.append([bucket(f.name, field_buckets) for f in row] + [0] * pad)
-        raw_nums.append([f.number for f in row] + [(0,) * 5] * pad)
+        raw_ids.append([symbol(f.symbol) for f in row] + [0] * pad)
+        raw_kinds.append([name(f.name) for f in row] + [0] * pad)
+        raw_nums.append([f.number for f in row] + [(0,) * 4] * pad)
         raw_mask.append([True] * len(row) + [False] * pad)
+    n = len(rows)
     return (
-        torch.tensor(raw_ids, dtype=torch.long, device=device).reshape(n, width),
-        torch.tensor(raw_kinds, dtype=torch.long, device=device).reshape(n, width),
-        torch.tensor(raw_nums, dtype=torch.float32, device=device).reshape(n, width, 5),
-        torch.tensor(raw_mask, dtype=torch.bool, device=device).reshape(n, width),
+        torch.tensor(raw_ids, dtype=torch.long).reshape(n, width),
+        torch.tensor(raw_kinds, dtype=torch.long).reshape(n, width),
+        torch.tensor(raw_nums, dtype=torch.float32).reshape(n, width, 4),
+        torch.tensor(raw_mask, dtype=torch.bool).reshape(n, width),
     )

@@ -9,8 +9,8 @@ class SyntheticEngine:
     def __init__(self, count=10, select=5, *, forced_first=False):
         self.count, self.select, self.forced_first = count, select, forced_first
 
-    def reset(self, character="Ironclad", seed="test"):
-        self.character, self.seed = character, str(seed)
+    def reset(self, character="Ironclad", seed="test", ascension=10):
+        self.character, self.seed, self.ascension = character, str(seed), ascension
         self.selected, self.version, self.stage = [], 0, "selection"
         self.events = []
         self.commands = []
@@ -22,7 +22,7 @@ class SyntheticEngine:
             "adapter_version": "synthetic-v1",
             "observation_schema": "public-v1",
             "action_schema": "candidate-v1",
-            "fixed_ascension": 10,
+            "fixed_ascension": getattr(self, "ascension", 10),
             "training_ready": True,
             "domain": "synthetic_test_only",
             "effect_registry_hash": "test-only",

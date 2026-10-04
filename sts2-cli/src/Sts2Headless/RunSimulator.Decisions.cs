@@ -21,9 +21,13 @@ public partial class RunSimulator
     private static readonly Lazy<Dictionary<string, object?>> ProtocolContract = new(() => new()
     {
         ["adapter_version"] = "engine-candidates-v1",
-        ["observation_schema"] = "public-state-v1",
+        ["observation_schema"] = "public-state-v3",
         ["action_schema"] = "candidate-v0",
         ["auto_advance_version"] = "pending-continuation-v0",
+        // Outside combat a native cancel only undoes the opening action, so it is
+        // not offered unless no other action exists.
+        ["selection_cancel"] = "combat-or-dead-end-v1",
+        ["merchant_potion_prices"] = HeadlessMerchantParity.Version,
         ["training_ready"] = false,
         ["game_assembly_sha256"] = AssemblyHash(typeof(RunState)),
         ["adapter_assembly_sha256"] = AssemblyHash(typeof(RunSimulator)),
@@ -32,12 +36,21 @@ public partial class RunSimulator
             "rewards", "card_reward", "card_select", "bundle_select", "crystal_sphere" },
     });
 
-    private Dictionary<string, object?> CurrentProtocolContract => new(ProtocolContract.Value)
+    private Dictionary<string, object?> CurrentProtocolContract
     {
-        ["training_ready"] = _protocolTrainingRun,
-        ["fixed_ascension"] = _protocolAscension,
-        ["debug_mutations_allowed"] = false,
-    };
+        get
+        {
+            var contract = new Dictionary<string, object?>(ProtocolContract.Value)
+            {
+                ["training_ready"] = _protocolTrainingRun,
+                ["fixed_ascension"] = _protocolAscension,
+                ["debug_mutations_allowed"] = false,
+            };
+            // Absent for a run begun by start_run; see RunSimulator.Anchor.cs.
+            if (_protocolInitialization != null) contract["initialization"] = _protocolInitialization;
+            return contract;
+        }
+    }
 
     private static string AssemblyHash(Type type) =>
         Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(type.Assembly.Location))).ToLowerInvariant();
@@ -52,6 +65,7 @@ public partial class RunSimulator
         _protocolMapVisible = false;
         _protocolEnabled = false;
         _protocolTrainingRun = false;
+        _protocolInitialization = null;
         _protocolTerminalWaitStarted = 0;
         _protocolRewardsOffered.Clear();
         _protocolOpenedChests.Clear();
@@ -62,6 +76,8 @@ public partial class RunSimulator
         _protocolEvents.Clear();
         _protocolVictory = false;
         _protocolLoss = false;
+        _protocolPlayerDied = false;
+        NativeContinuations.Clear();
         _protocolEncounterSequence = 0;
         _decisionGate.Invalidate();
     }
@@ -75,7 +91,10 @@ public partial class RunSimulator
         _protocolMapVisible = false;
     }
 
-    private static Dictionary<string, object?> PublicSelectionCard(CardModel card) => new()
+    // Sized for these fields plus the ref/zone/owner/position a snapshot adds:
+    // this runs for every card of every pile on every frame, and growing from
+    // the default capacity re-hashes the entity four times.
+    private static Dictionary<string, object?> PublicSelectionCard(CardModel card) => new(27)
     {
         ["entity_type"] = "card",
         ["content_id"] = card.Id.ToString(),
@@ -95,7 +114,9 @@ public partial class RunSimulator
         ["keywords"] = card.Keywords.Select(k => k.ToString()).Order().ToArray(),
         ["stats"] = card.DynamicVars.Values.ToDictionary(v => v.Name, v => (object?)v.BaseValue),
         ["enchantment"] = card.Enchantment?.Id.ToString(),
+        ["enchantment_amount"] = card.Enchantment?.Amount,
         ["affliction"] = card.Affliction?.Id.ToString(),
+        ["affliction_amount"] = card.Affliction?.Amount,
         ["target_type"] = card.TargetType.ToString(),
         ["effect_coverage"] = "opaque",
         ["semantic_program"] = OpaqueProgram(card.Id.ToString()),
@@ -112,18 +133,21 @@ public partial class RunSimulator
         ["events"] = Array.Empty<object>(),
     };
 
+    private void EnsureDecisionProtocol()
+    {
+        if (_protocolEnabled) return;
+        _protocolEnabled = true;
+        MegaCrit.Sts2.Core.Rewards.RewardsSet.testSelector = SelectProtocolRewards;
+        RegisterProtocolMilestones();
+        InstallProtocolUiBridge();
+    }
+
     public Dictionary<string, object?> AdvanceToBoundary()
     {
         if (_protocolFailure != null) return ProtocolError(_protocolFailure);
         if (_runState == null) return ProtocolError("no_active_run");
         if (_protocolAscension is null or < 0 or > 10) return ProtocolError("unverified_run_contract");
-        if (!_protocolEnabled)
-        {
-            _protocolEnabled = true;
-            MegaCrit.Sts2.Core.Rewards.RewardsSet.testSelector = SelectProtocolRewards;
-            RegisterProtocolMilestones();
-            InstallProtocolUiBridge();
-        }
+        EnsureDecisionProtocol();
         if (_decisionGate.Frame != null)
             return _decisionGate.Frame; // Queries never resume an already published decision.
 
@@ -137,6 +161,8 @@ public partial class RunSimulator
                 TimeSpan.FromSeconds(3));
             if (!HasPendingInteraction()) WaitForActionExecutor();
             WaitForPendingOperation();
+            WaitForNativeContinuations();
+            if (!HasPendingInteraction()) WaitForActionExecutor();
             if (_protocolFailure != null) return ProtocolError(_protocolFailure);
             return WithProtocolEvents(PublishProtocolBoundary());
         }
@@ -166,13 +192,14 @@ public partial class RunSimulator
     private Dictionary<string, object?> PublishProtocolBoundary()
     {
         var player = _runState!.Players[0];
-        if (_protocolVictory || _protocolLoss || player.Creature.IsDead || RunManager.Instance.IsAbandoned)
+        if (_protocolVictory || _protocolLoss || _protocolPlayerDied || RunManager.Instance.IsAbandoned)
             return NonDecisionBoundary("terminal", new { victory = _protocolVictory });
-        if (RunManager.Instance.IsGameOver)
+        if (RunManager.Instance.IsGameOver || player.Creature.IsDead)
         {
-            // GameOver can become visible before the asynchronous death state
-            // and CombatEnded callback. Yield to boundary pumping, never infer
-            // victory or loss from this flag alone. A persistent gap is an error.
+            // Zero HP becomes visible before death prevention (Lizard Tail) and
+            // the asynchronous death state and CombatEnded callback. Yield to
+            // boundary pumping, never infer victory or loss from HP or GameOver
+            // alone. A persistent gap is an error.
             if (_protocolTerminalWaitStarted == 0)
                 _protocolTerminalWaitStarted = Stopwatch.GetTimestamp();
             return Stopwatch.GetElapsedTime(_protocolTerminalWaitStarted) < TimeSpan.FromSeconds(3)
@@ -188,7 +215,11 @@ public partial class RunSimulator
             return PublishSelectionBoundary(session);
         if (_protocolRewards is { Busy: false } menu) return PublishRewardsBoundary(menu);
         if (HasProtocolCrystal) return PublishCrystalBoundary(_protocolCrystal!);
-        if (_pendingOperation.IsActive || RunManager.Instance.ActionExecutor.IsRunning
+        // Event.Resume can own a reward menu without owning PendingOperation.
+        // A submitted take/skip/discard must finish before we expose travel or
+        // start another reward set, even while that menu is temporarily busy.
+        if (_protocolRewards != null || _pendingOperation.IsActive || RunManager.Instance.ActionExecutor.IsRunning
+            || NativeContinuations.Pending
             || (CombatManager.Instance.IsInProgress && !IsPlayPhase()))
             return NonDecisionBoundary("waiting");
         if (_protocolMapVisible || _runState.CurrentRoom is null or MapRoom) return PublishMapBoundary();
@@ -203,6 +234,14 @@ public partial class RunSimulator
             _ => ProtocolError("unsupported_interaction:" + _runState.CurrentRoom.GetType().Name),
         };
     }
+
+    // A native cancel outside combat returns to the state before the action that
+    // opened the selection (rest-site smith, shop removal, removal reward). Opening
+    // it therefore commits to completing it; declining is expressed by not opening
+    // it. In combat the solver owns selections and native cancel semantics stay.
+    // Cancel remains the only escape when no selection or finish is possible.
+    private static bool SelectionCancelOffered(bool cancelable, bool canFinish, bool canSelect) =>
+        cancelable && (CombatManager.Instance.IsInProgress || (!canFinish && !canSelect));
 
     private Dictionary<string, object?> PublishSelectionBoundary(SelectionSession session)
     {
@@ -232,7 +271,8 @@ public partial class RunSimulator
             bindings.Add(new CandidateBinding(Candidate("FINISH_SELECTION", "stop"),
                 () => ReferenceEquals(_cardSelector.Session, session) && (session.CanFinish || session.HasUniqueCompletion),
                 _cardSelector.FinishSession));
-        bool canCancel = metadata.Cancelable;
+        bool canFinish = session.CanFinish || session.HasUniqueCompletion;
+        bool canCancel = SelectionCancelOffered(metadata.Cancelable, canFinish, legalItems.Count > 0);
         if (canCancel)
             bindings.Add(new(Candidate("CANCEL", "cancel"),
                 () => ReferenceEquals(_cardSelector.Session, session) && _cardSelector.Metadata.Cancelable,
@@ -249,7 +289,7 @@ public partial class RunSimulator
             ["min_total"] = session.Min,
             ["max_total"] = session.Max,
             ["remaining_required"] = Math.Max(0, session.Min - session.Selected.Count),
-            ["can_finish"] = session.CanFinish || session.HasUniqueCompletion,
+            ["can_finish"] = canFinish,
             ["can_skip"] = false, // Empty FINISH is the only empty result of this selector.
             ["can_cancel"] = canCancel,
             ["repetition_allowed"] = false,
@@ -259,7 +299,7 @@ public partial class RunSimulator
         };
         var slots = refs.Values.Select(reference => Candidate("SELECT_ONE", reference, reference))
             .Append(Candidate("FINISH_SELECTION", "stop"))
-            .Concat(metadata.Cancelable ? new[] { Candidate("CANCEL", "cancel") } : []).ToArray();
+            .Concat(canCancel ? new[] { Candidate("CANCEL", "cancel") } : []).ToArray();
         return PublishDecision("card_select", snapshot.Entities, bindings, context, slots, session.Id, session.Revision,
             snapshot.Relations);
     }

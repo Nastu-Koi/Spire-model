@@ -1,8 +1,10 @@
 """Audited complete-run data. Never invent candidates from a teacher's label."""
 
+import gzip
 import json
 import math
-from collections import Counter
+import random
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +28,15 @@ def validate_run(run, *, on_policy=False):
         raise ProtocolError(
             "Recorder Bootstrap data is supervised-only with unverified teacher visibility"
         )
+    independent = run.get("source") == "independent"
+    if independent and (
+        on_policy
+        or run.get("provenance", {}).get("bc_only") is not True
+        or run.get("teacher_visibility") not in {"recorded_public", "privileged"}
+    ):
+        raise ProtocolError(
+            "Independent samples are supervised-only with a declared teacher visibility"
+        )
     ascension = run.get("ascension")
     if (
         run.get("schema") != SCHEMA
@@ -38,6 +49,11 @@ def validate_run(run, *, on_policy=False):
             raise ProtocolError(
                 "Recorder Bootstrap decisions must not claim a complete outcome"
             )
+    elif independent:
+        if run.get("status") != "partial" or run.get("victory") is not None:
+            raise ProtocolError(
+                "Independent samples must not claim a complete outcome"
+            )
     elif run.get("status") != "complete" or type(run.get("victory")) is not bool:
         raise ProtocolError("Incomplete, erroneous or unresolved run")
     if run.get("character") not in CHARACTERS or not run.get("run_id"):
@@ -45,6 +61,7 @@ def validate_run(run, *, on_policy=False):
     if run.get("source") not in {
         "demonstration",
         "recorder_bc",
+        "independent",
         "on_policy",
         "evaluation",
     }:
@@ -137,9 +154,14 @@ def audit_files(paths, accepted, quarantine):
 
 
 def load_runs(path):
+    """Every run of a small data set, in memory. Imports too large for that are
+    read through RunShards instead."""
     path = Path(path)
     if path.is_dir():
         runs = [json.loads(p.read_text()) for p in sorted(path.glob("*.json"))]
+    elif path.name.endswith(".jsonl.gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as stream:
+            runs = [json.loads(line) for line in stream if line.strip()]
     elif path.suffix == ".jsonl":
         runs = [
             json.loads(line) for line in path.read_text().splitlines() if line.strip()
@@ -155,16 +177,97 @@ def load_runs(path):
     return runs
 
 
-def split_runs(runs, validation_fraction=0.2):
-    """Group every seed across characters/fragments; never split adjacent decisions."""
+def held_out(run, validation_fraction):
+    """Whether a run's seed falls in the validation part. Every run and fragment of
+    one seed lands on the same side."""
     from .protocol import fingerprint
 
+    key = str(run.get("seed", run["run_id"]))
+    return int(fingerprint(key)[:8], 16) / 2**32 < validation_fraction
+
+
+def split_runs(runs, validation_fraction=0.2):
+    """Group every seed across characters/fragments; never split adjacent decisions."""
     train, validation = [], []
     for run in runs:
-        key = str(run.get("seed", run["run_id"]))
-        fraction = int(fingerprint(key)[:8], 16) / 2**32
-        (validation if fraction < validation_fraction else train).append(run)
+        (validation if held_out(run, validation_fraction) else train).append(run)
     return train, validation
+
+
+INDEX = "index.jsonl.gz"
+
+
+class RunShards:
+    """Imported runs kept as gzip shards and read a few shards at a time.
+
+    The index holds one small row per run (identity, seed, character, macro counts
+    by phase, shard), so splits and sample weights need no pass over the data.
+    """
+
+    def __init__(self, directory, rows=None):
+        self.directory = Path(directory)
+        if rows is None:
+            with gzip.open(self.directory / INDEX, "rt", encoding="utf-8") as stream:
+                rows = [json.loads(line) for line in stream if line.strip()]
+        self.rows = rows
+
+    @staticmethod
+    def is_at(path):
+        return (Path(path) / INDEX).is_file()
+
+    def __len__(self):
+        return len(self.rows)
+
+    def split(self, validation_fraction):
+        parts = [], []
+        for row in self.rows:
+            parts[held_out(row, validation_fraction)].append(row)
+        return RunShards(self.directory, parts[0]), RunShards(self.directory, parts[1])
+
+    @property
+    def counts(self):
+        """Macros per (character, phase): what the sample weights are normalized by."""
+        counts = Counter()
+        for row in self.rows:
+            for phase, macros in row["phases"].items():
+                counts[row["character"], phase] += macros
+        return counts
+
+    @property
+    def seeds(self):
+        return {str(row["seed"]) for row in self.rows}
+
+    @property
+    def identities(self):
+        return {row["run_id"] for row in self.rows}
+
+    def metadata(self):
+        from .protocol import fingerprint
+
+        known = json.loads((self.directory / "summary.json").read_text())["contracts"]
+        return {
+            "training_engine_contracts": [known[key] for key in sorted({r["contract"] for r in self.rows})],
+            "training_seeds": sorted(self.seeds),
+            "training_seed_pool_hash": fingerprint(sorted((r["character"], str(r["seed"])) for r in self.rows)),
+        }
+
+    def windows(self, shards=8, shuffle=False):
+        """Lists of validated runs, each from `shards` shard files."""
+        wanted = defaultdict(set)
+        for row in self.rows:
+            wanted[row["shard"]].add(row["run_id"])
+        names = sorted(wanted)
+        if shuffle:
+            random.shuffle(names)
+        for start in range(0, len(names), shards):
+            runs = []
+            for name in names[start : start + shards]:
+                with gzip.open(self.directory / name, "rt", encoding="utf-8") as stream:
+                    for line in stream:
+                        run = json.loads(line)
+                        if run["run_id"] in wanted[name]:
+                            runs.append(validate_run(run))
+            yield runs
 
 
 @dataclass
@@ -178,7 +281,9 @@ class Sample:
     )
 
 
-def samples(runs, *, ppo=False, horizon_scale=100.0):
+def samples(runs, *, ppo=False, horizon_scale=100.0, counts=None):
+    """Weighted samples. `counts` gives the macros per (character, phase) of the
+    whole data set when `runs` is only a window of it."""
     result = []
     if ppo:
         counts = Counter(r["character"] for r in runs)
@@ -207,9 +312,10 @@ def samples(runs, *, ppo=False, horizon_scale=100.0):
                     )
                 )
     else:
-        counts = Counter(
-            (r["character"], m["phase"]) for r in runs for m in r["macros"]
-        )
+        if counts is None:
+            counts = Counter(
+                (r["character"], m["phase"]) for r in runs for m in r["macros"]
+            )
         for run in runs:
             validate_run(run)
             for macro in run["macros"]:
@@ -228,17 +334,22 @@ def bucket_size(length, buckets):
     return next((b for b in buckets if b >= length), length)
 
 
+def sample_lengths(item):
+    """(tokens, action slots) of every branching decision of a sample."""
+    from .representation import observation
+
+    lengths = []
+    for step in item.macro["steps"]:
+        if not step["forced"]:
+            obs = observation(step["frame"])
+            lengths.append((len(obs.tokens), len(obs.slot_refs)))
+    return tuple(lengths)
+
+
 def sample_pad_size(item, config):
     """Return the token bucket for a sample, caching only input dimensions."""
     if item._lengths is None:
-        from .representation import observation
-
-        lengths = []
-        for step in item.macro["steps"]:
-            if not step["forced"]:
-                obs = observation(step["frame"])
-                lengths.append((len(obs.tokens), len(obs.slot_refs)))
-        item._lengths = tuple(lengths)
+        item._lengths = sample_lengths(item)
     result = 0
     for tokens, actions in item._lengths:
         action_pad = bucket_size(actions, config.action_buckets)
@@ -253,22 +364,27 @@ def batch_pad_size(batch, config):
 
 
 def microbatches(logical, config):
-    """Capacity changes computation order only, never statistical sample weights."""
-    result, batch, max_n = [], [], 0
+    """Capacity changes computation order only, never statistical sample weights.
+
+    A replay holds one row per branching decision, so a sample costs as many rows
+    as it has of them. A sample is never split: one that exceeds the budgets on
+    its own forms a batch of its own.
+    """
+    result, batch, max_n, rows = [], [], 0, 0
     for item in logical:
         n = sample_pad_size(item, config)
         candidate_n = max(max_n, n)
-        count = len(batch) + 1
+        count = rows + len(item._lengths)
         if batch and (
-            count > config.microbatch_size
+            len(batch) + 1 > config.microbatch_size
             or count * candidate_n > config.token_budget
             or count * candidate_n**2 > config.pair_budget
         ):
             result.append(batch)
-            batch, max_n = [], 0
-        # Oversized samples remain whole; caller can checkpoint/recompute or report capacity.
+            batch, max_n, rows = [], 0, 0
         batch.append(item)
         max_n = max(max_n, n)
+        rows += len(item._lengths)
     if batch:
         result.append(batch)
     return result

@@ -1,0 +1,42 @@
+{
+  "Kind": "PlayCard",
+  "Turn": 4,
+  "CardId": "HEADBUTT",
+  "CardOccurrence": 0,
+  "TargetIndex": 0,
+  "TargetCombatId": 1,
+  "CardTitle": "HEADBUTT.title",
+  "TargetName": "TUNNELER.name",
+  "Choice": {
+    "Effect": "MoveToDrawTop",
+    "SourcePile": "Discard",
+    "Cards": [
+      {
+        "CardId": "TAUNT",
+        "UpgradeLevel": 0,
+        "StateKey": "TAUNT+0|energy=False:1|stars=False:-1|replay=0|exhaust=False|sly=False|retain=False|deck=True|keywords=|vars=Block=6;VulnerablePower=1|-|:0|baselib=-",
+        "SourceOccurrence": 0,
+        "OptionOccurrence": 0,
+        "Title": "TAUNT.title"
+      }
+    ],
+    "SourceId": "",
+    "ContextId": "",
+    "Timing": "Action"
+  },
+  "NestedChoices": null,
+  "NestedChoicesBeforePrimary": 0,
+  "PotionSlot": -1,
+  "PotionId": "",
+  "PotionTitle": "",
+  "TurnStartChoices": null,
+  "RelicEffects": null,
+  "ReplayCount": 0,
+  "CardStateKey": "HEADBUTT+0|energy=False:1|stars=False:-1|replay=0|exhaust=False|sly=False|retain=False|deck=True|keywords=|vars=Damage=9|-|:0|baselib=-",
+  "CardStateOccurrence": 0,
+  "EndsPlayerTurn": false,
+  "CardUpgradeLevel": 0,
+  "CardEnchantmentId": "",
+  "IsExecutable": true,
+  "ActionTitle": "HEADBUTT.title"
+}

@@ -1,0 +1,42 @@
+{
+  "Kind": "PlayCard",
+  "Turn": 4,
+  "CardId": "PHOTON_CUT",
+  "CardOccurrence": 0,
+  "TargetIndex": 0,
+  "TargetCombatId": 1,
+  "CardTitle": "PHOTON_CUT.title",
+  "TargetName": "NIBBIT.name",
+  "Choice": {
+    "Effect": "MoveToDrawTop",
+    "SourcePile": "Hand",
+    "Cards": [
+      {
+        "CardId": "STRIKE_REGENT",
+        "UpgradeLevel": 0,
+        "StateKey": "STRIKE_REGENT+0|energy=False:1|stars=False:-1|replay=0|exhaust=False|sly=False|retain=False|deck=True|keywords=|vars=Damage=6|-|:0|baselib=-",
+        "SourceOccurrence": 0,
+        "OptionOccurrence": 0,
+        "Title": "STRIKE_REGENT.title"
+      }
+    ],
+    "SourceId": "",
+    "ContextId": "",
+    "Timing": "Action"
+  },
+  "NestedChoices": null,
+  "NestedChoicesBeforePrimary": 0,
+  "PotionSlot": -1,
+  "PotionId": "",
+  "PotionTitle": "",
+  "TurnStartChoices": null,
+  "RelicEffects": null,
+  "ReplayCount": 0,
+  "CardStateKey": "PHOTON_CUT+0|energy=False:1|stars=False:-1|replay=0|exhaust=False|sly=False|retain=False|deck=True|keywords=|vars=Cards=1;Damage=10;PutBack=1|-|:0|baselib=-",
+  "CardStateOccurrence": 0,
+  "EndsPlayerTurn": false,
+  "CardUpgradeLevel": 0,
+  "CardEnchantmentId": "",
+  "IsExecutable": true,
+  "ActionTitle": "PHOTON_CUT.title"
+}

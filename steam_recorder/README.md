@@ -1,6 +1,6 @@
 # steam_recorder
 
-Steam 游戏采集和模型控制 Mod，适配 Slay the Spire 2 **0.111.0、单人 A10**。仓库目录名为 `steam_recorder`，游戏内 Mod ID 保持 `RunRecorder`，已有记录也继续写入 `user://run_recorder`。
+Steam 游戏采集和模型控制 Mod，适配 Slay the Spire 2 **0.111.0、单人 A10**。仓库目录名为 `steam_recorder`，游戏内 Mod ID 保持 `RunRecorder`，记录写入 `user://run_recorder`。
 
 ```bash
 # GAME_DIR 是 Steam 游戏安装目录。支持 Linux，也支持 Proton/WSL 可见的 Windows 目录。
@@ -15,9 +15,9 @@ python steam_recorder/install.py --game-dir "$GAME_DIR" --install
 python -m model import-recorder "$RECORDING_DIR" --bootstrap-only --output data/steam-001
 ```
 
-`--bootstrap-only` 按决策导入，允许未完成对局和求解器来源；这些记录只用于 Bootstrap。去掉该参数则只导入完整、来源可确认的人类示范。旧版 0.4.x 记录仍可导入。缺失的选牌候选或卡牌效果参数不会自动补造。
+`--bootstrap-only` 按决策导入，允许未完成对局和求解器来源；这些记录只用于 Bootstrap。去掉该参数则只导入完整、来源可确认的人类示范。缺失的选牌候选或卡牌效果参数不会自动补造。
 
-0.5.0 增加实时控制桥接。对局内运行：
+Mod 同时提供实时控制桥接。对局内运行：
 
 ```bash
 python -m model --device cuda play-steam \

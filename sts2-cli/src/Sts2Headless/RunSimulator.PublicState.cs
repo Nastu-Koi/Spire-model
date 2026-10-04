@@ -3,6 +3,7 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Combat.History.Entries;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Localization;
@@ -23,11 +24,15 @@ public partial class RunSimulator
         public Dictionary<PotionModel, string> Potions { get; } = new(ReferenceEqualityComparer.Instance);
         public Dictionary<MapCoord, string> Map { get; } = new();
 
-        public string AddCard(CardModel card, string zone, int? position = null)
+        // CombatSolverCli invokes AddCard by reflection with exactly these three
+        // arguments; keep the name unique and the signature unchanged.
+        public string AddCard(CardModel card, string zone, int? position = null) =>
+            Cards.TryGetValue(card, out var existing) ? existing
+                : AddDescribedCard(card, PublicSelectionCard(card), zone, position);
+
+        private string AddDescribedCard(CardModel card, Dictionary<string, object?> entity, string zone, int? position)
         {
-            if (Cards.TryGetValue(card, out var existing)) return existing;
             var reference = $"card:{Cards.Count}";
-            var entity = PublicSelectionCard(card);
             entity["ref"] = reference;
             entity["zone"] = zone;
             entity["owner_ref"] = "player";
@@ -39,10 +44,14 @@ public partial class RunSimulator
 
         public void AddPile(IEnumerable<CardModel> cards, string zone, bool ordered = false)
         {
-            var list = cards.ToList();
+            // Describing a card runs the game's cost and keyword hooks, and every pile is
+            // exported on every frame: describe each card once and reuse it as the sort key.
+            var list = cards.Select(card => (card, entity: PublicSelectionCard(card))).ToList();
             if (!ordered)
-                list = list.OrderBy(c => JsonSerializer.Serialize(PublicSelectionCard(c)), StringComparer.Ordinal).ToList();
-            for (int i = 0; i < list.Count; i++) AddCard(list[i], zone, ordered ? i : null);
+                list = list.OrderBy(pair => JsonSerializer.Serialize(pair.entity), StringComparer.Ordinal).ToList();
+            for (int i = 0; i < list.Count; i++)
+                if (!Cards.ContainsKey(list[i].card))
+                    AddDescribedCard(list[i].card, list[i].entity, zone, ordered ? i : null);
             Entities.Add(new() { ["entity_type"] = "pile_summary", ["zone"] = zone,
                 ["count"] = list.Count, ["complete"] = true, ["order_known"] = ordered });
         }
@@ -57,11 +66,15 @@ public partial class RunSimulator
         snapshot.Entities.Add(new()
         {
             ["ref"] = "player", ["entity_type"] = "player", ["character"] = player.Character.Id.Entry,
+            ["ascension"] = _protocolAscension,
             ["act"] = _runState.CurrentActIndex + 1, ["floor"] = _runState.ActFloor,
             ["hp"] = player.Creature.CurrentHp, ["max_hp"] = player.Creature.MaxHp,
             ["block"] = player.Creature.Block, ["gold"] = player.Gold,
             ["energy"] = pcs?.Energy, ["max_energy"] = pcs?.MaxEnergy, ["stars"] = pcs?.Stars,
             ["round"] = combat?.RoundNumber, ["capacity"] = player.MaxPotionCount,
+            // The same rule the map screen applies: while it holds, every room of
+            // the next floor can be entered, whatever the drawn paths.
+            ["free_travel"] = Hook.ShouldAllowFreeTravel(_runState),
             // Same visible, turn-scoped damage fact used by Spite's glow. Healing
             // afterwards does not undo the event; no hidden history is exported.
             ["lost_hp_this_turn"] = combat != null && CombatManager.Instance.IsInProgress
@@ -120,14 +133,22 @@ public partial class RunSimulator
                         ["stats"] = new { passive = orb.PassiveVal, evoke = orb.EvokeVal } });
             }
         }
+        // Powers and relics export the values their hover text displays, and a
+        // relic its counter when the game draws one on its icon.
         foreach (var (creature, reference) in snapshot.Creatures)
             foreach (var power in creature.Powers)
                 snapshot.Entities.Add(new() { ["entity_type"] = "power", ["content_id"] = power.Id.ToString(),
-                    ["owner_ref"] = reference, ["stacks"] = power.Amount });
+                    ["owner_ref"] = reference, ["stacks"] = power.Amount,
+                    ["stats"] = power.DynamicVars.Values.ToDictionary(v => v.Name, v => (object?)v.BaseValue) });
         foreach (var relic in player.Relics)
-            snapshot.Entities.Add(new() { ["entity_type"] = "relic", ["content_id"] = relic.Id.ToString(),
-                ["owner_ref"] = "player", ["effect_coverage"] = "opaque",
-                ["semantic_program"] = OpaqueProgram(relic.Id.ToString()) });
+        {
+            var entity = new Dictionary<string, object?> { ["entity_type"] = "relic",
+                ["content_id"] = relic.Id.ToString(), ["owner_ref"] = "player",
+                ["stats"] = relic.DynamicVars.Values.ToDictionary(v => v.Name, v => (object?)v.BaseValue),
+                ["effect_coverage"] = "opaque", ["semantic_program"] = OpaqueProgram(relic.Id.ToString()) };
+            if (relic.ShowCounter) entity["counter"] = relic.DisplayAmount;
+            snapshot.Entities.Add(entity);
+        }
         for (int i = 0; i < player.MaxPotionCount; i++)
         {
             var potion = player.GetPotionAtSlotIndex(i);

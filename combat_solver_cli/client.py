@@ -10,7 +10,9 @@ from model.engine import CliEngine
 from model.protocol import ProtocolError
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "combat_solver_cli/artifacts/config.json"
+# Pinned solver copy and the machine-local configuration; never committed.
+SOLVER_DIR = ROOT / "combat_solver_cli/lib"
+DEFAULT_CONFIG = SOLVER_DIR / "config.json"
 
 
 class InfrastructureError(RuntimeError):

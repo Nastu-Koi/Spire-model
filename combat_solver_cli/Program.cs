@@ -68,18 +68,24 @@ internal static class Program
                 else
                 {
                     if (command is "start_run" or "load_save" or "enter_room" or "action" or "set_player"
-                        or "set_draw_order" or "execute_candidate" or "quit") solver.Reset();
+                        or "set_draw_order" or "execute_candidate" or "quit" or "enter_anchor" or "anchor_room") solver.Reset();
                     response = handle.Invoke(null, new[] { simulator, (object)request })!;
-                    if (command is "start_run" or "load_save") solver.PrepareEngine();
+                    if (command is "start_run" or "load_save" or "enter_anchor") solver.PrepareEngine();
                     JsonElement result = JsonSerializer.SerializeToElement(response, Json);
-                    if (result.TryGetProperty("type", out var type) && type.GetString() == "decision_frame") frame = result;
-                    else if (command is "start_run" or "load_save" or "enter_room" or "action" or "set_player" or "quit") frame = null;
+                    if (result.TryGetProperty("type", out var type) && type.GetString() == "decision_frame")
+                    {
+                        frame = result;
+                        solver.ObserveBoundary(result);
+                    }
+                    else if (command is "start_run" or "load_save" or "enter_room" or "action" or "set_player" or "quit"
+                        or "enter_anchor" or "anchor_room") frame = null;
                 }
             }
             catch (Exception exception)
             {
                 while (exception is TargetInvocationException && exception.InnerException is not null)
                     exception = exception.InnerException;
+                solver.Reset();
                 response = new { type = "error", message = exception.Message, stack_trace = exception.ToString() };
             }
             JsonElement packet = JsonSerializer.SerializeToElement(response, Json);

@@ -112,7 +112,7 @@ class Program
     {
         var cmdType = cmd.GetProperty("cmd").GetString() ?? "";
         if (cmdType is "start_run" or "load_save" or "action" or "set_player" or "enter_room"
-            or "set_draw_order" or "quit")
+            or "set_draw_order" or "quit" or "enter_anchor")
             sim.InvalidateDecisionProtocol();
         switch (cmdType)
         {
@@ -140,7 +140,8 @@ class Program
                     cmd.TryGetProperty("ascension", out var asc) ? asc.GetInt32() : 0,
                     cmd.TryGetProperty("seed", out var s) ? s.GetString() : null,
                     cmd.TryGetProperty("lang", out var lang) ? lang.GetString() ?? "en" : "en",
-                    cmd.TryGetProperty("decision_protocol", out var protocol) && protocol.ValueKind == JsonValueKind.True
+                    cmd.TryGetProperty("decision_protocol", out var protocol) && protocol.ValueKind == JsonValueKind.True,
+                    cmd.TryGetProperty("acts", out var acts) ? acts.EnumerateArray().Select(x => x.GetString()!).ToArray() : null
                 );
 
             case "action":
@@ -178,8 +179,15 @@ class Program
                 if (saveJson == null)
                     return new Dictionary<string, object?> { ["type"] = "error", ["message"] = "Provide 'path' or 'json' for load_save" };
                 var loadLang = cmd.TryGetProperty("lang", out var le) ? (le.GetString() ?? "en") : "en";
-                return sim.LoadSave(saveJson, loadLang);
+                return sim.LoadSave(saveJson, loadLang,
+                    cmd.TryGetProperty("diagnostic_protocol", out var dpl) && dpl.ValueKind == JsonValueKind.True);
             }
+            case "enter_anchor":
+                return sim.EnterAnchor(cmd);
+            case "anchor_room":
+                return sim.AnchorRoom(cmd);
+            case "anchor_state":
+                return sim.AnchorState();
             case "get_map":
                 return sim.GetFullMap();
             case "public_catalog":
@@ -255,9 +263,23 @@ class Program
         }
     }
 
+    private static readonly Stream Stdout = Console.OpenStandardOutput();
+    private static readonly MemoryStream Line = new();
+    private static readonly byte[] NewLine = System.Text.Encoding.UTF8.GetBytes(Environment.NewLine);
+
     static void WriteLine(Dictionary<string, object?> data)
     {
-        Console.Out.WriteLine(JsonSerializer.Serialize(data, JsonOpts));
-        Console.Out.Flush();
+        // Decision frames are tens of kilobytes. Send the serializer's UTF-8 as one
+        // write instead of transcoding through a UTF-16 string and Console's encoder.
+        Line.SetLength(0);
+        JsonSerializer.Serialize(Line, data, JsonOpts);
+        Line.Write(NewLine);
+        // Console.Out synchronizes on itself; share its lock so no other stdout
+        // writer can land inside a frame.
+        lock (Console.Out)
+        {
+            Stdout.Write(Line.GetBuffer(), 0, (int)Line.Length);
+            Stdout.Flush();
+        }
     }
 }

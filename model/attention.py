@@ -1,32 +1,33 @@
-"""Attention implementations and compact map-only global biases."""
+"""Multi-head attention with an additive bias built from sparse typed relations."""
 
-import importlib.util
 import math
-import warnings
-from dataclasses import dataclass
-from functools import partial
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 
-@dataclass
-class MapAttentionBias:
-    """Compact map metadata used directly by FlexAttention's score modifier.
+def relation_bias(table, edges, valid):
+    """Scatter relation embeddings into a dense attention bias.
 
-    ``node_slots`` maps a packed token to its map-table row, or -1 for a
-    non-map token.  The quadratic table is consequently MxM rather than NxN,
-    where M is the number of map nodes and N is the full observation length.
+    ``edges`` holds rows of (sequence, query, key, relation bucket); ``table``
+    maps a bucket to one scalar per head. Several relations between the same
+    pair add up, unrelated pairs receive no bias, and padded keys are excluded.
+    The result is [sequences, heads, tokens, tokens].
     """
+    sequences, tokens = valid.shape
+    flat = table.weight.new_zeros((sequences * tokens * tokens, table.embedding_dim))
+    if edges.numel():
+        sequence, query, key, role = edges.unbind(-1)
+        flat = flat.index_add(
+            0, (sequence * tokens + query) * tokens + key, table(role)
+        )
+    bias = flat.view(sequences, tokens, tokens, -1).permute(0, 3, 1, 2)
+    return bias.masked_fill(~valid[:, None, None, :], -float("inf"))
 
-    node_slots: torch.Tensor  # [batch, tokens], -1 outside the map
-    categories: torch.Tensor  # [batch, map_nodes, map_nodes], 0 for padding
-    floors: torch.Tensor  # [batch, map_nodes]
 
-
-class MapAttention(nn.Module):
-    def __init__(self, width, heads, *, backend="reference", relations=128):
+class Attention(nn.Module):
+    def __init__(self, width, heads, *, backend="sdpa"):
         super().__init__()
         if width % heads:
             raise ValueError("Attention width must divide evenly across heads")
@@ -34,55 +35,9 @@ class MapAttention(nn.Module):
         self.head_dim = width // heads
         self.qkv = nn.Linear(width, 3 * width)
         self.output = nn.Linear(width, width)
-        self.map_relation = nn.Embedding(relations, heads, padding_idx=0)
-        self.floor_delta = nn.Embedding(33, heads)
         self.backend = backend
-        self.actual_backend = backend
-        self._flex = None
-        self._flash = None
-        self._warned_flash_training = False
 
-    def _score_bias(
-        self, metadata, batch, head, query, key, map_weight=None, floor_weight=None
-    ):
-        map_weight = self.map_relation.weight if map_weight is None else map_weight
-        floor_weight = self.floor_delta.weight if floor_weight is None else floor_weight
-        last_token = metadata.node_slots.shape[1] - 1
-        query_in_bounds = query < metadata.node_slots.shape[1]
-        key_in_bounds = key < metadata.node_slots.shape[1]
-        query_token = query.clamp(max=last_token)
-        key_token = key.clamp(max=last_token)
-        query_slot = metadata.node_slots[batch, query_token]
-        key_slot = metadata.node_slots[batch, key_token]
-        is_map_pair = (
-            query_in_bounds & key_in_bounds & (query_slot >= 0) & (key_slot >= 0)
-        )
-        query_slot = query_slot.clamp_min(0)
-        key_slot = key_slot.clamp_min(0)
-        category = metadata.categories[batch, query_slot, key_slot]
-        delta = (
-            metadata.floors[batch, key_slot] - metadata.floors[batch, query_slot]
-        ).clamp(-16, 16) + 16
-        # Direct two-dimensional indexing is supported by FlexAttention's
-        # score_mod backward; embedding_dense_backward is not.
-        learned = map_weight[category, head] + floor_weight[delta, head]
-        return torch.where(is_map_pair, learned, learned.new_zeros(()))
-
-    def dense_bias(self, metadata):
-        """Materialize a reference bias for CPU and SDPA correctness checks."""
-        slots = metadata.node_slots
-        safe = slots.clamp_min(0)
-        batch = torch.arange(slots.shape[0], device=slots.device)[:, None, None]
-        query = safe[:, :, None]
-        key = safe[:, None, :]
-        category = metadata.categories[batch, query, key]
-        query_floor = metadata.floors.gather(1, safe)
-        delta = (query_floor[:, None, :] - query_floor[:, :, None]).clamp(-16, 16) + 16
-        bias = self.map_relation(category) + self.floor_delta(delta)
-        is_map_pair = (slots[:, :, None] >= 0) & (slots[:, None, :] >= 0)
-        return (bias * is_map_pair.unsqueeze(-1)).permute(0, 3, 1, 2)
-
-    def forward(self, x, valid, metadata):
+    def forward(self, x, valid, bias):
         batch_size, tokens, width = x.shape
         q, k, v = (
             self.qkv(x)
@@ -90,144 +45,16 @@ class MapAttention(nn.Module):
             .permute(2, 0, 3, 1, 4)
             .unbind(0)
         )
-        if self.backend in {"flex", "flash", "auto"} and x.is_cuda:
-            from torch.nn.attention.flex_attention import flex_attention
-
-            # FA4 cannot differentiate captured bias tables. Use Triton whenever
-            # autograd is enabled, including eval() calls used for gradient checks.
-            use_flash = self.backend == "flash" and not torch.is_grad_enabled()
-            if use_flash:
-                if q.dtype not in {torch.float16, torch.bfloat16}:
-                    raise ValueError(
-                        "FlashAttention requires FP16/BF16; enable BF16 autocast"
-                    )
-                if self._flash is None:
-                    try:
-                        available = (
-                            importlib.util.find_spec("flash_attn.cute") is not None
-                        )
-                    except ModuleNotFoundError:
-                        available = False
-                    if not available:
-                        raise RuntimeError(
-                            "FlashAttention-4 is not installed; install a compatible "
-                            "flash-attn-4 package or select backend='flex'"
-                        )
-                    self._flash = torch.compile(
-                        partial(flex_attention, kernel_options={"BACKEND": "FLASH"}),
-                        dynamic=False,
-                    )
-                attention = self._flash
-                # Even under no_grad, parameters retain requires_grad=True.
-                # Detach captures so Inductor can select the FA4 forward kernel.
-                map_weight = self.map_relation.weight.detach()
-                floor_weight = self.floor_delta.weight.detach()
-            else:
-                if self.backend == "flash" and not self._warned_flash_training:
-                    warnings.warn(
-                        "FlashAttention-4 does not support learned map-bias gradients; "
-                        "using Triton FlexAttention while autograd is enabled",
-                        stacklevel=2,
-                    )
-                    self._warned_flash_training = True
-                if self._flex is None:
-                    self._flex = torch.compile(
-                        partial(flex_attention, kernel_options={"BACKEND": "TRITON"}),
-                        dynamic=True,
-                    )
-                attention = self._flex
-                map_weight = self.map_relation.weight
-                floor_weight = self.floor_delta.weight
-
-            def score_mod(score, batch, head, query, key):
-                score = score + self._score_bias(
-                    metadata, batch, head, query, key, map_weight, floor_weight
-                )
-                key_in_bounds = key < valid.shape[1]
-                key_token = key.clamp(max=valid.shape[1] - 1)
-                return torch.where(
-                    key_in_bounds & valid[batch, key_token], score, -float("inf")
-                )
-
-            out = attention(q, k, v, score_mod=score_mod)
-            self.actual_backend = "flash" if use_flash else "flex"
-        else:
-            bias = self.dense_bias(metadata)
-            mask = bias.masked_fill(~valid[:, None, None, :], -float("inf"))
-            if self.backend == "sdpa":
-                out = F.scaled_dot_product_attention(
-                    q, k, v, attn_mask=mask.to(q.dtype), dropout_p=0.0
-                )
-                self.actual_backend = "sdpa"
-            else:
-                if (
-                    self.backend in {"flex", "flash"}
-                    and self.actual_backend != "reference"
-                ):
-                    warnings.warn(
-                        "Flex/FlashAttention requires CUDA; using reference attention",
-                        stacklevel=2,
-                    )
-                self.actual_backend = "reference"
-                with torch.autocast(device_type=x.device.type, enabled=False):
-                    scores = (
-                        q.float()
-                        @ k.float().transpose(-1, -2)
-                        / math.sqrt(self.head_dim)
-                    )
-                    scores = scores + mask.float()
-                    out = (scores.softmax(-1) @ v.float()).to(v.dtype)
-        out = out.transpose(1, 2).reshape(batch_size, tokens, width)
-        return self.output(out) * valid.unsqueeze(-1)
-
-
-class RelationAttention(nn.Module):
-    """Small dense reference attention for ordered local effect programs."""
-
-    def __init__(self, width, heads, *, relations=128, backend="reference"):
-        super().__init__()
-        if width % heads:
-            raise ValueError("Attention width must divide evenly across heads")
-        self.heads = heads
-        self.head_dim = width // heads
-        self.qkv = nn.Linear(width, 3 * width)
-        self.output = nn.Linear(width, width)
-        self.relation = nn.Embedding(relations, heads, padding_idx=0)
-        self.backend = backend
-        self.actual_backend = "reference" if backend == "reference" else "sdpa"
-
-    def forward(self, x, valid, edges):
-        batch_size, tokens, width = x.shape
-        q, k, v = (
-            self.qkv(x)
-            .view(batch_size, tokens, 3, self.heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
-            .unbind(0)
-        )
-        flat = x.new_zeros(
-            (batch_size * tokens * tokens, self.heads), dtype=self.relation.weight.dtype
-        )
-        if edges.numel():
-            batch, source, target, role = edges.unbind(-1)
-            flat = flat.index_add(
-                0,
-                batch * tokens * tokens + source * tokens + target,
-                self.relation(role),
-            )
-        bias = flat.view(batch_size, tokens, tokens, self.heads).permute(0, 3, 1, 2)
-        mask = bias.masked_fill(~valid[:, None, None, :], -float("inf"))
         if self.backend == "reference":
+            exact = torch.promote_types(q.dtype, torch.float32)
             with torch.autocast(device_type=x.device.type, enabled=False):
                 scores = (
-                    q.float() @ k.float().transpose(-1, -2) / math.sqrt(self.head_dim)
+                    q.to(exact) @ k.to(exact).transpose(-1, -2) / math.sqrt(self.head_dim)
                 )
-                scores = scores + mask.float()
-                out = (scores.softmax(-1) @ v.float()).to(v.dtype)
-            self.actual_backend = "reference"
+                out = ((scores + bias.to(exact)).softmax(-1) @ v.to(exact)).to(v.dtype)
         else:
             out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask.to(q.dtype), dropout_p=0.0
+                q, k, v, attn_mask=bias.to(q.dtype), dropout_p=0.0
             )
-            self.actual_backend = "sdpa"
         out = out.transpose(1, 2).reshape(batch_size, tokens, width)
         return self.output(out) * valid.unsqueeze(-1)

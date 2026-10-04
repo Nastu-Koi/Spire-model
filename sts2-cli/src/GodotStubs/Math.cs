@@ -123,6 +123,7 @@ public static class Mathf
     public static float Tan(float s) => MathF.Tan(s);
     public static float Sqrt(float s) => MathF.Sqrt(s);
     public static float Pow(float @base, float exp) => MathF.Pow(@base, exp);
+    public static float Log(float value) => MathF.Log(value);
     public static float Abs(float s) => MathF.Abs(s);
     public static float Floor(float s) => MathF.Floor(s);
     public static float Ceil(float s) => MathF.Ceiling(s);

@@ -6,9 +6,9 @@
 - 引入基线：`084d1aa3d8e118ca7ce8d8774ad16d6be9c92367`
 - 引入日期：2026-09-20
 - 许可证：[MIT](LICENSE)
-- 已包含本地的固定等待优化、异步选择修复及测试，说明见 [background-operations.md](docs/background-operations.md)，验证记录见 [优化报告](../reports/sts2-fast-waits-2026-09-20/REPORT.md)。
+- 本地维护内容：引擎决策协议（[decision-protocol.md](docs/decision-protocol.md)）、固定等待与异步选择调度及其测试。
 
-上游 Git 元数据未嵌套复制到本目录；源码、许可证和全部未提交修复已按文件内容校验。导入时未包含游戏 DLL 和构建产物；运行完整引擎仍按 [README](README.md) 准备本地依赖。
+上游 Git 元数据未嵌套复制到本目录，也不包含游戏 DLL 和构建产物；运行完整引擎仍按 [README](README.md) 准备本地依赖。
 
 从 Spire-model 根目录运行不依赖游戏 DLL 的异步调度检查：
 

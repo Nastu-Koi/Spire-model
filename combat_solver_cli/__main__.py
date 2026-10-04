@@ -1,217 +1,84 @@
+"""CombatSolver worker: configure pinned dependencies, verify trajectory prefixes.
+
+python -m combat_solver_cli configure --solver <CombatSolver.dll> \
+    --dependency-dir <RitsuLib/compat/0.111.0> --dependency-dir <RitsuLib/shared>
+python -m combat_solver_cli verify --prefix <prefix.json> --output <dir>
+
+configure copies the solver into combat_solver_cli/lib and writes lib/config.json;
+omit --solver to pin the copy that is already there.
+"""
+
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
-from model.protocol import CHARACTERS, execution_command, validate_frame
-
-from .client import DEFAULT_CONFIG, ROOT, SolverEngine
-from .mcts import search
-from .search_support import write_json
+from .client import DEFAULT_CONFIG, ROOT, SOLVER_DIR
 
 
-def first_combat(
-    config,
-    character="Ironclad",
-    seed="combat-solver-cli-smoke",
-    budget_ms=1000,
-    reuse_turn_plan=False,
-    ascension=0,
-):
-    count = selection = 0
-    with SolverEngine(config) as engine:
-        frame = engine.reset(character, seed, ascension)
-        for _ in range(1000):
-            validate_frame(frame)
-            if any(
-                e.get("type") == "encounter_completed" and e.get("result") == "victory"
-                for e in frame.get("events", [])
-            ):
-                return {
-                    "character": character,
-                    "seed": seed,
-                    "ascension": ascension,
-                    "status": "victory",
-                    "solver_steps": count,
-                    "selection_steps": selection,
-                    "training_ready": frame["contract"]["training_ready"],
-                }
-            if frame["boundary"] == "terminal":
-                raise RuntimeError("Native run ended before first combat victory")
-            if frame["boundary"] == "waiting":
-                frame = engine.send({"cmd": "advance_to_boundary"})
-                continue
-            phase = frame["public"]["phase"]
-            in_combat = phase == "combat" or (
-                phase in ("card_select", "card_reward")
-                and engine.send({"cmd": "solver_info"}).get("combat_in_progress")
-            )
-            if in_combat:
-                result = engine.step(
-                    frame,
-                    budget_ms=budget_ms,
-                    potions=True,
-                    reuse_turn_plan=reuse_turn_plan,
-                )
-                if result.get("type") != "solver_step":
-                    raise RuntimeError(str(result))
-                count += 1
-                selection += phase != "combat"
-                frame = result["frame"]
-            else:
-                candidate = next(
-                    c
-                    for c in frame["legal"]["candidates"]
-                    if c["verb"] != "ABANDON_RUN"
-                )
-                frame = engine.send(
-                    execution_command(frame, candidate["candidate_ref"])
-                )
-        raise RuntimeError("First combat smoke exceeded step limit")
+def pin(solver):
+    """Copy the solver and its manifest into SOLVER_DIR, so a Steam update cannot change them."""
+    target = SOLVER_DIR / solver.name
+    if solver != target.resolve():
+        SOLVER_DIR.mkdir(exist_ok=True)
+        for source in (solver, solver.with_suffix(".json")):
+            shutil.copy2(source, SOLVER_DIR / source.name)
+    return target
+
+
+def configure(solver, lib, dependency_dir, config):
+    solver, lib = solver.resolve(), lib.resolve()
+    if not solver.is_file() or not (lib / "sts2.dll").is_file():
+        raise FileNotFoundError("Solver or game DLL missing")
+    manifest = json.loads(solver.with_suffix(".json").read_text())
+    if str(manifest.get("version")) != "0.44.0":
+        raise ValueError("Adapter currently supports CombatSolver 0.44.0")
+    dependencies = [p.resolve() for p in dependency_dir]
+    if any(not p.is_dir() for p in dependencies):
+        raise FileNotFoundError("Dependency directory missing")
+    solver = pin(solver)
+    from model.dotnet_runtime import find_sdk
+
+    sdk = find_sdk()
+    if sdk is None:
+        raise RuntimeError("A .NET 9 or newer SDK is required to build the worker")
+    subprocess.run([sdk, "build", str(ROOT / "combat_solver_cli/CombatSolverCli.csproj"), "--nologo", "-v:q", "-m:1"],
+                   check=True)
+    result = {
+        "solver_dll": str(solver),
+        "game_dll": str(lib / "sts2.dll"),
+        "dependency_dirs": list(map(str, dependencies)),
+        "worker_dll": str(ROOT / "combat_solver_cli/bin/Debug/net9.0/CombatSolverCli.dll"),
+    }
+    for key in ("solver_dll", "game_dll"):
+        result[key + "_sha256"] = hashlib.sha256(Path(result[key]).read_bytes()).hexdigest()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps(result, indent=2) + "\n")
+    return config
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Native CombatSolver teacher and full-run MCTS"
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    configure = sub.add_parser("configure")
-    configure.add_argument("--solver", required=True, type=Path)
-    configure.add_argument("--lib", type=Path, default=ROOT / "sts2-cli/lib")
-    configure.add_argument("--dependency-dir", action="append", type=Path, default=[])
-    configure.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    smoke = sub.add_parser("smoke")
-    smoke.add_argument(
-        "--characters", nargs="+", choices=CHARACTERS, default=["Ironclad"]
-    )
-    smoke.add_argument("--seed", default="combat-solver-cli-smoke")
-    smoke.add_argument(
-        "--output", type=Path, default=ROOT / "combat_solver_cli/artifacts/smoke.json"
-    )
-    smoke.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    smoke.add_argument("--budget-ms", type=int, default=1000)
-    smoke.add_argument("--ascension", type=int, choices=range(11), default=0)
-    smoke.add_argument("--reuse-turn-plan", action="store_true")
-    for name in ("search", "batch"):
-        cmd = sub.add_parser(name)
-        cmd.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-        cmd.add_argument("--output", type=Path, required=True)
-        cmd.add_argument("--budget-ms", type=int, default=1000)
-        cmd.add_argument("--boss-budget-ms", type=int, default=5000)
-        cmd.add_argument("--ascension", type=int, choices=range(11), default=0)
-        cmd.add_argument("--max-expansions", type=int, default=2000)
-        cmd.add_argument("--max-seconds", type=float, default=3600)
-        cmd.add_argument("--max-steps", type=int, default=10000)
-        cmd.add_argument("--reuse-turn-plan", action="store_true")
-        cmd.add_argument(
-            "--rollout-decisions",
-            type=int,
-            default=None,
-            help="MCTS rollout horizon (default: 256)",
-        )
-        cmd.add_argument("--search-lanes", type=int, choices=[1, 2, 4], default=1)
-        if name == "search":
-            cmd.add_argument(
-                "--local-repair", action=argparse.BooleanOptionalAction, default=True
-            )
-            cmd.add_argument(
-                "--risk-aware-rollout",
-                action=argparse.BooleanOptionalAction,
-                default=True,
-            )
-            cmd.add_argument("--character", choices=CHARACTERS, default="Ironclad")
-            cmd.add_argument("--seed", required=True)
-            restore = cmd.add_mutually_exclusive_group()
-            restore.add_argument("--resume", type=Path)
-            restore.add_argument("--prefix-path", type=Path)
-        else:
-            cmd.add_argument("--jobs", type=Path, required=True)
-            cmd.add_argument("--workers", type=int, choices=[1], default=1)
-            cmd.add_argument("--quiet", action="store_true")
-            cmd.add_argument("--progress-interval", type=float, default=10)
-    verify = sub.add_parser("verify")
-    verify.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    verify.add_argument("--prefix", type=Path, required=True)
-    verify.add_argument("--output", type=Path, required=True)
-    args = vars(parser.parse_args())
-    command = args.pop("command")
-    if "rollout_decisions" in args and args["rollout_decisions"] is None:
-        args["rollout_decisions"] = 256
-    if command == "configure":
-        solver, lib = args["solver"].resolve(), args["lib"].resolve()
-        if not solver.is_file() or not (lib / "sts2.dll").is_file():
-            raise FileNotFoundError("Solver or game DLL missing")
-        manifest = json.loads(solver.with_suffix(".json").read_text())
-        if str(manifest.get("version")) != "0.44.0":
-            raise ValueError("Adapter currently supports CombatSolver 0.44.0")
-        dependencies = [p.resolve() for p in args["dependency_dir"]]
-        if any(not p.is_dir() for p in dependencies):
-            raise FileNotFoundError("Dependency directory missing")
-        from model.dotnet_runtime import find_sdk
-
-        sdk = find_sdk()
-        if sdk is None:
-            raise RuntimeError("A .NET 9 or newer SDK is required to build the worker")
-        subprocess.run(
-            [
-                sdk,
-                "build",
-                str(ROOT / "combat_solver_cli/CombatSolverCli.csproj"),
-                "--nologo",
-                "-v:q",
-                "-m:1",
-            ],
-            check=True,
-        )
-        config = {
-            "solver_dll": str(solver),
-            "game_dll": str(lib / "sts2.dll"),
-            "dependency_dirs": list(map(str, dependencies)),
-            "worker_dll": str(
-                ROOT / "combat_solver_cli/bin/Debug/net9.0/CombatSolverCli.dll"
-            ),
-        }
-        for key in ("solver_dll", "game_dll"):
-            config[key + "_sha256"] = hashlib.sha256(
-                Path(config[key]).read_bytes()
-            ).hexdigest()
-        args["config"].parent.mkdir(parents=True, exist_ok=True)
-        write_json(args["config"], config)
-        print(args["config"])
+    x = sub.add_parser("configure", help="Build the worker and pin solver / game DLL hashes")
+    x.add_argument("--solver", type=Path, default=SOLVER_DIR / "CombatSolver.dll")
+    x.add_argument("--lib", type=Path, default=ROOT / "sts2-cli/lib")
+    x.add_argument("--dependency-dir", action="append", type=Path, default=[])
+    x.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    x = sub.add_parser("verify", help="Independently replay a prefix in a fresh engine and export it")
+    x.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    x.add_argument("--prefix", type=Path, required=True)
+    x.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if args.command == "configure":
+        print(configure(args.solver, args.lib, args.dependency_dir, args.config))
         return
-    if command == "smoke":
-        result = [
-            first_combat(
-                args["config"],
-                c,
-                args["seed"],
-                args["budget_ms"],
-                args["reuse_turn_plan"],
-                args["ascension"],
-            )
-            for c in args["characters"]
-        ]
-        args["output"].parent.mkdir(parents=True, exist_ok=True)
-        write_json(args["output"], result)
-    elif command == "search":
-        result = search(**args)
-        print(json.dumps(result, ensure_ascii=False))
-        raise SystemExit(0 if result["status"] == "verified_victory" else 2)
-    elif command == "batch":
-        from .batch import generate
+    from .trajectory import verify_and_export
 
-        args["jobs"] = json.loads(args["jobs"].read_text())
-        args["progress"] = not args.pop("quiet")
-        result = generate(**args)
-        print(json.dumps(result, ensure_ascii=False))
-        raise SystemExit(0 if result["verified_victories"] else 2)
-    else:
-        from .trajectory import verify_and_export
-
-        result = verify_and_export(args["config"], args["prefix"], args["output"])
-        result = {"run_id": result["run_id"], "provenance": result["provenance"]}
-    print(json.dumps(result, ensure_ascii=False))
+    result = verify_and_export(args.config, args.prefix, args.output)
+    print(json.dumps({"run_id": result["run_id"], "provenance": result["provenance"]}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

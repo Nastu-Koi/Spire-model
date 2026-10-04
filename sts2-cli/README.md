@@ -11,8 +11,6 @@ A CLI for Slay the Spire 2.
 
 Runs the real game engine headless in your terminal — all damage, card effects, enemy AI, relics, and RNG are identical to the actual game. Everything is unlocked from the start: all characters, cards, relics, potions, and ascension levels — no timeline progression required.
 
-![demo](docs/demo_en.gif)
-
 ## Setup
 
 Requirements:
@@ -125,8 +123,6 @@ sts2.dll (game engine, IL patched)
 杀戮尖塔2的命令行版本。
 
 在终端里运行真实游戏引擎 — 所有伤害计算、卡牌效果、敌人AI、遗物触发、随机数都和真实游戏一致。所有内容从一开始就全部解锁：全角色、全卡牌、全遗物、全药水、全渐进难度等级，无需时间线进度。
-
-![demo](docs/demo_zh.gif)
 
 ## 安装
 

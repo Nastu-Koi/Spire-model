@@ -14,17 +14,18 @@ class ModelConfig:
     local_heads: int = 4
     local_layers: int = 1
     vocabulary_size: int = 16384
-    field_buckets: int = 512
-    relation_buckets: int = 128
-    backend: str = "auto"
+    field_size: int = 1024
+    relation_size: int = 128
+    backend: str = "sdpa"
+    encoder_precision: str = "inherit"
     checkpoint_layers: bool = False
     compile_blocks: bool = False
 
     def __post_init__(self):
         if self.architecture_version != 2:
-            raise ValueError(
-                "Only architecture version 2 (Full Attention/SwiGLU) is supported"
-            )
+            raise ValueError("Unsupported architecture version")
+        if self.encoder_precision not in {"inherit", "fp32"}:
+            raise ValueError("Unknown encoder precision")
         dimensions = (
             self.hidden_size,
             self.num_heads,
@@ -34,19 +35,19 @@ class ModelConfig:
             self.local_heads,
             self.local_layers,
             self.vocabulary_size,
-            self.field_buckets,
-            self.relation_buckets,
+            self.field_size,
+            self.relation_size,
         )
         if (
             any(type(x) is not int or x < 1 for x in dimensions)
-            or min(self.vocabulary_size, self.field_buckets, self.relation_buckets) < 2
+            or min(self.vocabulary_size, self.field_size, self.relation_size) < 2
         ):
             raise ValueError(
                 "Dimensions must be positive integers and vocabularies need reserved entries"
             )
         if self.hidden_size % self.num_heads or self.local_size % self.local_heads:
             raise ValueError("Attention dimensions must divide evenly")
-        if self.backend not in {"reference", "sdpa", "flex", "flash", "auto"}:
+        if self.backend not in {"reference", "sdpa"}:
             raise ValueError("Unknown attention backend")
 
     @classmethod
@@ -59,7 +60,7 @@ class ModelConfig:
             local_size=32,
             local_heads=4,
             local_layers=1,
-            vocabulary_size=1024,
+            vocabulary_size=4096,
             backend="reference",
         )
 
@@ -87,7 +88,7 @@ class TrainConfig:
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     logical_batch_size: int = 32
-    microbatch_size: int = 4
+    microbatch_size: int = 32
     clip_ratio: float = 0.2
     target_kl: float = 0.015
     ppo_epochs: int = 2
@@ -97,20 +98,20 @@ class TrainConfig:
     horizon_scale: float = 100.0
     precision: str = "bf16"
     token_buckets: list[int] = field(
-        default_factory=lambda: [256, 512, 1024, 2048, 4096]
+        default_factory=lambda: [64, 96, 128, 192, 256, 384, 512, 1024, 2048, 4096]
     )
     action_buckets: list[int] = field(
         default_factory=lambda: [16, 32, 64, 128, 256, 512, 1024]
     )
-    token_budget: int = 8192
+    token_budget: int = 32768
     pair_budget: int = 16777216
+    loader_workers: int = 8
+    # Difficulty of the runs the policy plays itself: rollouts and evaluation.
+    # Demonstrations keep their own; the player entity carries it into the model.
+    ascension: int = 10
 
     @classmethod
     def from_dict(cls, values):
-        values = dict(values)
-        legacy = values.pop("bc_coef", None)
-        if legacy is not None:
-            values.setdefault("bootstrap_coef", legacy)
         return cls(**values)
 
     def __post_init__(self):
@@ -125,6 +126,10 @@ class TrainConfig:
             raise ValueError("Invalid Muon learning rate, momentum or iteration count")
         if min(self.logical_batch_size, self.microbatch_size, self.horizon_scale) <= 0:
             raise ValueError("Batch sizes and horizon scale must be positive")
+        if type(self.loader_workers) is not int or self.loader_workers < 0:
+            raise ValueError("Loader workers must be a non-negative integer")
+        if type(self.ascension) is not int or not 0 <= self.ascension <= 10:
+            raise ValueError("Ascension must be an integer from 0 to 10")
         if self.precision not in {"no", "bf16"}:
             raise ValueError("Use FP32 or BF16 consistently for rollout and learning")
         if not 0 < self.clip_ratio < 1 or self.target_kl <= 0 or self.ppo_epochs < 1:

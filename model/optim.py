@@ -65,7 +65,7 @@ def _muon_parameter_ids(model):
 def _adamw_groups(named_parameters, config):
     grouped = defaultdict(list)
     for name, parameter in named_parameters:
-        head = not name.startswith(("encoder.", "blocks.", "final_norm."))
+        head = name.startswith(("query.", "key.", "value."))
         decay = parameter.ndim >= 2 and not any(
             label in name for label in ("norm", "symbol", "field", "relation", "floor")
         )

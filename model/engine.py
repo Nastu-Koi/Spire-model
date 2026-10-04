@@ -81,7 +81,7 @@ class CliEngine:
             self.proc.stdin.flush()
             return self._read()
 
-    def reset(self, character, seed, ascension=10):
+    def reset(self, character, seed, ascension):
         response = self.send(
             {
                 "cmd": "start_run",

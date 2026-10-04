@@ -113,8 +113,10 @@ public partial class RunSimulator
             else bindings.Add(new(Candidate("TAKE_REWARD", "take:" + reference, reference), Legal,
                 () => menu.Submit(async () =>
                 {
-                    if (!await RunManager.Instance.RewardsSetSynchronizer.SelectLocalReward(reward))
-                        throw new InvalidOperationException("A validated reward was refused.");
+                    // False means the reward was not completed (for example, a
+                    // canceled card removal). The native synchronizer keeps it
+                    // available; resume the menu without treating this as failure.
+                    await RunManager.Instance.RewardsSetSynchronizer.SelectLocalReward(reward);
                 })));
         }
         if (!menu.Set.DisallowSkipping)
@@ -125,13 +127,11 @@ public partial class RunSimulator
                     RunManager.Instance.RewardsSetSynchronizer.SkipLocalRewardsSet();
                     return Task.CompletedTask;
                 })));
-        // Discarding a held potion can make a full-slot potion reward legal. It must
-        // use the menu continuation because an event may already own PendingOperation.
-        foreach (var (potion, reference) in snapshot.Potions)
-            if (potion.Owner.CanUseOrRemovePotions)
-                bindings.Add(new(Candidate("DISCARD_POTION", "discard:" + reference, reference),
-                    () => !menu.Busy && potion.Owner.CanUseOrRemovePotions && potion.Owner.Potions.Contains(potion),
-                    () => menu.Submit(() => PotionCmd.Discard(potion))));
+        // AnyTime potions remain usable while rewards are open. Discard must
+        // retain the menu continuation when an event owns PendingOperation.
+        AddPotionCandidates(snapshot, bindings,
+            available: () => ReferenceEquals(_protocolRewards, menu) && !menu.Busy,
+            discard: potion => menu.Submit(() => PotionCmd.Discard(potion)));
         return PublishSnapshot("rewards", snapshot, bindings);
     }
 
@@ -163,6 +163,16 @@ public partial class RunSimulator
     private Dictionary<string, object?> PublishPostCombatBoundary(CombatRoom room)
     {
         if (!room.IsPreFinished) return NonDecisionBoundary("waiting");
+        // EndCombatInternal marks the room pre-finished before awaiting SaveRun
+        // and emitting CombatWon. Do not generate rewards/travel (or reject a
+        // final victory) during that gap. Waiting remains bounded by the caller.
+        lock (_protocolWon)
+        {
+            if (!_protocolWon.Contains(room)) return NonDecisionBoundary("waiting");
+            // The callback may have run since PublishProtocolBoundary checked
+            // this flag. Read it under the same lock that records the victory.
+            if (_protocolVictory) return NonDecisionBoundary("terminal", new { victory = true });
+        }
         if (_protocolRewardsOffered.Add(room))
         {
             _pendingOperation.Start("combat rewards", async () =>

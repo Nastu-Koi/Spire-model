@@ -12,6 +12,7 @@ from pathlib import Path
 
 import torch
 
+from . import rules
 from .config import ModelConfig, TrainConfig
 from .model import PolicyValue
 from .representation import Vocabulary
@@ -38,9 +39,10 @@ def save_checkpoint(
     stage.mkdir()
     try:
         manifest = {
-            "format": 2,
+            "format": 1,
             "model": asdict(model.config),
-            "vocabulary": vocabulary.symbols,
+            "vocabulary": vocabulary.state(),
+            "rules": rules.digest(),
             "training": asdict(training or TrainConfig()),
             "progress": progress or {},
             "torch_version": str(torch.__version__),
@@ -96,13 +98,12 @@ def save_checkpoint(
 def load_model(path, device="cpu"):
     path = Path(path)
     manifest = json.loads((path / "manifest.json").read_text())
-    if (
-        manifest.get("format") != 2
-        or manifest.get("model", {}).get("architecture_version") != 2
-    ):
-        raise ValueError(
-            "Checkpoint requires architecture v2 (Full Attention/SwiGLU); retrain old hybrid checkpoints"
-        )
+    if manifest.get("format") != 1:
+        raise ValueError("Unsupported checkpoint format")
+    if manifest.get("model", {}).get("architecture_version") != 2:
+        raise ValueError("Unsupported checkpoint architecture version")
+    if manifest.get("rules") != rules.digest():
+        raise ValueError("Checkpoint was trained with different rule text")
     config = ModelConfig(**manifest["model"])
     # Allocate once on the destination without a second full CPU model.
     with torch.device("meta"):
@@ -119,14 +120,14 @@ def load_model(path, device="cpu"):
         del shard
     if loaded != expected:
         raise ValueError("Checkpoint is missing model tensors")
-    vocabulary = Vocabulary(manifest["vocabulary"], config.vocabulary_size)
+    vocabulary = Vocabulary.from_state(manifest["vocabulary"], config)
     return model, vocabulary, manifest
 
 
 def restore_training(path, optimizer, scheduler=None):
     path = Path(path)
     manifest = json.loads((path / "manifest.json").read_text())
-    if manifest.get("format") != 2 or "optimizer" not in manifest:
+    if manifest.get("format") != 1 or "optimizer" not in manifest:
         raise ValueError("Checkpoint has no optimizer state")
     if isinstance(manifest["optimizer"], str):
         restored = torch.load(

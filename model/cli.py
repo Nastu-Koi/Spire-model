@@ -10,7 +10,7 @@ import torch
 
 from .checkpoint import load_model, restore_training, save_checkpoint
 from .config import ModelConfig, TrainConfig
-from .data import audit_files, load_runs
+from .data import RunShards, audit_files, load_runs
 from .engine import CliEngine
 from .history import TrainingHistory
 from .model import PolicyValue
@@ -22,7 +22,7 @@ from .protocol import (
     fingerprint,
     validate_frame,
 )
-from .representation import Vocabulary, symbols_from_frames
+from .representation import Vocabulary
 from .rewards import MilestoneLedger
 from .rollout import RolloutRunner, collect_round, precision_context, write_run
 from .runtime import configure_runtime
@@ -30,9 +30,9 @@ from .seeds import RandomSeedSchedule, validate_evaluation_seeds
 from .trainer import Learner, evaluate_runs
 
 
-def vocabulary_for(runs, capacity):
+def vocabulary_for(runs, config):
     frames = (s["frame"] for r in runs for m in r["macros"] for s in m["steps"])
-    return Vocabulary(symbols_from_frames(frames), capacity)
+    return Vocabulary.from_frames(frames, config)
 
 
 def emit(value):
@@ -50,7 +50,7 @@ def smoke(output):
         action_buckets=[8, 16],
     )
     runs = [demonstration(c, "smoke-demo", 4, 2) for c in CHARACTERS]
-    vocabulary = vocabulary_for(runs, config.vocabulary_size)
+    vocabulary = vocabulary_for(runs, config)
     model = PolicyValue(config)
     learner = Learner(model, vocabulary, training)
     result = {
@@ -107,27 +107,6 @@ def parser():
     )
     x.add_argument("--config", help="Native model/training JSON profile")
     x = sub.add_parser(
-        "benchmark",
-        help="Measure batched replay on disposable weights; no game launches",
-    )
-    x.add_argument("--config", default="configs/rtxpro6000.json")
-    x.add_argument(
-        "--data", help="Optional trajectories; defaults to synthetic decisions"
-    )
-    x.add_argument("--batch-size", type=int, default=4)
-    x.add_argument("--steps", type=int, default=10)
-    x.add_argument("--warmup", type=int, default=2)
-    x.add_argument(
-        "--optimizer-steps",
-        action="store_true",
-        help="Also benchmark clipping and optimizer updates on disposable weights",
-    )
-    x.add_argument("--trace", help="Optional Chrome profiler trace path")
-    x.add_argument("--output", help="Optional JSON report path")
-    x = sub.add_parser("data-stats", help="Read-only observation capacity statistics")
-    x.add_argument("--data", required=True)
-    x.add_argument("--max-runs", type=int, default=32)
-    x = sub.add_parser(
         "init",
         help="Create random weights and a frozen vocabulary from public engine content",
     )
@@ -161,6 +140,18 @@ def parser():
         required=True,
         help="New directory for accepted data, quarantine and summary",
     )
+    x = sub.add_parser(
+        "import-independent",
+        help="Import Spire Codex independent supervised samples as Bootstrap runs",
+    )
+    x.add_argument("samples", help="independent-training.jsonl(.gz) from spire_codex_data export")
+    x.add_argument(
+        "--output",
+        required=True,
+        help="New directory for the accepted shards, index, quarantine and summary",
+    )
+    x.add_argument("--shard-samples", type=int, default=2000,
+                   help="Decision steps per gzip shard; Bootstrap holds a few shards in memory at a time")
     x = sub.add_parser("bootstrap")
     x.add_argument("--data", required=True)
     validation = x.add_mutually_exclusive_group()
@@ -171,6 +162,10 @@ def parser():
         help="Use all supplied runs for Bootstrap without an automatic validation holdout",
     )
     x.add_argument("--epochs", type=int, default=1)
+    x.add_argument("--holdout", type=float, default=0.0,
+                   help="Sharded data only: fraction of seeds kept out of training and used for validation")
+    x.add_argument("--window-shards", type=int, default=8,
+                   help="Sharded data only: shards read into memory and shuffled together")
     x.add_argument("--tiny", action="store_true")
     x.add_argument("--architecture")
     x.add_argument("--config", help="Native model/training JSON profile")
@@ -232,10 +227,6 @@ def parser():
         help="JSON decision frame, or JSONL frames to replay a session",
     )
     x.add_argument("--top-k", type=int, default=5)
-    x = sub.add_parser("monitor", help="Live Bootstrap/PPO training dashboard")
-    x.add_argument("--root", default="runs")
-    x.add_argument("--host", default="127.0.0.1")
-    x.add_argument("--port", type=int, default=8765)
     x = sub.add_parser(
         "play-steam", help="Control a running Steam game through steam_recorder"
     )
@@ -247,6 +238,7 @@ def parser():
     x.add_argument("--engine-root")
     x.add_argument("--character", choices=CHARACTERS, default="Ironclad")
     x.add_argument("--game-seed", default="protocol-inspect")
+    x.add_argument("--ascension", type=int, default=10)
     return p
 
 
@@ -299,6 +291,32 @@ def _save(path, learner, extra=None):
     learner.checkpoint_metadata = metadata
 
 
+def _seeds(runs):
+    return runs.seeds if isinstance(runs, RunShards) else {str(r["seed"]) for r in runs}
+
+
+def _identities(runs):
+    return runs.identities if isinstance(runs, RunShards) else {r["run_id"] for r in runs}
+
+
+def _round_metadata(runs, demonstrations):
+    """Seeds and contracts of a round's rollouts and of the demonstrations it drew on."""
+    if not isinstance(demonstrations, RunShards):
+        return _data_metadata(runs + list(demonstrations))
+    ours, theirs = _data_metadata(runs), demonstrations.metadata()
+    contracts = {
+        fingerprint(c): c
+        for c in ours["training_engine_contracts"] + theirs["training_engine_contracts"]
+    }
+    return {
+        "training_engine_contracts": list(contracts.values()),
+        "training_seeds": sorted(set(ours["training_seeds"]) | set(theirs["training_seeds"])),
+        "training_seed_pool_hash": fingerprint(
+            sorted([ours["training_seed_pool_hash"], theirs["training_seed_pool_hash"]])
+        ),
+    }
+
+
 def _data_metadata(runs):
     contracts = {fingerprint(r["contract"]): r["contract"] for r in runs}
     return {
@@ -314,11 +332,6 @@ def main(argv=None):
     args = parser().parse_args(argv)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if args.command == "monitor":
-        from .monitor import serve
-
-        serve(args.root, args.host, args.port)
-        return 0
     history = None
     try:
         runtime = configure_runtime(args.device, threads=args.threads)
@@ -345,30 +358,6 @@ def main(argv=None):
             with torch.device("meta"):
                 model = PolicyValue(config)
             emit(model.parameter_report())
-        elif args.command == "data-stats":
-            from .benchmark import capacity_report
-
-            emit(capacity_report(args.data, max_runs=args.max_runs))
-        elif args.command == "benchmark":
-            from .benchmark import benchmark
-
-            result = benchmark(
-                args.config,
-                device=args.device,
-                data=args.data,
-                batch_size=args.batch_size,
-                steps=args.steps,
-                warmup=args.warmup,
-                trace=args.trace,
-                optimizer_steps=args.optimizer_steps,
-            )
-            result["runtime"] = runtime
-            if args.output:
-                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-                Path(args.output).write_text(
-                    json.dumps(result, indent=2, allow_nan=False) + "\n"
-                )
-            emit(result)
         elif args.command == "smoke":
             emit(smoke(args.output))
         elif args.command == "init":
@@ -382,7 +371,7 @@ def main(argv=None):
                 with CliEngine(root=args.engine_root) as engine:
                     frames.append(
                         validate_frame(
-                            engine.reset(character, "vocabulary-" + character)
+                            engine.reset(character, "vocabulary-" + character, training.ascension)
                         )
                     )
                     if len(frames) == 1:
@@ -392,7 +381,7 @@ def main(argv=None):
                                 "Engine does not provide a static public vocabulary catalog"
                             )
                         frames.append(catalog)
-            vocabulary = Vocabulary(symbols_from_frames(frames), config.vocabulary_size)
+            vocabulary = Vocabulary.from_frames(frames, config)
             with torch.device(args.device):
                 model = PolicyValue(config)
             learner = Learner(model, vocabulary, training)
@@ -426,12 +415,25 @@ def main(argv=None):
             emit(summary)
             if not summary["accepted_runs"]:
                 return 2
+        elif args.command == "import-independent":
+            from .independent import import_samples
+
+            summary = import_samples(args.samples, args.output, args.shard_samples)
+            emit(summary)
+            if not summary["accepted_runs"]:
+                return 2
         elif args.command == "inspect":
             with CliEngine(root=args.engine_root) as engine:
-                frame = engine.reset(args.character, args.game_seed)
+                frame = engine.reset(args.character, args.game_seed, args.ascension)
             emit(frame)
         elif args.command == "bootstrap":
-            runs = load_runs(args.data)
+            streamed = RunShards.is_at(args.data)
+            runs = RunShards(args.data) if streamed else load_runs(args.data)
+            if streamed and not args.checkpoint:
+                raise ProtocolError(
+                    "Sharded data is read as a stream and cannot rebuild a vocabulary: "
+                    "create a checkpoint with `init` and pass --checkpoint"
+                )
             if not runs:
                 report = Path(args.data).parent / "summary.json"
                 detail = f" See import report: {report}" if report.exists() else ""
@@ -440,14 +442,15 @@ def main(argv=None):
                     " Import eligible recordings before starting Bootstrap." + detail
                 )
             if args.validation:
-                validation = load_runs(args.validation)
-                if {r["seed"] for r in runs} & {r["seed"] for r in validation} or {
-                    r["run_id"] for r in runs
-                } & {r["run_id"] for r in validation}:
+                validation = (RunShards(args.validation) if RunShards.is_at(args.validation)
+                              else load_runs(args.validation))
+                if _seeds(runs) & _seeds(validation) or _identities(runs) & _identities(validation):
                     raise ProtocolError("Training/validation run or seed overlap")
+            elif streamed and args.holdout:
+                runs, validation = runs.split(args.holdout)
             else:
                 validation = []
-            if not any(r["macros"] for r in runs):
+            if not (runs.counts if streamed else any(r["macros"] for r in runs)):
                 raise ProtocolError(
                     "No accepted behavior-cloning samples in the training split "
                     f"({len(runs)} training runs, {len(validation)} validation runs). "
@@ -455,6 +458,12 @@ def main(argv=None):
                 )
             if args.checkpoint:
                 learner, _ = _learner(args.checkpoint, args.device)
+                # What an earlier session trained on stays training data for this one.
+                seen = set(map(str, learner.checkpoint_metadata.get("training_seeds", [])))
+                if validation and seen & _seeds(validation):
+                    raise ProtocolError(
+                        "Validation seed overlaps the checkpoint's training seeds"
+                    )
             else:
                 profile = (
                     json.loads(Path(args.config).read_text()) if args.config else None
@@ -468,7 +477,7 @@ def main(argv=None):
                     if args.architecture
                     else ModelConfig()
                 )
-                vocab = vocabulary_for(runs, config.vocabulary_size)
+                vocab = vocabulary_for(runs, config)
                 with torch.device(args.device):
                     model = PolicyValue(config)
                 learner = Learner(
@@ -482,7 +491,7 @@ def main(argv=None):
             start_epoch = getattr(learner, "checkpoint_metadata", {}).get(
                 "completed_bootstrap_epochs", 0
             )
-            metadata = {"runtime": runtime, **_data_metadata(runs)}
+            metadata = {"runtime": runtime, **(runs.metadata() if streamed else _data_metadata(runs))}
             epoch_started = time.monotonic()
 
             def epoch_done(index, metrics):
@@ -513,7 +522,7 @@ def main(argv=None):
                 epoch_started = time.monotonic()
 
             history.status("updating", round=start_epoch + 1)
-            learner.bootstrap(runs, args.epochs, on_epoch=epoch_done)
+            learner.bootstrap(runs, args.epochs, on_epoch=epoch_done, window_shards=args.window_shards)
             history.status("completed", round=start_epoch + args.epochs)
         elif args.command == "infer":
             model, vocabulary, manifest = load_model(args.checkpoint, args.device)
@@ -575,7 +584,8 @@ def main(argv=None):
                     )
             learner, manifest = _learner(args.checkpoint, args.device)
             auxiliary_runs = (
-                load_runs(args.demonstrations)
+                (RunShards(args.demonstrations) if RunShards.is_at(args.demonstrations)
+                 else load_runs(args.demonstrations))
                 if args.command == "train"
                 and args.demonstrations
                 and learner.config.bootstrap_coef
@@ -603,6 +613,7 @@ def main(argv=None):
                     precision=learner.config.precision,
                     version=learner.policy_version,
                     max_steps=args.max_steps,
+                    ascension=learner.config.ascension,
                 )
                 paths = collect_round(
                     factory,
@@ -640,6 +651,7 @@ def main(argv=None):
                         precision=learner.config.precision,
                         version=learner.policy_version,
                         max_steps=args.max_steps,
+                        ascension=learner.config.ascension,
                     )
                     if schedule:
                         assigned = schedule.next()
@@ -707,7 +719,7 @@ def main(argv=None):
                             learner,
                             {
                                 "runtime": runtime,
-                                **_data_metadata(runs + used_demonstrations),
+                                **_round_metadata(runs, used_demonstrations),
                                 **seed_metadata,
                                 "sampling_round": round_index,
                                 "completed_ppo_rounds": completed_ppo_rounds,

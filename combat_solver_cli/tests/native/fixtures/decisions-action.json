@@ -1,0 +1,42 @@
+{
+  "Kind": "PlayCard",
+  "Turn": 2,
+  "CardId": "DECISIONS_DECISIONS",
+  "CardOccurrence": 0,
+  "TargetIndex": -1,
+  "TargetCombatId": null,
+  "CardTitle": "DECISIONS_DECISIONS.title",
+  "TargetName": "",
+  "Choice": {
+    "Effect": "AutoPlayRepeated",
+    "SourcePile": "Hand",
+    "Cards": [
+      {
+        "CardId": "VENERATE",
+        "UpgradeLevel": 0,
+        "StateKey": "VENERATE+0|energy=False:1|stars=False:-1|replay=0|exhaust=False|sly=False|retain=False|deck=True|keywords=|vars=Stars=2|-|:0|baselib=-",
+        "SourceOccurrence": 0,
+        "OptionOccurrence": 0,
+        "Title": "VENERATE.title"
+      }
+    ],
+    "SourceId": "",
+    "ContextId": "",
+    "Timing": "Action"
+  },
+  "NestedChoices": null,
+  "NestedChoicesBeforePrimary": 0,
+  "PotionSlot": -1,
+  "PotionId": "",
+  "PotionTitle": "",
+  "TurnStartChoices": null,
+  "RelicEffects": null,
+  "ReplayCount": 0,
+  "CardStateKey": "DECISIONS_DECISIONS+0|energy=False:0|stars=False:6|replay=0|exhaust=False|sly=False|retain=False|deck=True|keywords=Exhaust|vars=Cards=3;Repeat=3|-|:0|baselib=-",
+  "CardStateOccurrence": 0,
+  "EndsPlayerTurn": false,
+  "CardUpgradeLevel": 0,
+  "CardEnchantmentId": "",
+  "IsExecutable": true,
+  "ActionTitle": "DECISIONS_DECISIONS.title"
+}

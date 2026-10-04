@@ -3,3 +3,5 @@ obj/
 artifacts/
 __pycache__/
 benchmarks/
+# Pinned third-party solver (CombatSolver.dll, its manifest) and the local config.json.
+/lib/

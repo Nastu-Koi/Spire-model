@@ -1,0 +1,42 @@
+{
+  "Kind": "PlayCard",
+  "Turn": 1,
+  "CardId": "SEEKER_STRIKE",
+  "CardOccurrence": 0,
+  "TargetIndex": 0,
+  "TargetCombatId": 1,
+  "CardTitle": "SEEKER_STRIKE.title",
+  "TargetName": "FUZZY_WURM_CRAWLER.name",
+  "Choice": {
+    "Effect": "MoveToHand",
+    "SourcePile": "Draw",
+    "Cards": [
+      {
+        "CardId": "DEFEND_DEFECT",
+        "UpgradeLevel": 0,
+        "StateKey": "DEFEND_DEFECT+0|energy=False:1|stars=False:-1|replay=0|exhaust=False|sly=False|retain=False|deck=True|keywords=|vars=Block=5|-|:0|baselib=-",
+        "SourceOccurrence": 3,
+        "OptionOccurrence": 0,
+        "Title": "DEFEND_DEFECT.title"
+      }
+    ],
+    "SourceId": "",
+    "ContextId": "seeker:7:DEFEND_DEFECT+0,DEFEND_DEFECT+0,DEFEND_DEFECT+0",
+    "Timing": "Action"
+  },
+  "NestedChoices": null,
+  "NestedChoicesBeforePrimary": 0,
+  "PotionSlot": -1,
+  "PotionId": "",
+  "PotionTitle": "",
+  "TurnStartChoices": null,
+  "RelicEffects": null,
+  "ReplayCount": 0,
+  "CardStateKey": "SEEKER_STRIKE+0|energy=False:1|stars=False:-1|replay=0|exhaust=False|sly=False|retain=False|deck=True|keywords=|vars=Cards=3;Damage=9|-|:0|baselib=-",
+  "CardStateOccurrence": 0,
+  "EndsPlayerTurn": false,
+  "CardUpgradeLevel": 0,
+  "CardEnchantmentId": "",
+  "IsExecutable": true,
+  "ActionTitle": "SEEKER_STRIKE.title"
+}

@@ -1,0 +1,33 @@
+{
+    "model": {
+        "architecture_version": 2,
+        "hidden_size": 128,
+        "num_heads": 4,
+        "layers": 2,
+        "ffn_size": 344,
+        "local_size": 48,
+        "local_heads": 4,
+        "local_layers": 1,
+        "vocabulary_size": 8192,
+        "field_size": 1024,
+        "relation_size": 128,
+        "backend": "sdpa",
+        "encoder_precision": "inherit",
+        "checkpoint_layers": false,
+        "compile_blocks": false
+    },
+    "training": {
+        "epochs": 30,
+        "batch_size": 64,
+        "lr": 0.001,
+        "weight_decay": 0.01,
+        "max_grad_norm": 1.0,
+        "warmup_fraction": 0.1,
+        "defeat_weight": 0.1,
+        "summary_entity": false,
+        "ridge_base": false,
+        "holdout": 0.2,
+        "seed": 0,
+        "loader_workers": 8
+    }
+}

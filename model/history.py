@@ -1,4 +1,4 @@
-"""Durable per-round records shared by trainers and the monitoring page."""
+"""Durable per-round training records."""
 
 import fcntl
 import json

@@ -12,9 +12,8 @@ __pycache__/
 /data/
 /build/
 /dist/
-steam_recorder/bin/
-steam_recorder/obj/
-steam_recorder/tests/RecorderChecks/bin/
-steam_recorder/tests/RecorderChecks/obj/
+bin/
+obj/
 .ruff_cache/
 .DS_Store
+/.scratch

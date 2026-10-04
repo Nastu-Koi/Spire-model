@@ -89,3 +89,28 @@ def test_failed_verification_keeps_evidence_without_training_export(tmp_path, op
     assert not (output / "accepted.jsonl.tmp").exists()
     assert (output / "failed_replay_trace.jsonl").exists()
     assert json.loads((output / "verification_error.json").read_text())["message"]
+
+
+def test_verification_preserves_source_act_configuration(tmp_path):
+    prefix,pinned=replay_inputs(tmp_path)
+    data=json.loads(prefix.read_text());data['acts']=['ACT.OVERGROWTH','ACT.HIVE','ACT.GLORY']
+    prefix.write_text(json.dumps(data))
+    class ActsEngine(FakeEngine):
+        def send(self,command):
+            if command['cmd']=='start_run':
+                assert command['acts']==data['acts']
+                return self.reset(command['character'],command['seed'],command['ascension'])
+            return super().send(command)
+    with patch.object(trajectory,'configuration',return_value=pinned),patch.object(trajectory,'SolverEngine',side_effect=lambda _:ActsEngine()):
+        result=trajectory.verify_and_export('config',prefix,tmp_path/'export')
+    assert result['provenance']['initialization']['acts']==data['acts']
+
+
+def test_fixed_rule_steps_remain_in_proof_but_not_policy_samples(tmp_path):
+    prefix,pinned=replay_inputs(tmp_path)
+    data=json.loads(prefix.read_text());data['records'][0].update(actor='crystal_sphere_rule',policy_excluded=True)
+    prefix.write_text(json.dumps(data))
+    with patch.object(trajectory,'configuration',return_value=pinned),patch.object(trajectory,'SolverEngine',side_effect=lambda _:FakeEngine()):
+        result=trajectory.verify_and_export('config',prefix,tmp_path/'export')
+    assert result['macros']==[] and result['automatic_steps']==1
+    assert json.loads((tmp_path/'export'/'verified_trace.jsonl').read_text().splitlines()[0])['actor']=='crystal_sphere_rule'
