@@ -23,7 +23,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 {
 	private const BindingFlags Flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
-	private object? _selector;
+	private ChoiceTransaction? _selector;
 
 	private List<CardModel>? _selectedCards;
 
@@ -97,6 +97,8 @@ internal sealed class SolverAdapter(Assembly assembly)
 
 	public void PrepareEngine()
 	{
+		PortfolioDeadline.Install(assembly);
+		NativeSelectionBridge.Install();
 		// Restore the native Neutralize action; the CLI legacy prefix bypasses native attack commands.
 		// Keep the solver patch audit enabled and remove only this known compatibility prefix.
 		MethodInfo method = typeof(Neutralize).GetMethod("OnPlay", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
@@ -118,9 +120,25 @@ internal sealed class SolverAdapter(Assembly assembly)
 
 	private void ClearSelection()
 	{
+		NativeSelectionBridge.Activate(null);
+		_selector?.Dispose();
 		_selector = null;
 		_selectedCards = null;
 		_selectionId = null;
+	}
+
+	public void ObserveBoundary(JsonElement frame)
+	{
+		if (_selector == null) return;
+		_selector.Check();
+		if (frame.GetProperty("boundary").GetString() == "waiting") return;
+		var pub = frame.GetProperty("public");
+		if (pub.TryGetProperty("selection_context", out var selection) && selection.ValueKind == JsonValueKind.Object) return;
+		bool combatEnded = !CombatManager.Instance.IsInProgress
+			|| frame.GetProperty("boundary").GetString() == "terminal" && CombatManager.Instance.IsOverOrEnding;
+		if (!combatEnded && (pub.GetProperty("phase").GetString() is "card_reward" or "bundle_select")) return;
+		_selector.FinishAction(combatEnded);
+		ClearSelection();
 	}
 
 	private static void CheckRequest(JsonElement request, JsonElement frame)
@@ -163,6 +181,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 
 	public object Step(JsonElement request, JsonElement frame, object simulator)
 	{
+		ObserveBoundary(frame);
 		CheckRequest(request, frame);
 		if (_poisoned)
 		{
@@ -178,7 +197,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 		// Return the unchanged boundary so the run search can retain every legal branch.
 		if (_selector == null &&
 			((frame.GetProperty("public").TryGetProperty("selection_context", out var selection) && selection.ValueKind == JsonValueKind.Object)
-			 || frame.GetProperty("public").GetProperty("phase").GetString() == "card_reward"))
+			 || frame.GetProperty("public").GetProperty("phase").GetString() is "card_reward" or "bundle_select"))
 		{
 			return new { type = "solver_selection_required", frame = frame };
 		}
@@ -189,6 +208,10 @@ internal sealed class SolverAdapter(Assembly assembly)
 		{
 			jsonElement = SelectCandidate(runSimulator, frame, value);
 		}
+		else if (frame.GetProperty("public").GetProperty("phase").GetString() == "bundle_select")
+		{
+			jsonElement = SelectBundle(runSimulator, frame);
+		}
 		else if (frame.GetProperty("public").GetProperty("phase").GetString() == "card_reward")
 		{
 			jsonElement = SelectReward(runSimulator, frame);
@@ -197,8 +220,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 		{
 			if (_selector != null)
 			{
-				_selector.GetType().GetMethod("ReconcileImplicitChoices", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).Invoke(_selector, new object[1] { player });
-				_selector.GetType().GetMethod("AssertConsumed", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).Invoke(_selector, null);
+				_selector.FinishAction();
 				ClearSelection();
 			}
 			bool reuse = request.TryGetProperty("reuse_turn_plan", out var reuseValue) && reuseValue.GetBoolean();
@@ -232,17 +254,13 @@ internal sealed class SolverAdapter(Assembly assembly)
 			{
 				list.AddRange((((IEnumerable)Get(obj2, "TurnStartChoices")) ?? Array.Empty<object>()).Cast<object>());
 			}
-			Array array = Array.CreateInstance(Type("PlanCardChoice"), list.Count);
-			for (int num = 0; num < list.Count; num++)
-			{
-				array.SetValue(list[num], num);
-			}
-			_selector = New("PlannedCardSelector", array);
-			_selector.GetType().GetMethod("CaptureBefore", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).Invoke(_selector, new object[1] { player });
+			_selector = new ChoiceTransaction(list, player, card => (string)Call("CardChoiceSupport", "ChoiceCardKey", card)!);
+			NativeSelectionBridge.Activate(_selector);
 		}
 		JsonElement property = frame.GetProperty("routing");
 		JsonElement value2;
 		Dictionary<string, object> frame2 = runSimulator.ExecuteCandidate(property.GetProperty("decision_id").GetString(), property.GetProperty("state_version").GetInt64(), jsonElement.GetProperty("candidate_ref").GetString(), property.TryGetProperty("selection_revision", out value2) ? new long?(value2.GetInt64()) : ((long?)null));
+		ObserveBoundary(JsonSerializer.SerializeToElement(frame2));
 		return new
 		{
 			type = "solver_step",
@@ -320,18 +338,14 @@ internal sealed class SolverAdapter(Assembly assembly)
 		string text = frame.GetProperty("routing").GetProperty("selection_id").GetString();
 		if (_selectionId != text)
 		{
-			Task<IEnumerable<CardModel>> task = (Task<IEnumerable<CardModel>>)_selector.GetType().GetMethod("GetSelectedCards", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).Invoke(_selector, new object[3]
-			{
-				list,
-				context.GetProperty("min_total").GetInt32(),
-				context.GetProperty("max_total").GetInt32()
-			});
-			_selectedCards = task.GetAwaiter().GetResult().ToList();
+			_selectedCards = _selector.Select(list, context.GetProperty("min_total").GetInt32(),
+				context.GetProperty("max_total").GetInt32()).ToList();
 			_selectionId = text;
 		}
 		int @int = context.GetProperty("selected_count").GetInt32();
 		if (@int == _selectedCards.Count)
 		{
+			if (_selectedCards.Count == 0 && context.GetProperty("min_total").GetInt32() > 0) return Find(frame, "CANCEL");
 			return Find(frame, "FINISH_SELECTION");
 		}
 		JsonElement[] array = frame.GetProperty("legal").GetProperty("candidates").EnumerateArray()
@@ -349,6 +363,15 @@ internal sealed class SolverAdapter(Assembly assembly)
 		return Find(frame, "SELECT_ONE", ((Dictionary<CardModel, string>)Get(obj, "Cards"))[_selectedCards[@int]]);
 	}
 
+	private JsonElement SelectBundle(RunSimulator sim, JsonElement frame)
+	{
+		var bundles = (IReadOnlyList<IReadOnlyList<CardModel>>)typeof(RunSimulator).GetField("_pendingBundles", Flags)!.GetValue(sim)!;
+		var selected = _selector!.Select(bundles.SelectMany(b => b), 0, int.MaxValue);
+		var indices = Enumerable.Range(0, bundles.Count).Where(i => bundles[i].SequenceEqual(selected)).ToArray();
+		if (indices.Length != 1) throw new InvalidOperationException("Planned bundle has no unique native match");
+		return Find(frame, "SELECT_BUNDLE", $"bundle:{indices[0]}");
+	}
+
 	private JsonElement SelectReward(RunSimulator sim, JsonElement frame)
 	{
 		if (_selector == null)
@@ -357,10 +380,15 @@ internal sealed class SolverAdapter(Assembly assembly)
 		}
 		object value = typeof(RunSimulator).GetField("_cardSelector", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).GetValue(sim);
 		object obj = Get(value, "PendingRewardCards");
-		object obj2 = Get(value, "PendingRewardAlternatives");
-		object obj3 = _selector.GetType().GetMethod("GetSelectedCardReward", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).Invoke(_selector, new object[2] { obj, obj2 });
-		object? value2 = obj3.GetType().GetField("card", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).GetValue(obj3);
-		CardModel key = (CardModel)(((value2 is CardModel) ? value2 : null) ?? throw new InvalidOperationException("Solver requested an unadapted combat reward alternative"));
+		var chosen = _selector.Select(((IEnumerable)obj).Cast<object>().Select(item => (CardModel)Get(item, "Card")!), 0, 1);
+		if (chosen.Length == 0)
+		{
+			var alternatives = ((IEnumerable)Get(value, "PendingRewardAlternatives")!).Cast<object>().ToArray();
+			int skip = Array.FindIndex(alternatives, a => Get(a, "OptionId")?.ToString()?.Equals("Skip", StringComparison.OrdinalIgnoreCase) == true);
+			if (skip < 0) throw new InvalidOperationException("Planned empty reward has no legal skip");
+			return Find(frame, "CHOOSE_REWARD_ALTERNATIVE", $"reward_alternative:{skip}");
+		}
+		CardModel key = chosen.Single();
 		object obj4 = Snapshot(sim);
 		foreach (object item in (IEnumerable)obj)
 		{
@@ -376,6 +404,8 @@ internal sealed class SolverAdapter(Assembly assembly)
 
 	private object Search(JsonElement request, JsonElement frame)
 	{
+		ObserveBoundary(frame);
+		if (_selector != null) throw new InvalidOperationException("Cannot search during a pending execution selection");
 		if (_poisoned)
 		{
 			throw new InvalidOperationException("Solver isolation failed; restart this worker");
@@ -429,7 +459,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 				Console.Error.WriteLine(s);
 			};
 			object obj8 = New("SearchDiagnosticsSink", action, action, null);
-			object obj9 = New("SearchPolicySnapshot", obj5, obj6, obj7, false, false, false, false, 1, num, false, null, System.Enum.ToObject(Type("BossHpStrategy"), 0), System.Enum.ToObject(Type("BossHpStrategy"), 0), 0, obj8, New("SearchFramePressureSignal"), New("SearchMemoryPressureSignal"));
+			object obj9 = New("SearchPolicySnapshot", obj5, obj6, obj7, false, false, true, false, 1, num, false, null, System.Enum.ToObject(Type("BossHpStrategy"), 0), System.Enum.ToObject(Type("BossHpStrategy"), 0), 0, obj8, New("SearchFramePressureSignal"), New("SearchMemoryPressureSignal"));
 			bool portfolio = !request.TryGetProperty("beam_portfolio", out var portfolioValue) || portfolioValue.GetBoolean();
 			Type("SearchPolicySnapshot").GetProperty("UseBeamWidthPortfolio", Flags)!.SetValue(obj9, portfolio);
 			var combat = (CombatState)obj;

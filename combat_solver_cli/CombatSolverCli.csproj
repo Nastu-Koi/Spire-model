@@ -6,6 +6,7 @@
     <Nullable>annotations</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
     <ProjectReference Include="../sts2-cli/src/Sts2Headless/Sts2Headless.csproj" />
     <Reference Include="sts2"><HintPath>../sts2-cli/lib/sts2.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="0Harmony"><HintPath>../sts2-cli/lib/0Harmony.dll</HintPath><Private>false</Private></Reference>

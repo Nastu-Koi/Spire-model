@@ -73,7 +73,11 @@ def verify_and_export(config, prefix_path, output, timeout=600):
     ledger, actors, macros = MilestoneLedger(), Counter(), []
     try:
         with SolverEngine(config) as engine, raw_temp.open("x") as stream:
-            frame = engine.reset(data["character"], data["seed"], ascension)
+            if data.get("acts"):
+                frame = engine.send(dict(cmd="start_run", character=data["character"],
+                    seed=str(data["seed"]), ascension=ascension, acts=data["acts"], decision_protocol=True))
+            else:
+                frame = engine.reset(data["character"], data["seed"], ascension)
             contract = frame["contract"]
             run_id = frame["routing"]["episode_id"]
 
@@ -101,7 +105,7 @@ def verify_and_export(config, prefix_path, output, timeout=600):
                 step = {
                     "frame": clean_frame(frame),
                     "candidate_ref": candidate["candidate_ref"],
-                    "forced": len(frame["legal"]["candidates"]) == 1,
+                    "forced": len(frame["legal"]["candidates"]) == 1 or record.get("policy_excluded") is True,
                 }
                 key = segment_key(frame)
                 if key != previous:
@@ -167,6 +171,8 @@ def verify_and_export(config, prefix_path, output, timeout=600):
                 "bosses": sorted(ledger.bosses),
                 "actors": dict(actors),
                 "search": data.get("search", {}),
+                "initialization": dict(character=data["character"],seed=data["seed"],
+                    ascension=ascension,acts=data.get("acts")),
                 "raw_sha256": hashlib.sha256(raw_temp.read_bytes()).hexdigest(),
                 "solver_sha256": pinned["solver_dll_sha256"],
                 "game_sha256": pinned["game_dll_sha256"],

@@ -50,9 +50,9 @@ def test_query_stable_and_rejected_commands_do_not_edit_prefix(game):
     frame = smith(game)
     assert frame["boundary"] == "decision", frame
     assert frame["contract"]["training_ready"] is False
-    assert (
-        len(frame["legal"]["candidates"]) == 11
-    )  # Native Smith also permits canceling.
+    # Ten upgradable cards. Native Smith is cancelable, but outside combat the
+    # protocol never offers the undo.
+    assert len(frame["legal"]["candidates"]) == 10
     assert frame == advance(game)
     for overrides, code in [
         ({"state_version": -1}, "stale_decision"),
@@ -79,15 +79,65 @@ def test_query_stable_and_rejected_commands_do_not_edit_prefix(game):
     assert result["events"][0]["type"] == "candidate_executed"
     assert advance(game)["events"] == []
     assert execute(game, frame)["error"]["code"] == "stale_decision"
-    assert [c["verb"] for c in result["legal"]["candidates"]] == [
-        "FINISH_SELECTION",
-        "CANCEL",
-    ]
+    assert [c["verb"] for c in result["legal"]["candidates"]] == ["FINISH_SELECTION"]
     finished = execute(game, result)
     assert finished["boundary"] == "decision"
     assert finished["public"]["phase"] == "map"
     state = game.set_player()
     assert sum(card["upgraded"] for card in state["player"]["deck"]) == 1
+
+
+def settle(game, frame):
+    while frame.get("boundary") == "waiting":
+        frame = advance(game)
+    return frame
+
+
+def deck_size(frame):
+    # Reading through set_player would invalidate the live decision handle.
+    return sum(e.get("entity_type") == "card" and e.get("zone") == "deck"
+               for e in frame["public"]["entities"])
+
+
+def assert_no_cancel(frame):
+    assert frame["contract"]["selection_cancel"] == "combat-or-dead-end-v1"
+    assert frame["public"]["selection_context"]["can_cancel"] is False
+    assert "CANCEL" not in {c["verb"] for c in frame["legal"]["candidates"]}
+    assert "CANCEL" not in {c["verb"] for c in frame["public"]["decoder_bank"]}
+
+
+def test_noncombat_smith_commits_without_cancel(game):
+    frame = smith(game)
+    assert_no_cancel(frame)
+    card = next(c for c in frame["legal"]["candidates"] if c["verb"] == "SELECT_ONE")
+    frame = settle(game, execute(game, frame, card))
+    assert_no_cancel(frame)
+    assert [c["verb"] for c in frame["legal"]["candidates"]] == ["FINISH_SELECTION"]
+
+
+def test_shop_removal_commits_without_cancel(game):
+    prepare(game)
+    game.enter_room("shop")
+    frame = settle(game, advance(game))
+    assert frame["public"]["phase"] == "shop"
+    removal_refs = {e["ref"] for e in frame["public"]["entities"]
+                    if e.get("content_id") == "MerchantCardRemovalEntry"}
+    buy = next(c for c in frame["legal"]["candidates"]
+               if c["verb"] == "BUY_ITEM" and set(c["source_refs"]) & removal_refs)
+    before = deck_size(frame)
+    frame = settle(game, execute(game, frame, buy))
+    assert frame.get("boundary") == "decision", frame
+    assert frame["public"]["phase"] == "card_select"
+    assert frame["public"]["selection_context"]["operation"] == "remove"
+    assert_no_cancel(frame)
+    card = next(c for c in frame["legal"]["candidates"] if c["verb"] == "SELECT_ONE")
+    frame = settle(game, execute(game, frame, card))
+    assert [c["verb"] for c in frame["legal"]["candidates"]] == ["FINISH_SELECTION"]
+    frame = settle(game, execute(game, frame))
+    assert frame["public"]["phase"] == "shop"
+    assert not any(c["verb"] == "BUY_ITEM" and set(c["source_refs"]) & removal_refs
+                   for c in frame["legal"]["candidates"])
+    assert deck_size(frame) == before - 1
 
 
 @pytest.mark.parametrize("indices", ["-1", "500", "0,0", "0,1", "0,x", "", "0,"])
@@ -97,7 +147,7 @@ def test_legacy_selection_rejects_invalid_array_without_completing(game, indices
     frame = advance(game)
     assert frame["boundary"] == "decision"
     assert frame["public"]["selection_context"]["selected_count"] == 0
-    assert len(frame["legal"]["candidates"]) == 11
+    assert len(frame["legal"]["candidates"]) == 10
     assert game.act("skip_select")["type"] == "error"
     state = game.act("select_cards", indices="0")
     assert sum(card["upgraded"] for card in state["player"]["deck"]) == 1

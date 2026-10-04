@@ -95,11 +95,7 @@ def card_fields(raw):
     }.items():
         if src in raw:
             result[dst] = raw[src]
-    result["stats"] = {
-        k: v.get("base_value")
-        for k, v in (raw.get("vars") or {}).items()
-        if isinstance(v, dict)
-    }
+    result["stats"] = base_values(raw)
     if result["content_id"] == "CARD.MAD_SCIENCE":
         variant = raw.get("mad_science") or {}
         require(
@@ -119,6 +115,27 @@ def card_fields(raw):
     return result
 
 
+def base_values(raw):
+    """Displayed variables of a recorded model, as the engine exports them."""
+    return {
+        k: v.get("base_value")
+        for k, v in (raw.get("vars") or {}).items()
+        if isinstance(v, dict)
+    }
+
+
+SELECTION_CANCEL = "combat-or-dead-end-v1"
+NONCOMBAT_CANCEL = "Non-combat selection cancel is an undo, not a label"
+CANCEL_OPENERS = {"rest_site", "shop", "rewards"}
+
+
+def cancel_offered(state, cancelable, can_finish, can_select):
+    """Outside combat a native cancel only restores the state before the
+    action that opened the selection, so it is offered only when nothing else is."""
+    in_combat = bool((state.get("combat") or {}).get("in_progress"))
+    return bool(cancelable) and (in_combat or (not can_finish and not can_select))
+
+
 class PublicSnapshot:
     def __init__(self, state):
         players = state.get("players", [])
@@ -134,6 +151,7 @@ class PublicSnapshot:
             {
                 **{k: player["creature"].get(k) for k in ("hp", "max_hp", "block")},
                 "character": player["character"],
+                "ascension": run.get("ascension"),
                 "act": run["act"],
                 "floor": run["floor"],
                 "gold": player["gold"],
@@ -142,6 +160,8 @@ class PublicSnapshot:
                 "stars": pcs.get("stars"),
                 "round": combat.get("round"),
                 "capacity": player.get("max_potions"),
+                # Absent from recordings made before the mod exported it: unknown.
+                "free_travel": run.get("free_travel"),
             },
         )
         self.powers(player["creature"], "player")
@@ -177,15 +197,17 @@ class PublicSnapshot:
                 )
         for relic in player.get("relics", []):
             cid = content_id(relic, "relic")
-            self.entities.append(
-                {
-                    "entity_type": "relic",
-                    "content_id": cid,
-                    "owner_ref": "player",
-                    "effect_coverage": "opaque",
-                    "semantic_program": opaque(cid),
-                }
-            )
+            entity = {
+                "entity_type": "relic",
+                "content_id": cid,
+                "owner_ref": "player",
+                "stats": base_values(relic),
+                "effect_coverage": "opaque",
+                "semantic_program": opaque(cid),
+            }
+            if relic.get("show_counter"):
+                entity["counter"] = relic.get("counter")
+            self.entities.append(entity)
         for slot in player.get("potions", []):
             potion = slot.get("potion")
             if potion:
@@ -243,6 +265,7 @@ class PublicSnapshot:
                     "content_id": content_id(power, "power"),
                     "owner_ref": ref,
                     "stacks": power.get("amount"),
+                    "stats": base_values(power),
                 }
             )
 
@@ -546,7 +569,7 @@ def decision_macro(decision, run_id, contract):
         "Unknown pre-decision boundary",
     )
     state = decision["state"]
-    require(state["run"].get("ascension") == 10, "Recording is not A10")
+    require(state["run"].get("ascension") == contract["fixed_ascension"], "Decision ascension differs from the run")
     legal = state.get("legal") or {}
     require(
         legal.get("schema") == 1 and legal.get("status") == "complete",
@@ -576,8 +599,8 @@ def decision_macro(decision, run_id, contract):
             "Selection requires a recorded prefix path; final set alone is insufficient",
         )
         require(
-            selection.get("cancelable") is False,
-            "Legacy cancelable selection lacks explicit cancel candidates",
+            not cancel_offered(state, selection.get("cancelable"), False, True),
+            "Cancelable selection lacks explicit cancel candidates",
         )
         choice = {"command": "select_card", "args": {"card_instance_id": ids[0]}}
     matches = [i for i, action in enumerate(actions) if action == choice]
@@ -668,9 +691,17 @@ def selection_macro(decision, run_id, contract, snapshot):
         {"command": "finish_selection", "args": {}},
         {"command": "cancel", "args": {}},
     )
-    raw_bank = offered + [finish] + ([cancel] if cancelable else [])
-    bank = [snapshot.action(a, i, "card_select") for i, a in enumerate(raw_bank)]
     require(len(path["steps"]) == len(result) + 1, "Incomplete selection prefix path")
+    state = decision["state"]
+    offers = [
+        cancel_offered(state, cancelable, revision >= minimum,
+                       revision < maximum and len(ids) > revision)
+        for revision in range(len(path["steps"]))
+    ]
+    if len(result) < minimum and not offers[len(result)]:
+        raise ProtocolError(NONCOMBAT_CANCEL)
+    raw_bank = offered + [finish] + ([cancel] if any(offers) else [])
+    bank = [snapshot.action(a, i, "card_select") for i, a in enumerate(raw_bank)]
     steps = []
     for revision, part in enumerate(path["steps"]):
         prefix = result[:revision]
@@ -685,11 +716,13 @@ def selection_macro(decision, run_id, contract, snapshot):
         )
         if len(prefix) >= minimum:
             expected += [finish]
-        if cancelable:
-            expected += [cancel]
+        # The recorder masks the native UI, which always shows cancel when cancelable.
         require(
-            part["actions"] == expected, "Incomplete or invented selection prefix mask"
+            part["actions"] == expected + ([cancel] if cancelable else []),
+            "Incomplete or invented selection prefix mask",
         )
+        if offers[revision]:
+            expected += [cancel]
         label = (
             {"command": "select_card", "args": {"card_instance_id": result[revision]}}
             if revision < len(result)
@@ -812,6 +845,8 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
     rows, digest = read_journal(path)
     require(rows[0]["kind"] == "segment_start", "Missing segment start")
     start = rows[0]["data"]
+    ascension = start["state"]["run"].get("ascension")
+    require(type(ascension) is int and 0 <= ascension <= 10, "Recording has no ascension from 0 to 10")
     if recorder_version is not None:
         require(
             start.get("recorder_version") == recorder_version,
@@ -843,7 +878,7 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
         require(
             terminal.get("ended") is True
             and terminal.get("victory") == endings[0]["victory"]
-            and terminal.get("ascension") == 10,
+            and terminal.get("ascension") == ascension,
             "Terminal snapshot does not confirm outcome",
         )
         require(
@@ -860,7 +895,6 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
             "Repeated segment start",
         )
     state = start["state"]
-    require(state["run"].get("ascension") == 10, "Recording is not A10")
     require(len(state["players"]) == 1, "Only single-player recordings are supported")
     character = next(
         (x for x in CHARACTERS if x.upper() == state["players"][0]["character"]), None
@@ -888,9 +922,9 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
         verify_teachers(decisions)
     contract = {
         "adapter_version": IMPORT_VERSION,
-        "observation_schema": "public-state-v1",
+        "observation_schema": "public-state-v3",
         "action_schema": "candidate-v0",
-        "fixed_ascension": 10,
+        "fixed_ascension": ascension,
         "training_ready": True,
         "game_version": start["game_version"],
         "recorder_version": start["recorder_version"],
@@ -904,10 +938,12 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
         ),
         "effect_coverage": "typed-public-fields-with-explicit-opaque-rules",
         "action_boundary": "recorded-native-ui",
+        "selection_cancel": SELECTION_CANCEL,
         "purpose": "offline_behavior_cloning",
     }
     require(contract["game_assembly_mvid"], "Missing recorded game assembly identity")
     macros, automatic, rejected = [], 0, []
+    previous = None  # (decision, macro appended for it or None)
     for decision in decisions:
         try:
             require(
@@ -919,6 +955,25 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
                 "Seed changed within recording",
             )
             macro = decision_macro(decision, rows[0]["run_id"], contract)
+        except ProtocolError as exc:
+            if str(exc) != NONCOMBAT_CANCEL:
+                if not bc_only:
+                    raise
+                rejected.append({"action_id": decision.get("action_id"), "reason": str(exc)})
+                previous = (decision, None)
+                continue
+            # The native detour open -> cancel is a no-op: drop both its label and
+            # the label of the action that opened it, in either import mode.
+            rejected.append({"action_id": decision.get("action_id"), "reason": NONCOMBAT_CANCEL})
+            # Only rest-site options, shop purchases and rewards open such a
+            # selection; an unrecorded opener leaves nothing else to drop.
+            if (previous is not None and previous[1] is not None and macros
+                    and macros[-1] is previous[1] and previous[1]["phase"] in CANCEL_OPENERS):
+                macros.pop()
+                rejected.append({"action_id": previous[0].get("action_id"),
+                                 "reason": "Opened a canceled non-combat selection"})
+            previous = (decision, None)
+            continue
         except (
             ProtocolError,
             ValueError,
@@ -932,11 +987,14 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
             rejected.append(
                 {"action_id": decision.get("action_id"), "reason": str(exc)}
             )
+            previous = (decision, None)
             continue
         if all(s["forced"] for s in macro["steps"]):
             automatic += len(macro["steps"])
+            previous = (decision, None)
         else:
             macros.append(macro)
+            previous = (decision, macro)
     require(macros, "Recording contains no branching decisions")
     run = {
         "schema": SCHEMA,
@@ -944,7 +1002,7 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
         "teacher_visibility": "public",
         "status": "complete",
         "victory": endings[0]["victory"] if not bc_only else None,
-        "ascension": 10,
+        "ascension": ascension,
         "character": character,
         "run_id": rows[0]["run_id"],
         "seed": str(start["seed"]),

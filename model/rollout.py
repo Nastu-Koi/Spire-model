@@ -1,4 +1,5 @@
 import json
+import random
 import queue
 import threading
 import time
@@ -10,6 +11,8 @@ from pathlib import Path
 import torch
 
 from .policy import SessionPolicy, choose_batch
+from .crystal_rule import RULE_VERSION as CRYSTAL_RULE, collection_candidate as crystal_candidate
+from .reward_rule import PER_FLOOR_LIMIT, RULE_VERSION as REWARD_RULE, collection_candidate as reward_candidate
 from .protocol import (
     CHARACTERS,
     SCHEMA,
@@ -32,12 +35,16 @@ def precision_context(model, precision):
 
 
 def numeric_backend(model):
-    return {
+    backend = {
         "device": model.device.type,
         "attention": model.config.backend,
         "torch": str(torch.__version__),
         "tf32": torch.backends.cuda.matmul.allow_tf32,
     }
+    # The fingerprint names the encoder precision only when it is not inherited.
+    if model.config.encoder_precision != "inherit":
+        backend["encoder_precision"] = model.config.encoder_precision
+    return backend
 
 
 class RolloutRunner:
@@ -50,12 +57,14 @@ class RolloutRunner:
         version=0,
         max_steps=10000,
         timeout=30,
+        ascension=10,
     ):
         if max_steps < 1 or timeout <= 0:
             raise ValueError("Rollout limits must be positive")
         self.model, self.vocabulary = model, vocabulary
         self.precision, self.version = precision, version
         self.max_steps, self.timeout = max_steps, timeout
+        self.ascension = ascension
 
     def run(self, engine, character, seed, *, sample=True, journal=None, _policy=None):
         if character not in CHARACTERS:
@@ -64,7 +73,7 @@ class RolloutRunner:
             "schema": SCHEMA,
             "character": character,
             "seed": str(seed),
-            "ascension": 10,
+            "ascension": self.ascension,
             "policy_version": self.version,
             "precision": self.precision,
             "vocabulary_hash": self.vocabulary.digest,
@@ -75,7 +84,13 @@ class RolloutRunner:
             "macros": [],
             "automatic_steps": 0,
             "initial_reward": 0.0,
+            "reward_rule": REWARD_RULE,
+            "crystal_rule": CRYSTAL_RULE,
+            "environment_actions": [],
+            "reward_steps": 0,
         }
+        crystal_rng = random.Random(f"{character}:{seed}:{CRYSTAL_RULE}")
+        collected = {}
         ledger = MilestoneLedger()
         policy = _policy or SessionPolicy(
             self.model, self.vocabulary, version=self.version
@@ -90,7 +105,9 @@ class RolloutRunner:
                 torch.no_grad(),
                 precision_context(self.model, self.precision),
             ):
-                frame = engine.reset(character, seed)
+                frame = engine.reset(character, seed, self.ascension)
+                if frame.get("contract", {}).get("fixed_ascension") != self.ascension:
+                    raise ProtocolError("Engine started a different ascension than requested")
                 trace["run_id"] = frame.get("routing", {}).get(
                     "episode_id", fingerprint([character, seed])
                 )
@@ -139,6 +156,31 @@ class RolloutRunner:
                     entities = frame["public"]["entities"]
                     act = next((int(x["act"]) for x in entities if "act" in x), 1)
                     frame["public"]["memory"].append(ledger.public(act))
+                    crystal = crystal_candidate(frame, crystal_rng)
+                    if crystal is not None:
+                        policy.reset()
+                        current_segment, pending_steps, active_macro = None, [], None
+                        trace["environment_actions"].append(dict(actor="crystal_sphere_rule",
+                            frame=deepcopy(frame), candidate_ref=crystal["candidate_ref"]))
+                        trace["automatic_steps"] += 1
+                        steps += 1
+                        frame = engine.send(execution_command(frame, crystal["candidate_ref"]))
+                        continue
+                    rule = reward_candidate(frame)
+                    if rule is not None:
+                        where = next(((x.get("act"), x.get("floor")) for x in entities
+                                      if x.get("entity_type") == "player"), None)
+                        collected[where] = collected.get(where, 0) + 1
+                        if collected[where] > PER_FLOOR_LIMIT:
+                            raise ProtocolError("Reward collection rule did not consume the reward")
+                        # Rule actions are environment steps, never policy labels.
+                        policy.reset()
+                        current_segment, pending_steps, active_macro = None, [], None
+                        trace["reward_steps"] += 1
+                        trace["automatic_steps"] += 1
+                        steps += 1
+                        frame = engine.send(execution_command(frame, rule["candidate_ref"]))
+                        continue
                     key = segment_key(frame)
                     if key != current_segment:
                         current_segment, pending_steps, active_macro = key, [], None
@@ -205,6 +247,9 @@ class _InferenceQueue:
         owner = self
 
         class QueuedPolicy:
+            def reset(self):
+                session.reset()
+
             def choose(self, frame, *, sample=True):
                 result = Future()
                 with owner.lock:

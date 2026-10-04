@@ -9,6 +9,11 @@ public class GodotObject
     public static bool IsInstanceValid(GodotObject? obj) => obj != null;
     public virtual bool IsQueuedForDeletion() => false;
 
+    // The CLR resolves these references even when TestMode skips the VFX
+    // branch (e.g. RollingBoulderPower). Keep the exact Godot ABI on the base.
+    public Error Connect(StringName signal, Callable callable, uint flags = 0) => Error.Ok;
+    public Variant CallDeferred(StringName method, params Variant[] args) => default;
+
     // ToSignal - must be on GodotObject (not Node) to match real Godot
     public SignalAwaiter ToSignal(GodotObject source, StringName signal)
     {
@@ -91,7 +96,6 @@ public class Node : GodotObject
     public bool IsInsideTree() => false;
     public int GetChildCount(bool includeInternal = false) => _children.Count;
 
-    public void CallDeferred(StringName method, params Variant[] args) { }
 
     public virtual void _Ready() { }
     public virtual void _EnterTree() { }

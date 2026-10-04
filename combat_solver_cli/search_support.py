@@ -1,24 +1,9 @@
-"""Shared native replay and public action priors for MCTS."""
+"""Prefix records, replay resolution and public action priors shared by rollouts and verification."""
 
-import json
-import os
-import time
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import Path
 
-from model.protocol import (
-    action_semantics,
-    execution_command,
-    fingerprint,
-    validate_frame,
-)
-
-from .client import SolverEngine
-
-
-class SearchLimit(RuntimeError):
-    pass
+from model.protocol import action_semantics, fingerprint
 
 
 class ReplayMismatch(RuntimeError):
@@ -47,6 +32,28 @@ def resolve(frame, semantics):
     return matches[0]
 
 
+def collapse_noncombat_cancels(records):
+    """Drop non-combat cancel excursions from prefix records.
+
+    Outside combat, open -> SELECT_ONE* -> CANCEL restores the state before the
+    opening action and is not offered by the protocol; drop the whole excursion.
+    Solver (combat) cancels are kept. Card-select before_hash values recorded with
+    a CANCEL candidate do not match, so replay the result without hash checks and
+    re-record it before using hash-verified restores.
+    """
+    out = []
+    for record in records:
+        if record["action"]["verb"] != "CANCEL" or record.get("actor") == "combat_solver":
+            out.append(record)
+            continue
+        while out and out[-1].get("phase") == "card_select" and out[-1]["action"]["verb"] == "SELECT_ONE":
+            out.pop()
+        if not out or out[-1].get("phase") == "card_select":
+            raise ReplayMismatch("Cancel without an opening action outside the selection")
+        out.pop()
+    return out
+
+
 @dataclass(eq=False, frozen=True)
 class Prefix:
     parent: object
@@ -73,22 +80,6 @@ class Prefix:
             )
             node = node.parent
         return records[::-1]
-
-
-def from_records(records):
-    node = None
-    for record in records:
-        node = Prefix(
-            node,
-            record["before_hash"],
-            deepcopy(record["action"]),
-            record["actor"],
-            1 if node is None else node.length + 1,
-            record.get("phase", ""),
-            record.get("act", 0),
-            record.get("floor", 0),
-        )
-    return node
 
 
 def append(prefix, frame, candidate, actor):
@@ -285,161 +276,3 @@ def preference(frame, candidate):
     if verb in ("SKIP", "SKIP_REWARDS", "CHOOSE_REWARD_ALTERNATIVE"):
         return -0.5
     return 0.0
-
-
-class ReplayWorker:
-    def __init__(
-        self,
-        config,
-        character,
-        seed,
-        budget_ms,
-        deadline,
-        max_steps,
-        reuse_turn_plan=False,
-        ascension=10,
-        boss_budget_ms=5000,
-    ):
-        self.config, self.character, self.seed = config, character, seed
-        self.budget_ms, self.deadline, self.max_steps = budget_ms, deadline, max_steps
-        self.reuse_turn_plan = reuse_turn_plan
-        self.ascension = ascension
-        self.boss_budget_ms = boss_budget_ms
-        self.engine = self.prefix = self.frame = None
-        self.last_player = {}
-        self.stop_path = None
-        self.replayed = self.solver_steps = 0
-
-    def close(self):
-        if self.engine is not None:
-            self.engine.close()
-        self.engine = None
-
-    def native_diagnostics(self):
-        if self.engine is None or not hasattr(os, "pread"):
-            return ""
-        try:
-            fd = self.engine.stderr.fileno()
-            size = os.fstat(fd).st_size
-            # Read without moving the file offset shared with the child process.
-            return os.pread(fd, min(size, 65536), max(0, size - 65536)).decode(
-                "utf-8", errors="replace"
-            )
-        except (OSError, ValueError):
-            return ""
-
-    def check(self):
-        if self.stop_path and self.stop_path.exists():
-            raise SearchLimit("STOP requested")
-        if time.monotonic() >= self.deadline:
-            raise SearchLimit("time budget exhausted")
-
-    def settle(self):
-        until = time.monotonic() + 30
-        while True:
-            self.check()
-            if self.prefix and self.prefix.length >= self.max_steps:
-                raise ReplayMismatch("maximum trajectory steps reached")
-            validate_frame(self.frame)
-            for entity in self.frame.get("public", {}).get("entities", []):
-                if entity.get("entity_type") == "player":
-                    self.last_player = entity
-            if self.frame["boundary"] != "waiting":
-                return self.frame
-            if time.monotonic() > until:
-                raise ReplayMismatch("native waiting boundary did not settle")
-            self.frame = self.engine.send({"cmd": "advance_to_boundary"})
-
-    def restore(self, prefix):
-        if self.engine is not None and self.prefix is prefix:
-            return self.settle()
-        self.close()
-        self.check()
-        self.engine = SolverEngine(
-            self.config,
-            timeout=max(30, max(self.budget_ms, self.boss_budget_ms) / 1000 + 15),
-        )
-        self.frame = self.engine.reset(self.character, self.seed, self.ascension)
-        self.prefix = None
-        for record in prefix.records() if prefix else []:
-            self.settle()
-            if state_key(self.frame) != record["before_hash"]:
-                raise ReplayMismatch("Native replay public state diverged")
-            candidate = resolve(self.frame, record["action"])
-            self.frame = self.engine.send(
-                execution_command(self.frame, candidate["candidate_ref"])
-            )
-            self.replayed += 1
-        self.prefix = prefix
-        return self.settle()
-
-    def execute(self, semantics, actor="mcts"):
-        self.settle()
-        candidate = resolve(self.frame, semantics)
-        prefix = append(self.prefix, self.frame, candidate, actor)
-        frame = self.engine.send(
-            execution_command(self.frame, candidate["candidate_ref"])
-        )
-        self.prefix, self.frame = prefix, frame
-
-    def combat_and_forced(self):
-        in_combat = False
-        while True:
-            self.settle()
-            if self.frame["boundary"] == "terminal":
-                return self.frame
-            phase = self.frame["public"]["phase"]
-            if phase == "combat":
-                in_combat = True
-            elif phase not in ("card_select", "card_reward"):
-                in_combat = False
-            elif not in_combat:
-                info = self.engine.send({"cmd": "solver_info"})
-                if info.get("type") != "solver_info":
-                    raise ReplayMismatch(str(info))
-                in_combat = info["combat_in_progress"]
-            if in_combat:
-                result = self.engine.step(
-                    self.frame,
-                    budget_ms=self.budget_ms,
-                    boss_budget_ms=self.boss_budget_ms,
-                    potions=True,
-                    reuse_turn_plan=self.reuse_turn_plan,
-                )
-                if result.get("type") == "solver_selection_required":
-                    if phase not in ("card_select", "card_reward"):
-                        raise ReplayMismatch(
-                            "Solver requested selection outside a selection boundary"
-                        )
-                    if len(self.frame["legal"]["candidates"]) == 1:
-                        self.execute(
-                            action_semantics(self.frame["legal"]["candidates"][0]),
-                            "forced",
-                        )
-                        continue
-                    return self.frame
-                if result.get("type") != "solver_step":
-                    raise ReplayMismatch(str(result))
-                candidate = next(
-                    c
-                    for c in self.frame["legal"]["candidates"]
-                    if c["candidate_ref"] == result["candidate_ref"]
-                )
-                self.prefix = append(
-                    self.prefix, self.frame, candidate, "combat_solver"
-                )
-                self.frame = result["frame"]
-                self.solver_steps += 1
-            elif len(self.frame["legal"]["candidates"]) == 1:
-                self.execute(
-                    action_semantics(self.frame["legal"]["candidates"][0]), "forced"
-                )
-            else:
-                return self.frame
-
-
-def write_json(path, value):
-    path = Path(path)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False))
-    temp.replace(path)
