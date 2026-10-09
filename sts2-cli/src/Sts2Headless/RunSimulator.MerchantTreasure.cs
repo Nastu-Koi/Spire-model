@@ -14,7 +14,6 @@ public partial class RunSimulator
 
     private Dictionary<string, object?> PublishMerchantBoundary(AbstractRoom room, MerchantInventory? inventory = null)
     {
-        if (_protocolClosedMerchants.Contains(room)) return OpenProtocolMap();
         var snapshot = BuildPublicSnapshot();
         inventory ??= ((MerchantRoom)room).GetLocalInventory();
         var player = _runState!.Players[0];
@@ -75,7 +74,10 @@ public partial class RunSimulator
                     _protocolOpenedChests.Add(room);
                     _pendingOperation.Start("open treasure chest", async () =>
                     {
-                        await room.DoNormalRewards();
+                        var goldRoll = ReferenceEquals(_anchorChestRoom, room) ? _anchorChestGoldRoll : null;
+                        _anchorChestRoom = null;
+                        _anchorChestGoldRoll = null;
+                        await AnchorTreasure.NormalRewards(room, _runState!.Players[0].PlayerRng.Rewards, goldRoll);
                         await room.DoExtraRewardsIfNeeded();
                     });
                 }));

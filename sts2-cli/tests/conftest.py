@@ -37,7 +37,7 @@ class Game:
         self.stderr = tempfile.TemporaryFile(mode="w+t")
         self.proc = subprocess.Popen(
             runtime_command(
-                os.path.join(
+                os.environ.get("STS2_TEST_ENGINE_DLL") or os.path.join(
                     os.path.dirname(PROJECT),
                     "bin",
                     "Debug",

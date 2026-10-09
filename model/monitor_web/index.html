@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spire 模型 Bootstrap 与 PPO 训练指标监测">
+  <title>Spire · 训练监测</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到训练指标</a>
+<aside class="sidebar">
+  <a class="brand" href="/"><img src="/favicon.svg" width="36" height="36" alt=""><span>SPIRE<span class="brand-sub">TRAINING OBSERVATORY</span></span></a>
+  <div class="sidebar-label">工作区 <span class="local-tag">LOCAL</span></div>
+  <div class="kind-filters" role="group" aria-label="训练类型">
+    <button type="button" class="kind-filter active" data-kind="all" aria-pressed="true"><span>全部训练</span><span id="count-all">0</span></button>
+    <button type="button" class="kind-filter" data-kind="bootstrap" aria-pressed="false"><span><i class="kind-dot bootstrap"></i>Bootstrap</span><span id="count-bootstrap">0</span></button>
+    <button type="button" class="kind-filter" data-kind="ppo" aria-pressed="false"><span><i class="kind-dot ppo"></i>PPO</span><span id="count-ppo">0</span></button>
+  </div>
+  <div class="sidebar-label runs-label">训练记录</div>
+  <label class="search"><span class="sr-only">搜索训练目录</span><input id="search" type="search" placeholder="搜索训练目录…" autocomplete="off"></label>
+  <nav id="run-list" class="run-list" aria-label="训练任务"><p class="sidebar-empty">正在读取训练目录…</p></nav>
+  <div class="sidebar-bottom"><span class="tiny-dot"></span>只读监测<span class="muted-light">日志来自本地工作区</span></div>
+</aside>
+<main id="main">
+  <header class="topbar"><div class="breadcrumb">工作区 <span>/</span> 模型训练</div><div id="connection" class="connection" role="status">连接中</div></header>
+  <div class="workspace">
+    <div class="page-heading"><div><p class="eyebrow">TRAINING MONITOR</p><h1>训练监测<span class="heading-dot">.</span></h1><p class="page-description">从示范学习到策略优化，跟踪每次更新的变化。</p></div><div class="refresh-controls"><label class="auto-refresh"><input id="auto-refresh" type="checkbox" checked><span>自动刷新 · 5 秒</span></label><button id="refresh" class="button" type="button"><span aria-hidden="true">↻</span> 刷新</button></div></div>
+    <div id="error" class="notice error" role="alert" hidden></div>
+    <div id="empty" class="empty-state" hidden><div class="empty-mark" aria-hidden="true">∿</div><h2 id="empty-title">等待训练记录</h2><p id="empty-description"></p><code id="root-path"></code><p>Bootstrap 和 PPO 每完成一次优化器更新，指标就会写入。</p></div>
+    <div id="dashboard" hidden>
+      <section class="run-heading" aria-label="当前训练任务"><div class="run-heading-main"><div class="run-title-line"><span id="run-kind" class="tag"></span><h2 id="run-name"></h2></div><p id="run-path" class="path"></p></div><button id="export" class="button" type="button">↓ 导出 CSV</button></section>
+      <section class="status-strip" aria-label="训练状态"><div><span id="state" class="state-tag"></span><span id="status-detail"></span></div><div id="updated" class="muted"></div><progress id="collection-progress" hidden></progress></section>
+      <div id="warnings" class="notices" aria-live="polite"></div>
+      <div id="summary" class="summary-grid"></div>
+      <section aria-labelledby="trends-title">
+        <div class="section-heading"><div><h2 id="trends-title">学习曲线</h2><p id="curve-note"></p></div><label class="range-label">显示范围<select id="range"><option value="0">全部更新记录</option><option value="20">最近 20 次更新</option><option value="50">最近 50 次更新</option><option value="100">最近 100 次更新</option></select></label></div>
+        <div class="chart-grid"><article class="chart-card"><div class="chart-heading"><h3 id="primary-title"></h3><span id="primary-value" class="chart-value"></span></div><div id="chart-primary" class="chart"></div><div id="primary-legend" class="legend"></div></article><article class="chart-card"><div class="chart-heading"><h3 id="secondary-title"></h3><span id="secondary-value" class="chart-value"></span></div><div id="chart-secondary" class="chart"></div><div id="secondary-legend" class="legend"></div></article><article class="chart-card"><div class="chart-heading"><label for="metric-select">优化指标</label><select id="metric-select"></select></div><div id="chart-metric" class="chart"></div><div id="metric-legend" class="legend"></div></article><article class="chart-card"><div class="chart-heading"><h3 id="duration-title">单次更新耗时</h3><span id="duration-value" class="chart-value"></span></div><div id="chart-duration" class="chart"></div><div class="legend"><span class="legend-dot purple"></span><span id="duration-legend">逻辑批读取、前反向及优化器更新</span></div></article></div>
+      </section>
+      <section class="details-panel" aria-label="训练详情"><div class="details-toolbar"><div class="tabs" role="tablist" aria-label="训练详情"><button id="tab-groups" type="button" role="tab" aria-selected="true" aria-controls="panel-groups" tabindex="0" data-tab="groups">验证明细</button><button id="tab-history" type="button" role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1" data-tab="history">历史记录</button><button id="tab-config" type="button" role="tab" aria-selected="false" aria-controls="panel-config" tabindex="-1" data-tab="config">训练配置</button></div><span id="record-count" class="muted"></span></div><div id="panel-groups" class="tab-panel" role="tabpanel" aria-labelledby="tab-groups"></div><div id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" hidden></div><div id="panel-config" class="tab-panel" role="tabpanel" aria-labelledby="tab-config" hidden></div></section>
+    </div>
+    <footer><span>SPIRE MODEL <span class="footer-divider">/</span> BOOTSTRAP + PPO</span><span id="footer-note">直接读取训练日志 · 无需加载模型</span></footer>
+  </div>
+</main>
+<noscript>请启用 JavaScript 以读取训练指标。</noscript>
+</body>
+</html>

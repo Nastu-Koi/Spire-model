@@ -26,8 +26,15 @@ def summary_entity(entities):
     return {"entity_type": "deck_summary", "ref": "summary:0", "stats": totals}
 
 
+def encounter_id(encounter):
+    """Labels may omit the category; model inputs use the native catalog ID."""
+    if not isinstance(encounter, str) or not encounter.removeprefix("ENCOUNTER."):
+        raise ValueError("An encounter needs a nonempty content ID")
+    return encounter if encounter.startswith("ENCOUNTER.") else "ENCOUNTER." + encounter
+
+
 def frame_for(entities, encounter, summary=False):
-    entities = [dict(e) for e in entities] + [{"entity_type": "encounter", "content_id": encounter,
+    entities = [dict(e) for e in entities] + [{"entity_type": "encounter", "content_id": encounter_id(encounter),
                                                "ref": "encounter:0"}]
     if summary:
         entities.append(summary_entity(entities))

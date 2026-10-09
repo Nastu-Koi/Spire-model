@@ -8,7 +8,6 @@ namespace Sts2Headless;
 
 public partial class RunSimulator
 {
-    private readonly HashSet<AbstractRoom> _protocolClosedMerchants = new(ReferenceEqualityComparer.Instance);
     private static bool _potionPresentationPatched;
 
     private static void InstallPotionPresentationBridge()
@@ -26,9 +25,9 @@ public partial class RunSimulator
     {
         var sim = _protocolUiOwner;
         if (sim == null || !sim._protocolEnabled || CombatManager.Instance.IsInProgress) return true;
+        // The game asks for the merchant on screen. He takes any number of them.
         var room = __instance.Owner.RunState.CurrentRoom;
-        __result = !sim._protocolClosedMerchants.Contains(room!) && (room is MerchantRoom
-            || room is EventRoom { LocalMutableEvent: FakeMerchant { StartedFight: false } });
+        __result = room is MerchantRoom || room is EventRoom { LocalMutableEvent: FakeMerchant { StartedFight: false } };
         return false;
     }
 
@@ -42,7 +41,8 @@ public partial class RunSimulator
             __result = fake.FoulPotionThrown(__instance);
             return false; // Original branch requires a Godot merchant node; effects are native.
         }
-        if (room is MerchantRoom) sim._protocolClosedMerchants.Add(room);
-        return true; // Gold, consumption and potion hooks stay in the original methods.
+        // A merchant pays for the potion and stays open: gold, consumption and
+        // potion hooks are the original method's.
+        return true;
     }
 }

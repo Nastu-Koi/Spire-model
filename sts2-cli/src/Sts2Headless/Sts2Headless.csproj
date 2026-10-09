@@ -15,6 +15,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="../../../public_history/*.cs" Link="PublicHistory/%(Filename)%(Extension)" />
     <!-- Our GodotStubs (outputs as GodotSharp.dll to satisfy sts2.dll references) -->
     <ProjectReference Include="..\GodotStubs\GodotStubs.csproj" />
   </ItemGroup>

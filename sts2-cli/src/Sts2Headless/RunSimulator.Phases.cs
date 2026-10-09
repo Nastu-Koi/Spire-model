@@ -22,7 +22,7 @@ public partial class RunSimulator
 
     private Dictionary<string, object?> PublishSnapshot(string phase, PublicSnapshot snapshot,
         List<CandidateBinding> bindings) => PublishDecision(phase, snapshot.Entities, bindings,
-            relations: snapshot.Relations);
+            relations: snapshot.Relations, memory: snapshot.Memory);
 
     private bool CanActInCombat() => CombatManager.Instance.IsInProgress && IsPlayPhase()
         && !CombatManager.Instance.PlayerActionsDisabled && !HasPendingInteraction();
@@ -161,6 +161,11 @@ public partial class RunSimulator
             snapshot.Entities.Add(new() { ["entity_type"] = "event_option", ["ref"] = reference,
                 ["content_id"] = option.TextKey, ["enabled"] = !option.IsLocked,
                 ["effect_coverage"] = "opaque", ["semantic_program"] = OpaqueProgram(option.TextKey) });
+            // The game's option button adds the event's variables to the texts it shows
+            // (NEventOptionButton._Ready). No button is shown here, so do what it does:
+            // the costs, amounts and names of an option are what the player reads on it.
+            if (option.Description != null) localEvent.DynamicVars.AddTo(option.Description);
+            if (option.Title != null) localEvent.DynamicVars.AddTo(option.Title);
             AddDisplayedVariables(snapshot, reference, option.Title, option.Description);
             if (option.IsLocked) continue;
             bool abandon = localEvent is Trial && option.TextKey == "TRIAL.pages.REJECT.options.DOUBLE_DOWN";

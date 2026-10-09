@@ -1,110 +1,90 @@
 # Spire Model
 
-目标：训练能通关《杀戮尖塔 2》的智能体，最终接管 Steam 游戏。当前适配游戏 **0.111.0**。示范数据覆盖 **A0–A10**，难度是模型输入；自采样和评估的难度由训练配置的 `ascension` 指定（默认 A10，与 Steam 接管一致）。
+基于玩家公开信息，为《杀戮尖塔 2》训练覆盖整局的策略，目标是提高**五角色 A0 平均整局通关率**并接管 Steam 游戏。当前适配游戏 **0.111.0**。
 
-## 技术路线
+主策略先用摘要锚点及求解器示范做行为克隆，再自主采样。当前已有 BC、基础 MC PPO、公开历史、战斗结果记录和 Steam 桥接；结果分布、本幕通过势 Φ、两路优势及冻结 BC 参考 KL 尚未接入。设计见 [ARCHITECTURE](ARCHITECTURE.md)，术语见 [CONTEXT](CONTEXT.md)。
 
-1. **公开对局 Bootstrap**（`spire_codex_data/` → `model/`）：用 Spire Codex 公开胜局的对局摘要生成摘要锚点样本，对大模型做行为克隆。局外决策（营火、选牌、路线、远古之民）的标签是人类的历史选择，战斗的标签是 CombatSolver 在摘要重建的入场状态上另行求解的动作。
-2. **战斗结果模型**（`combat_outcome/`，与 Bootstrap 同期预训练）：摘要锚点的每场战斗除了给出求解器的动作，也给出这场战斗的结果；模型学习"入场状态 × 遭遇 → 掉血/胜负"，用来构造本幕通过势，给 PPO 的局外决策提供局部优势。
-3. **PPO**：从 Bootstrap 后的大模型出发在无头引擎中强化学习，优势 = 通关优势 + β × 本幕通过势的局部差值。
-4. **接管 Steam**（`steam_recorder/` + `model/steam.py`）。
+## 从这里开始
 
-模型结构、训练路线和设计取舍见 [ARCHITECTURE](ARCHITECTURE.md)；术语见 [CONTEXT](CONTEXT.md)。
+| 要做的事 | 说明 |
+| --- | --- |
+| 开始／继续训练，复用现有数据 | [主策略训练与运行](model/README.md) |
+| 判断数据要不要重新生成 | [数据复用与索引](model/README.md#数据复用与索引) |
+| 下载公开对局、恢复锚点和导入示范 | [摘要数据](spire_codex_data/README.md) |
+| 配置求解器或验证原生轨迹 | [CombatSolver worker](combat_solver_cli/README.md) |
+| 训练战斗结果模型、读取学生战斗数据 | [战斗结果模型](combat_outcome/README.md) |
+| 安装录制 Mod、接管 Steam 游戏 | [Steam 录制与桥接](steam_recorder/README.md) |
+| 检查公开观察与合法动作协议 | [决策协议](sts2-cli/docs/decision-protocol.md) |
 
 ## 仓库结构
 
 | 目录 | 内容 |
-|---|---|
-| `sts2-cli/` | 无头游戏引擎（基于 [wuhao21/sts2-cli](https://github.com/wuhao21/sts2-cli)），决策协议见 `sts2-cli/docs/decision-protocol.md` |
-| `combat_solver_cli/` | CombatSolver worker、引擎客户端、轨迹独立重放验证；`lib/`（不入库）存放求解器 DLL 的固定副本与本机配置 |
-| `model/` | 公开状态表示、网络、策略会话、对局采样与评估、PPO/Bootstrap 训练器、奖励规则、Steam 接管 |
-| `combat_outcome/` | 战斗结果模型：战斗结果标签的读取、实体模型的预训练与继续训练、自采样战斗标签的记录；模型与训练参数由 `configs/combat-outcome.json` 定义 |
-| `spire_codex_data/` | Spire Codex 公开对局的下载、来源筛选、摘要锚点样本的生成、导出与核对 |
-| `steam_recorder/` | Steam 版 Mod：录制实玩、接管桥接 |
-| `configs/` | 大模型配置、战斗结果模型配置 |
-| `runs/`、`data/` | 本地产物（不入库）：检查点、评估结果、战斗数据、公开对局缓存 |
+| --- | --- |
+| [model/](model/README.md) | 公开输入、主策略、控制器、BC／PPO、检查点、Steam 控制端和训练监测 |
+| [spire_codex_data/](spire_codex_data/README.md) | 公开对局下载、来源审计、摘要账本、锚点生成、刷新和导出 |
+| [combat_outcome/](combat_outcome/README.md) | 当前入场标量结果模型及学生战斗／中途帧记录 |
+| [combat_solver_cli/](combat_solver_cli/README.md) | 第三方求解器 worker、引擎客户端和独立轨迹复验 |
+| [sts2-cli/](sts2-cli/README.md) | 基于 [wuhao21/sts2-cli](https://github.com/wuhao21/sts2-cli) 的无头引擎 |
+| [public_history/](public_history/README.md) | 无头与 Steam 共用的公开历史状态机和原生钩子 |
+| [steam_recorder/](steam_recorder/README.md) | Steam Mod：实玩录制与控制桥接 |
+| `configs/` | [主策略](configs/rtxpro6000.json)与[战斗结果](configs/combat-outcome.json)配置 |
+| `docs/agents/` | 仓库内的领域文档和本地工单约定 |
+
+源码、测试夹具、配置及使用文档入库。`data/` 保存本地数据，`runs/`、`checkpoints/` 保存实验与检查点，`build/` 保存构建辅助产物和 Mod 备份；这些目录与第三方 DLL 均不入库。整理仓库时保留原始数据、旧对照检查点和回放证据。
+
+文档各有一个维护位置：模块 README 说明当前用法，`ARCHITECTURE.md` 解释设计，`CONTEXT.md` 定义术语。当前工作区的任务、验收和历史实验记录在本地 `.scratch/`，不随 Git 分发；入口为 [A0 训练基线](.scratch/a0-training-baseline/spec.md)和[实施报告](.scratch/a0-training-baseline/implementation-report.md)。
 
 ## 安装
 
-需要 Steam 版游戏、.NET 9 SDK，以及 Python 环境：
+需要 Steam 版游戏、.NET 9 SDK 和 Python 3.11：
 
 ```bash
-conda create -n sts2 python=3.11 -y
+conda env create -f environment.yml
 conda activate sts2
-pip install -e '.[test]'
 ```
 
-构建无头引擎（复制游戏程序集到 `sts2-cli/lib` 并打补丁，不修改 Steam 安装目录）：
+已有 Python 环境时使用 `pip install -e '.[test]'`。构建无头引擎会将游戏程序集复制到 `sts2-cli/lib` 并修改该副本：
 
 ```bash
 export GAME_DIR="$HOME/.local/share/Steam/steamapps/common/Slay the Spire 2"
 bash sts2-cli/setup.sh "$GAME_DIR"
 ```
 
-配置 CombatSolver 0.44.0 及 RitsuLib（把求解器 DLL 复制到 `combat_solver_cli/lib/`，编译 worker 并固定哈希，默认写入 `combat_solver_cli/lib/config.json`）：
-
-```bash
-python -m combat_solver_cli configure --solver /path/to/CombatSolver/CombatSolver.dll \
-  --dependency-dir /path/to/RitsuLib/compat/0.111.0 --dependency-dir /path/to/RitsuLib/shared
-```
-
-依赖或游戏版本变化后需要重新配置并重跑引擎测试。不要提交第三方 DLL。
-
-## 战斗结果模型
-
-```bash
-python -m spire_codex_data.anchor export --manifest data/spire-codex/sources/manifest.json --output data/anchors      # 同时写出 combat-outcomes.jsonl.gz
-python -m combat_outcome.train data/anchors/combat-outcomes.jsonl.gz --save runs/combat-outcome
-```
-
-标签是摘要锚点战斗的结果，随 `anchor export` 写出，不需要另外生成；预训练与大模型的 Bootstrap 同期进行。网络结构和训练超参数来自 `configs/combat-outcome.json`（`--config` 可换成别的文件），命令行参数只覆盖单项。详见 [combat_outcome/README.md](combat_outcome/README.md)。
+随后按 [worker 配置](combat_solver_cli/README.md#配置)安装固定版本的求解器依赖。Steam Mod 需要从游戏原始程序集单独构建，见 [安装说明](steam_recorder/README.md)。
 
 ## 大模型
 
+当前数据与 BC 训练都在本地 `runs/bootstrap-20261008/`。BC 不自动验证或按表现停止，由使用者自行判断。
+
+新训练、严格续训、当前数据数量、版本迁移及可直接执行的命令统一维护在 [model/README.md](model/README.md)。战后及事件领奖由模型选择，普通宝箱、水晶球格子和指定单选事件按[共用控制规则](model/README.md#策略与控制器)执行。
+
+## 战斗结果模型
+
+[combat_outcome](combat_outcome/README.md) 复用锚点求解器战斗作为预训练标签，也读取主策略实际打出的战斗。当前网络预测入场单场的掉血和失败概率，尚不提供完整结果分布或 Φ。
+
+## 训练监测网页
+
 ```bash
-# 摘要锚点 → 独立监督样本 → Bootstrap 输入 → 行为克隆 → PPO
-python -m spire_codex_data fetch --source runs --output data/spire-codex
-python -m spire_codex_data.sources --existing data/spire-codex --output data/spire-codex/sources \
-  --catalog data/spire-codex/catalog.json --per-character 20
-python -m spire_codex_data.anchor run --manifest data/spire-codex/sources/manifest.json --output data/anchors
-python -m spire_codex_data.anchor export --manifest data/spire-codex/sources/manifest.json --output data/anchors
-python -m model import-independent data/anchors/independent-training.jsonl.gz --output data/bootstrap
-python -m model --device cuda init --config configs/rtxpro6000.json --output runs/init
-python -m model --device cuda bootstrap --data data/bootstrap --checkpoint runs/init --holdout 0.1 --output runs/bootstrap
-python -m model --device cuda train --checkpoint runs/bootstrap/current --output runs/ppo
+python3 -m model.monitor --runs runs --port 8765
 ```
 
-`import-independent` 把样本写成 gzip 分片加一个索引，`bootstrap` 每次只读几个分片进内存（`--window-shards`），分片顺序和窗口内的样本都打乱，样本权重按整个数据集归一；这种数据必须配合 `init` 生成的检查点使用。`--holdout` 按 seed 留出验证集。
-
-`python -m model` 另有 `collect`、`evaluate`、`infer`、`import-recorder`、`play-steam`、`smoke` 等命令；`configs/rtxpro6000.json` 为默认配置。
+打开 [本地训练监测](http://127.0.0.1:8765)。服务只读日志，配置、指标含义和远程访问见 [监测说明](model/README.md#训练监测网页)。
 
 ## 接管 Steam 游戏
 
-安装 Mod（退出游戏后）：
-
-```bash
-python steam_recorder/install.py --game-dir "$GAME_DIR" --install
-```
-
-在 Steam 中开始或继续一局后：
-
-```bash
-python -m model --device cuda play-steam --checkpoint <ckpt> --bridge-dir "$RECORDING_DIR/bridge"
-```
-
-Mod 在游戏主线程执行模型选择的动作，奖励领取使用与训练相同的固定规则。`RECORDING_DIR` 为游戏的 `user://run_recorder` 目录（日志中 `[RunRecorder] initialized; output=...`）。Mod 同时可以录制实玩，`python -m model import-recorder` 导入为行为克隆数据。
+[steam_recorder](steam_recorder/README.md) 说明 Mod 安装、录制导入和 `play-steam` 用法。Python 控制端与无头共享动作分工；当前已通过桥接接口测试，最新控制改动尚未进行 Steam 实机接管验证。
 
 ## 测试
 
 ```bash
-python -m pytest -q -m "not engine"                                   # 不依赖引擎
+python -m pytest -q -m 'not engine and not cuda'
 COMBAT_SOLVER_CONFIG=combat_solver_cli/lib/config.json python -m pytest -q -m engine
-python -m pytest sts2-cli/tests -q                                    # 引擎协议
-python -m model --device cpu smoke --output /tmp/smoke                # 合成端到端
+python -m pytest sts2-cli/tests -q
+python -m model --device cpu smoke --output /tmp/spire-smoke
 ```
 
-修改 `sts2-cli` 后还需按 `sts2-cli/CLAUDE.md` 跑完整对局回归。
+`-m engine` 和 `sts2-cli/tests` 须先完成原生依赖配置；`smoke` 是合成端到端检查。修改 `sts2-cli` 时另须遵守其 `CLAUDE.md` 的完整对局回归要求。模块专用检查见各自 README；测试通过不代表训练效果已验证。
 
 ## 公开对局数据
 
-[spire_codex_data](spire_codex_data/README.md) 下载 Spire Codex 的对局摘要和操作回放，筛选来源，并用摘要锚点生成独立监督样本。回放只用于来源审计和核对样本。
+[spire_codex_data](spire_codex_data/README.md) 使用 `.run` 摘要生成独立监督样本；操作回放只用于来源审计和核对。这些示范用于 BC，不是策略自行采集的 PPO 经验，也不构成连续通关证明。

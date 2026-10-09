@@ -10,8 +10,10 @@ from model.model import PolicyValue
 from model.protocol import CHARACTERS
 from model.representation import observation
 from model.rollout import RolloutRunner, write_run
+from model.seeds import validate_evaluation_seeds
 from model.testing import SyntheticEngine, demonstration
 from model.trainer import evaluate_runs
+from spire_codex_data.sources import split_group
 
 
 def test_unfinished_runs_are_not_wins():
@@ -52,18 +54,40 @@ def test_ascension_on_the_player_is_model_input():
     assert digest(0) != digest(10)
 
 
-def test_a_checkpoint_keeps_its_training_seeds_out_of_validation(tmp_path, capsys):
-    first, second = tmp_path / "first", tmp_path / "second"
+def test_bc_records_all_training_seeds_for_manual_evaluation(tmp_path, capsys):
+    first = tmp_path / "first"
     for c in CHARACTERS:
         write_run(first / f"{c}.json", demonstration(c, "seen-seed", 4, 2))
-        write_run(second / f"{c}.json", demonstration(c, "new-seed", 4, 2))
-    common = ["--tiny", "--precision", "no"]
-    assert main(["bootstrap", "--data", str(first), "--all-training-data", "--output", str(tmp_path / "a"),
+    common = ["--tiny", "--precision", "no", "--epochs", "1"]
+    assert main(["bootstrap", "--data", str(first), "--output", str(tmp_path / "a"),
                  *common]) == 0
-    checkpoint = str(tmp_path / "a" / "current")
     assert "seen-seed" in json.loads((tmp_path / "a" / "current" / "manifest.json").read_text())["progress"]["training_seeds"]
     capsys.readouterr()
-    # The data of this session does not overlap its validation set; the checkpoint's history does.
-    assert main(["bootstrap", "--data", str(second), "--validation", str(first), "--checkpoint", checkpoint,
-                 "--output", str(tmp_path / "b")]) == 1
-    assert "checkpoint's training seeds" in capsys.readouterr().err
+    record = json.loads((tmp_path / "a" / "history.jsonl").read_text())
+    assert "validation" not in record and "validation_runs" not in record
+    assert (tmp_path / "a" / "epoch-000001" / "weights.pt").exists()
+    progress = json.loads((tmp_path / "a" / "current" / "manifest.json").read_text())["progress"]
+    with pytest.raises(ValueError, match="overlaps"):
+        validate_evaluation_seeds({c: ["seen-seed" if i == 0 else f"unseen-{i}"]
+                                   for i, c in enumerate(CHARACTERS)}, progress)
+    archived = (tmp_path / "a" / "epoch-000001" / "weights.pt").read_bytes()
+    assert main(["bootstrap", "--data", str(first), "--checkpoint", str(tmp_path / "a" / "current"),
+                 "--output", str(tmp_path / "a"), "--epochs", "1"]) == 0
+    assert (tmp_path / "a" / "epoch-000002" / "weights.pt").exists()
+    assert (tmp_path / "a" / "epoch-000001" / "weights.pt").read_bytes() == archived
+    capsys.readouterr()
+    # A new initialization cannot replace the user's earlier comparison run.
+    assert main(["bootstrap", "--data", str(first), "--output", str(tmp_path / "a"), *common]) == 1
+    assert "new output directory" in capsys.readouterr().err
+
+
+
+def test_an_evaluation_seed_is_refused_however_training_recorded_it():
+    queue = {c: [f"SEED{i}"] for i, c in enumerate(CHARACTERS)}
+    assert validate_evaluation_seeds(queue, {"training_seeds": ["OTHER", split_group("OTHER")]}) is queue
+    # A rollout is kept under its game seed, an independent sample under the seed's split group.
+    for known in ("SEED0", split_group("SEED0"), split_group("seedo")):
+        with pytest.raises(ValueError, match="overlaps"):
+            validate_evaluation_seeds(queue, {"training_seeds": [known]})
+    with pytest.raises(ValueError, match="overlaps"):
+        validate_evaluation_seeds(queue, {"random_seed_schedule": {"used_seeds": ["SEED4"]}})

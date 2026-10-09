@@ -6,6 +6,102 @@ import torch
 from torch import nn
 
 
+TRAINING_VERSION = "bc-decay-v5"
+# Lookup tables start at unit scale, about twenty times a Linear weight, and AdamW
+# moves every element by about its rate: they share a rate of their own.
+TABLES = frozenset({"encoder.symbol.weight", "encoder.field.weight",
+                    "relation.weight", "encoder.program_relation.weight"})
+
+
+class BootstrapSchedule:
+    """BC rates: a linear warmup, then constant rates, then an optional linear decay
+    to zero over `decay_updates` updates, after which BC stops. The lookup tables
+    (the `embedding` group) also fall geometrically from their peak to
+    `table_final_ratio` of it over the first `table_decay_updates` updates, then
+    hold. Other training modes use the peak rates."""
+
+    def __init__(self, optimizer, warmup_updates, decay_updates=0, *,
+                 table_final_ratio=1.0, table_decay_updates=0):
+        if type(decay_updates) is not int or decay_updates < 0:
+            raise ValueError("Decay updates must be a non-negative integer")
+        if (type(table_decay_updates) is not int or table_decay_updates < 0
+                or not 0 < table_final_ratio <= 1):
+            raise ValueError("Table decay needs a non-negative length and a final ratio in (0, 1]")
+        self.optimizer = optimizer
+        self.base_lrs = [group["lr"] for group in optimizer.param_groups]
+        self.warmup_updates = warmup_updates
+        self.decay_updates = decay_updates
+        self.table_final_ratio = table_final_ratio
+        self.table_decay_updates = table_decay_updates
+        self.completed_updates = 0
+        self.decayed_updates = 0
+        self.mode = None
+        for group, lr in zip(optimizer.param_groups, self.base_lrs):
+            group["initial_lr"] = lr
+
+    @property
+    def exhausted(self):
+        """The decay has spent its updates: the next BC update would run at rate zero."""
+        return bool(self.decay_updates) and self.decayed_updates >= self.decay_updates
+
+    def factor(self, mode):
+        if mode != "bootstrap":
+            return 1.0
+        factor = (min(1.0, (self.completed_updates + 1) / self.warmup_updates)
+                  if self.warmup_updates else 1.0)
+        if self.decay_updates:
+            factor *= max(0.0, 1 - self.decayed_updates / self.decay_updates)
+        return factor
+
+    def table_factor(self, mode):
+        if mode != "bootstrap" or not self.table_decay_updates:
+            return 1.0
+        progress = min(1.0, self.completed_updates / self.table_decay_updates)
+        return self.table_final_ratio ** progress
+
+    def prepare(self, mode):
+        self.mode = mode
+        factor, tables = self.factor(mode), self.table_factor(mode)
+        for group, peak in zip(self.optimizer.param_groups, self.base_lrs):
+            group["lr"] = peak * factor * (tables if group.get("name", "").startswith("embedding") else 1.0)
+
+    def step(self):
+        if self.mode == "bootstrap":
+            self.completed_updates += 1
+            if self.decay_updates:
+                self.decayed_updates += 1
+        self.prepare(self.mode)
+
+    def state_dict(self):
+        return {"kind": TRAINING_VERSION, "base_lrs": self.base_lrs,
+                "warmup_updates": self.warmup_updates,
+                "table_final_ratio": self.table_final_ratio,
+                "table_decay_updates": self.table_decay_updates,
+                "completed_updates": self.completed_updates,
+                "decay_updates": self.decay_updates,
+                "decayed_updates": self.decayed_updates, "mode": self.mode}
+
+    def check(self, state):
+        """Raise unless this schedule continues the saved one: same warmup, and a decay
+        either started now from a constant-rate checkpoint or resumed at its length."""
+        if (state.get("kind") != TRAINING_VERSION or state["base_lrs"] != self.base_lrs
+                or state["warmup_updates"] != self.warmup_updates
+                or state.get("table_final_ratio", 1.0) != self.table_final_ratio
+                or state.get("table_decay_updates", 0) != self.table_decay_updates):
+            raise ValueError("Warmup or table decay configuration differs; start with weights only instead of resuming")
+        saved = state.get("decay_updates", 0)
+        if saved and saved != self.decay_updates:
+            raise ValueError(f"Checkpoint is inside a decay of {saved} updates; "
+                             "resume it with the same --decay-updates")
+
+    def load_state_dict(self, state):
+        self.check(state)
+        self.completed_updates = state["completed_updates"]
+        self.decayed_updates = (state.get("decayed_updates", 0)
+                                if state.get("decay_updates", 0) == self.decay_updates else 0)
+        self.prepare(state["mode"])
+
+
 class HybridOptimizer(torch.optim.Optimizer):
     """Expose Muon and AdamW as one optimizer to schedulers and Accelerate."""
 
@@ -66,17 +162,20 @@ def _adamw_groups(named_parameters, config):
     grouped = defaultdict(list)
     for name, parameter in named_parameters:
         head = name.startswith(("query.", "key.", "value."))
+        family = "embedding" if name in TABLES else "head" if head else "backbone"
         decay = parameter.ndim >= 2 and not any(
             label in name for label in ("norm", "symbol", "field", "relation", "floor")
         )
-        grouped[head, decay].append(parameter)
+        grouped[family, decay].append(parameter)
     return [
         {
             "params": parameters,
-            "lr": config.head_lr if head else config.backbone_lr,
+            "name": family + ("_decay" if decay else "_no_decay"),
+            "lr": {"embedding": config.embedding_lr, "head": config.head_lr,
+                   "backbone": config.backbone_lr}[family],
             "weight_decay": config.weight_decay if decay else 0.0,
         }
-        for (head, decay), parameters in grouped.items()
+        for (family, decay), parameters in grouped.items()
         if parameters
     ]
 
@@ -112,6 +211,7 @@ def build_optimizer(model, config):
         [
             {
                 "params": [parameter for _, parameter in muon_parameters],
+                "name": "muon",
                 "lr": config.muon_lr,
                 "weight_decay": config.weight_decay,
             }

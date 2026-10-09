@@ -14,7 +14,11 @@ test = ["pytest>=8"]
 
 [project.scripts]
 spire-model = "model.cli:main"
+spire-monitor = "model.monitor:main"
 spire-codex-data = "spire_codex_data.__main__:main"
+
+[tool.setuptools.package-data]
+model = ["monitor_web/*.html", "monitor_web/*.css", "monitor_web/*.js", "monitor_web/*.svg"]
 
 [tool.setuptools.packages.find]
 include = ["model*", "combat_solver_cli*", "combat_outcome*", "spire_codex_data*"]

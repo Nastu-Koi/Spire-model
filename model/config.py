@@ -84,10 +84,17 @@ class TrainConfig:
     muon_momentum: float = 0.95
     muon_ns_steps: int = 5
     backbone_lr: float = 1e-5
+    embedding_lr: float = 1e-5
+    # The lookup tables fall geometrically to `embedding_lr_final` over the first
+    # `embedding_decay_updates` BC updates (none: constant), then hold.
+    embedding_lr_final: float | None = None
+    embedding_decay_updates: int = 0
     head_lr: float = 3e-5
+    bootstrap_warmup_updates: int = 200
+    update_stats_every: int = 100
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
-    logical_batch_size: int = 32
+    logical_batch_size: int = 512
     microbatch_size: int = 32
     clip_ratio: float = 0.2
     target_kl: float = 0.015
@@ -106,9 +113,12 @@ class TrainConfig:
     token_budget: int = 32768
     pair_budget: int = 16777216
     loader_workers: int = 8
+    # Feeder processes that decode shards in turn, each with `loader_workers` packers;
+    # together they hold one window.
+    loader_feeders: int = 4
     # Difficulty of the runs the policy plays itself: rollouts and evaluation.
     # Demonstrations keep their own; the player entity carries it into the model.
-    ascension: int = 10
+    ascension: int = 0
 
     @classmethod
     def from_dict(cls, values):
@@ -128,6 +138,17 @@ class TrainConfig:
             raise ValueError("Batch sizes and horizon scale must be positive")
         if type(self.loader_workers) is not int or self.loader_workers < 0:
             raise ValueError("Loader workers must be a non-negative integer")
+        if type(self.loader_feeders) is not int or self.loader_feeders < 1:
+            raise ValueError("Loader feeders must be a positive integer")
+        if (type(self.bootstrap_warmup_updates) is not int or self.bootstrap_warmup_updates < 0
+                or type(self.update_stats_every) is not int or self.update_stats_every < 1):
+            raise ValueError("Warmup updates must be nonnegative and update stats interval positive")
+        if type(self.embedding_decay_updates) is not int or self.embedding_decay_updates < 0:
+            raise ValueError("Embedding decay updates must be a non-negative integer")
+        if (self.embedding_lr_final is None) != (self.embedding_decay_updates == 0):
+            raise ValueError("Set embedding_lr_final and embedding_decay_updates together")
+        if self.embedding_lr_final is not None and not 0 < self.embedding_lr_final <= self.embedding_lr:
+            raise ValueError("The final embedding rate must be positive and at most the peak rate")
         if type(self.ascension) is not int or not 0 <= self.ascension <= 10:
             raise ValueError("Ascension must be an integer from 0 to 10")
         if self.precision not in {"no", "bf16"}:
@@ -137,6 +158,7 @@ class TrainConfig:
         if (
             min(
                 self.backbone_lr,
+                self.embedding_lr,
                 self.head_lr,
                 self.max_grad_norm,
                 self.token_budget,

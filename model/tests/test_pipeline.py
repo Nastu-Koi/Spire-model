@@ -6,7 +6,7 @@ import torch
 from model.cli import vocabulary_for
 from model.config import ModelConfig, TrainConfig
 from model.data import microbatches, samples
-from model.loader import measure, replays
+from model.loader import batches
 from model.model import PolicyValue
 from model.policy import SessionPolicy, replay_batch
 from model.protocol import CHARACTERS
@@ -43,14 +43,20 @@ def test_workers_prepare_the_batches_the_trainer_would():
     model = PolicyValue(config).eval()
     results = []
     for workers in (0, 2):
-        training = TrainConfig(precision="no", microbatch_size=2, token_buckets=[32, 64],
+        training = TrainConfig(precision="no", logical_batch_size=5, microbatch_size=2, token_buckets=[32, 64],
                                action_buckets=[8, 16], loader_workers=workers)
         items = samples(runs)
-        measure(items, training)
-        assert all(item._lengths for item in items)
-        micros = microbatches(items, training)
+        logicals = list(batches(items, vocabulary, training))
+        # A logical batch is the next five samples, split in parts of two at most.
+        assert [sum(len(micro) for micro, _ in logical) for logical in logicals] == [5] * (len(items) // 5) + (
+            [len(items) % 5] if len(items) % 5 else [])
+        assert all(len(micro) <= 2 for logical in logicals for micro, _ in logical)
+        for start, logical in zip(range(0, len(items), 5), logicals):
+            assert sorted(id(item) for micro, _ in logical for item in micro) == sorted(map(id, items[start:start + 5]))
         with torch.no_grad():
-            results.append(torch.cat([model.replay(prepared)[0] for prepared in replays(micros, vocabulary, training)]))
+            rows = {id(item): row for logical in logicals for micro, prepared in logical
+                    for item, row in zip(micro, model.replay(prepared)[0])}
+        results.append(torch.stack([rows[id(item)] for item in items]))
     assert torch.equal(results[0], results[1])
     with torch.no_grad():
         direct = torch.stack([replay_batch(model, vocabulary, [item.macro["steps"]])[0][0] for item in items])
@@ -68,10 +74,13 @@ def test_batch_budgets_count_every_decision_of_a_multi_step_sample():
     for micro in micros:
         rows = sum(len(item._lengths) for item in micro)
         assert rows * 32 <= training.token_budget
-    # A sample over the budget on its own is still trained, alone.
+    # A sample over the budget on its own is still trained, alone; the short ones go together.
     tight = TrainConfig(precision="no", token_buckets=[32, 64], action_buckets=[8, 16],
                         token_budget=64, loader_workers=0)
-    assert [len(m) for m in microbatches(items, tight)] == [1] * len(items)
+    alone = microbatches(items, tight)
+    over = [m for m in alone if sum(len(item._lengths) for item in m) * 32 > tight.token_budget]
+    assert sum(map(len, alone)) == len(items) and over and all(len(m) == 1 for m in over)
+    assert [len(m) for m in alone if m not in over] == [2, 2]
 
 
 def test_replay_matches_the_sampling_path():

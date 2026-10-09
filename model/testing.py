@@ -12,7 +12,16 @@ class SyntheticEngine:
     def reset(self, character="Ironclad", seed="test", ascension=10):
         self.character, self.seed, self.ascension = character, str(seed), ascension
         self.selected, self.version, self.stage = [], 0, "selection"
-        self.events = []
+        self.events = [
+            {
+                "type": "encounter_started",
+                "encounter_id": "ordinary",
+                "encounter": "ENCOUNTER.SYNTHETIC",
+                "act": 1,
+                "kind": "normal",
+                "from_event": False,
+            }
+        ]
         self.commands = []
         return self.frame()
 
@@ -20,7 +29,8 @@ class SyntheticEngine:
     def contract(self):
         return {
             "adapter_version": "synthetic-v1",
-            "observation_schema": "public-v1",
+            "observation_schema": "public-state-v6",
+            "public_history_version": "public-history-v1",
             "action_schema": "candidate-v1",
             "fixed_ascension": getattr(self, "ascension", 10),
             "training_ready": True,

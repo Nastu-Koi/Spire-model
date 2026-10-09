@@ -182,6 +182,7 @@ public partial class RunSimulator
     private int _goldBeforeCombat;
     private int _lastKnownHp;
     private readonly HeadlessCardSelector _cardSelector = new();
+    private IDisposable? _selectorScope;
     private readonly PendingOperation _pendingOperation = new();
     // Pending bundle selection (Scroll Boxes: pick 1 of N packs)
     private IReadOnlyList<IReadOnlyList<CardModel>>? _pendingBundles;
@@ -197,6 +198,78 @@ public partial class RunSimulator
     {
         if (state.CurrentSide == CombatSide.Player) _playerTurnStarted.Set();
         _turnStarted.Set();
+    }
+
+    private void OnCombatEnded(CombatRoom room) => _combatEnded.Set();
+
+    /// <summary>True once this simulator has been asked to start or load a run.</summary>
+    public bool HasBegun { get; private set; }
+
+    // Set when an exception escaped game code; the state it left is unknown.
+    private string? _fault;
+
+    /// <summary>
+    /// End the run as the game does when it returns to the menu, so that another
+    /// simulator can begin a run in this process. A simulator drives one run: its
+    /// successor starts from the state a new process would have. Returns why the run
+    /// cannot be ended, or null.
+    ///
+    /// The run can be ended wherever the game waits for the player outside combat,
+    /// also with a reward menu or a card selection open: the game code parked at
+    /// such a prompt is never resumed. It cannot be ended after it failed inside the
+    /// engine, or while its game code is executing or blocking a thread.
+    /// </summary>
+    public string? EndRun()
+    {
+        if ((_fault ?? _protocolFailure) is { } failure) return "it failed in the engine: " + failure;
+        if (RunManager.Instance.IsInProgress)
+        {
+            if (CombatManager.Instance.IsInProgress) return "combat is in progress";
+            try
+            {
+                _syncCtx.Pump();
+                bool prompt = HasProtocolRewardMenu || _cardSelector.HasPending;
+                if (_pendingOperation.IsRunning && !prompt) return "an operation is still executing";
+                if (_protocolUiOperation.IsActive || HasProtocolCrystal || _cardSelector.HasPendingReward
+                    || (_pendingBundleTcs != null && !_pendingBundleTcs.Task.IsCompleted)
+                    || NativeContinuations.Pending || RunManager.Instance.ActionExecutor.IsRunning)
+                    return "game code of the run is still executing";
+                RunManager.Instance.CleanUp(graceful: true);
+                _syncCtx.Pump();
+            }
+            catch (Exception ex)
+            {
+                _fault = "EndRun failed";
+                return "ending it failed: " + ex.Message;
+            }
+        }
+        // The game's managers outlive a run; a simulator left subscribed would stay
+        // alive with its run and hear the combats of later ones.
+        CombatManager.Instance.TurnStarted -= OnTurnStarted;
+        CombatManager.Instance.CombatEnded -= OnCombatEnded;
+        UnregisterProtocolMilestones();
+        // In test mode the game leaves the selector to whoever installed it.
+        _selectorScope?.Dispose();
+        _selectorScope = null;
+        RewardsSet.testSelector = TakeEveryReward;
+        NativeContinuations.Clear();
+        if (ReferenceEquals(_protocolUiOwner, this)) _protocolUiOwner = null;
+        if (ReferenceEquals(LocPatches._bundleSimRef, this)) LocPatches._bundleSimRef = null;
+        _decisionGate.Invalidate();
+        _runState = null;
+        return null;
+    }
+
+    // The built-in test reward selector assumes every reward is taken.
+    // Mirror leaving the reward screen after our explicit take/skip prompts
+    // so skipped cards finish the set and its event continuation can resume.
+    private static async Task TakeEveryReward(RewardsSet set)
+    {
+        var synchronizer = RunManager.Instance.RewardsSetSynchronizer;
+        foreach (var reward in set.Rewards)
+            await synchronizer.SelectLocalReward(reward);
+        if (!synchronizer.IsRewardsSetCompleted(set))
+            synchronizer.SkipLocalRewardsSet();
     }
 
     private bool HasPendingInteraction() => _cardSelector.HasPending
@@ -225,6 +298,7 @@ public partial class RunSimulator
     public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null, string lang = "en",
         bool decisionProtocol = false, IReadOnlyList<string>? actIds = null)
     {
+        HasBegun = true;
         ResetDecisionProtocol(ascension);
         _protocolTrainingRun = decisionProtocol && ascension is >= 0 and <= 10;
         try
@@ -265,7 +339,7 @@ public partial class RunSimulator
 
             // Register event handlers for combat turn transitions
             CombatManager.Instance.TurnStarted += OnTurnStarted;
-            CombatManager.Instance.CombatEnded += _ => _combatEnded.Set();
+            CombatManager.Instance.CombatEnded += OnCombatEnded;
 
             // Finalize starting relics
             RunManager.Instance.FinalizeStartingRelics().GetAwaiter().GetResult();
@@ -276,7 +350,7 @@ public partial class RunSimulator
             Log("Entered Act 0");
 
             // Register card selector for cards that need player choice
-            CardSelectCmd.UseSelector(_cardSelector);
+            _selectorScope = CardSelectCmd.UseSelector(_cardSelector);
             LocPatches._bundleSimRef = this;
 
             // Now we should be at the map — detect decision point
@@ -490,6 +564,7 @@ public partial class RunSimulator
     // ─── Game actions ───
     public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en", bool diagnosticProtocol = false)
     {
+        HasBegun = true;
         // A loaded save needs a separate contract audit before training use.
         ResetDecisionProtocol(null);
         try
@@ -520,8 +595,8 @@ public partial class RunSimulator
             LocalContext.NetId = netService.NetId;
 
             CombatManager.Instance.TurnStarted += OnTurnStarted;
-            CombatManager.Instance.CombatEnded += _ => _combatEnded.Set();
-            CardSelectCmd.UseSelector(_cardSelector);
+            CombatManager.Instance.CombatEnded += OnCombatEnded;
+            _selectorScope = CardSelectCmd.UseSelector(_cardSelector);
             LocPatches._bundleSimRef = this;
 
             var savedRoom = _runState.CurrentRoom;
@@ -3022,6 +3097,7 @@ public partial class RunSimulator
 
         TestMode.IsOn = true;
         HeadlessMerchantParity.Install();
+        AnchorMerchant.Install();
 
         // The current engine requires mod discovery and assembly metadata even
         // for unmodded runs. TestMode skips filesystem/workshop mod loading.
@@ -3070,6 +3146,7 @@ public partial class RunSimulator
         SelectionMetadata.Install();
         HeadlessEventPresentation.Install();
         NativeContinuations.Install();
+        Spire.PublicHistory.NativeHistory.Install(new HarmonyLib.Harmony("local.sts2.public-history"));
 
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
@@ -3096,17 +3173,7 @@ public partial class RunSimulator
         // Progress now resolves character models, so register ModelDb first.
         SaveManager.Instance.InitProgressData();
 
-        // The built-in test reward selector assumes every reward is taken.
-        // Mirror leaving the reward screen after our explicit take/skip prompts
-        // so skipped cards finish the set and its event continuation can resume.
-        RewardsSet.testSelector = async set =>
-        {
-            var synchronizer = RunManager.Instance.RewardsSetSynchronizer;
-            foreach (var reward in set.Rewards)
-                await synchronizer.SelectLocalReward(reward);
-            if (!synchronizer.IsRewardsSetCompleted(set))
-                synchronizer.SkipLocalRewardsSet();
-        };
+        RewardsSet.testSelector = TakeEveryReward;
 
         // Initialize net ID serialization cache (needed for combat actions)
         try
@@ -3814,8 +3881,9 @@ public partial class RunSimulator
     private static Dictionary<string, object?> Error(string message) =>
         new() { ["type"] = "error", ["message"] = message };
 
-    private static Dictionary<string, object?> ErrorWithTrace(string context, Exception ex)
+    private Dictionary<string, object?> ErrorWithTrace(string context, Exception ex)
     {
+        _fault ??= context;
         var inner = ex;
         while (inner.InnerException != null) inner = inner.InnerException;
         return new Dictionary<string, object?>

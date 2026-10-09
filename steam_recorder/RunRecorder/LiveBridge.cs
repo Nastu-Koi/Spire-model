@@ -23,6 +23,8 @@ using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
@@ -33,6 +35,8 @@ namespace RunRecorder;
 // Tick is called by the Godot timer: no game object is touched by a worker thread.
 internal static class LiveBridge
 {
+    // Card rewards are published with their cards; a chest is opened by an action.
+    private const string Protocol = "steam-live-v2";
     private static readonly AsyncLocal<bool> Origin = new();
     internal static bool Executing => Origin.Value;
     private static Snapshot _snapshot = new() { TrackObjects = true };
@@ -41,24 +45,85 @@ internal static class LiveBridge
     private static JsonElement _state;
     private static readonly List<Task> Pending = new();
     private static DateTime _lastAdvance;
-    private static object? _skippedTreasure;
+    private static DateTime _lastRequest;
+    private static string? _rewardError;
+    private static bool? _outcome;
+    private static RunState? _outcomeRun;
+    internal static bool Enabled { get; private set; } = true;
+    internal static string Status => !Enabled ? "接管：已暂停" :
+        DateTime.UtcNow - _lastRequest < TimeSpan.FromSeconds(30) ? "接管：已连接" : "接管：等待模型连接";
     private static string DirectoryPath => Path.Combine(Recorder.OutputDirectory, "bridge");
+
+    internal static void SetEnabled(bool enabled)
+    {
+        if (Enabled != enabled) _token = _hash = "";
+        if (!enabled) { LiveRewards.Reset(); _rewardError = null; }
+        Enabled = enabled;
+    }
+
+    internal static void RunEnded(bool victory)
+    {
+        _outcomeRun = RunManager.Instance?.DebugOnlyGetState();
+        _outcome = victory;
+    }
+
+    internal static void Reset()
+    {
+        _run = null;
+        _outcome = null;
+        _outcomeRun = null;
+        _token = _hash = "";
+        Pending.Clear();
+        _lastAdvance = default;
+        LiveRewards.Reset();
+        _rewardError = null;
+    }
 
     internal static void Tick()
     {
+        // Complete only a previously authorized reward choice. This runs on the
+        // Godot thread even if the controller is waiting between requests.
+        if (Enabled)
+        {
+            Origin.Value = true;
+            try { LiveRewards.Tick(); }
+            catch (Exception ex)
+            {
+                LiveRewards.Reset();
+                _rewardError = ex.GetBaseException().Message;
+                GD.PushError("[RunRecorder card reward] " + ex);
+            }
+            finally { Origin.Value = false; }
+        }
         var requestPath = Path.Combine(DirectoryPath, "request.json");
         if (!File.Exists(requestPath)) return;
         string id = "";
+        bool uniqueResponse = false;
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(requestPath));
+            using var document = TakeRequest(requestPath);
+            if (document == null) return;
             var request = document.RootElement;
             id = request.GetProperty("id").GetString()!;
-            File.Delete(requestPath); // Consume before any side effect; never replay a request.
+            uniqueResponse = request.TryGetProperty("unique_response", out var unique) && unique.GetBoolean();
+            if (uniqueResponse && !Guid.TryParseExact(id, "N", out _))
+                throw new InvalidOperationException("Invalid bridge request ID");
+            _lastRequest = DateTime.UtcNow;
+            if (!Enabled)
+            {
+                Reply(id, new { status = "paused", reason = "Model control is disabled in the in-game RunRecorder switches" }, uniqueResponse);
+                return;
+            }
             foreach (var task in Pending.Where(t => t.IsCompleted).ToArray())
             {
                 Pending.Remove(task);
                 task.GetAwaiter().GetResult();
+            }
+            if (_rewardError is { } rewardError)
+            {
+                _rewardError = null;
+                Reply(id, new { status = "error", error = rewardError }, uniqueResponse);
+                return;
             }
             object result;
             Origin.Value = true;
@@ -73,30 +138,51 @@ internal static class LiveBridge
                 };
             }
             finally { Origin.Value = false; }
-            Reply(id, result);
+            Reply(id, result, uniqueResponse);
         }
         catch (Exception ex)
         {
-            Reply(id, new { status = "error", error = ex.GetBaseException().Message });
+            Reply(id, new { status = "error", error = ex.GetBaseException().Message }, uniqueResponse);
             GD.PushError("[RunRecorder bridge] " + ex);
         }
     }
 
-    private static void Reply(string id, object payload)
+    private static JsonDocument? TakeRequest(string path)
+    {
+        try
+        {
+            JsonDocument document;
+            // WSL can briefly retain a handle after publishing request.json.
+            // Permit that handle, and retry transient conflicts on the next tick.
+            using (var stream = new FileStream(path, FileMode.Open, System.IO.FileAccess.Read,
+                       FileShare.ReadWrite | FileShare.Delete))
+                document = JsonDocument.Parse(stream);
+            try
+            {
+                File.Delete(path); // Consume before any side effect; never replay a request.
+                return document;
+            }
+            catch { document.Dispose(); throw; }
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (JsonException) { return null; }
+    }
+
+    private static void Reply(string id, object payload, bool uniqueResponse = false)
     {
         Directory.CreateDirectory(DirectoryPath);
         var node = JsonSerializer.SerializeToNode(payload)!.AsObject();
         node["id"] = id;
-        string destination = Path.Combine(DirectoryPath, "response.json");
+        // The controller refuses a bridge that publishes or executes differently.
+        node["protocol"] = Protocol;
+        node["recorder"] = typeof(LiveBridge).Assembly.GetName().Version?.ToString(3);
+        // Python may be reading the previous response on a WSL mount. A fresh
+        // filename avoids Windows denying replacement of an open response.json.
+        string destination = Path.Combine(DirectoryPath, uniqueResponse && Guid.TryParseExact(id, "N", out _)
+            ? "response-" + id + ".json" : "response.json");
         File.WriteAllText(destination + ".tmp", node.ToJsonString());
         File.Move(destination + ".tmp", destination, true);
-    }
-
-    private static IEnumerable<Node> Nodes(Node node)
-    {
-        yield return node;
-        foreach (var child in node.GetChildren())
-            foreach (var item in Nodes(child)) yield return item;
     }
 
     private static bool Ready()
@@ -107,13 +193,17 @@ internal static class LiveBridge
             !manager.IsSingleplayerOrFakeMultiplayer || run.Players.Count != 1) return false;
         if (run != _run)
         {
+            if (_outcomeRun != run) _outcome = null;
             _run = run;
             _episode = Guid.NewGuid().ToString("N");
             _snapshot = new Snapshot { TrackObjects = true };
             _token = _hash = "";
             Pending.Clear();
+            LiveRewards.Reset();
+            _rewardError = null;
         }
-        if (run.AscensionLevel != 10) throw new InvalidOperationException("Model expects a single-player A10 game");
+        if (run.AscensionLevel is < 0 or > 10)
+            throw new InvalidOperationException("Model expects a single-player A0-A10 game");
         return true;
     }
 
@@ -126,18 +216,49 @@ internal static class LiveBridge
 
     private static JsonElement? Capture()
     {
+        if (LiveRewards.BlocksCapture()) return null;
         var selection = SelectionCapture.Active;
         if (selection?.Offer != null)
-            return JsonSerializer.SerializeToElement(_snapshot.Capture(_run!, decision: "card_selection", source: selection.Offer));
-        if (_skippedTreasure == _run!.CurrentRoom && _skippedTreasure != null
-            && NMapScreen.Instance?.IsOpen != true) return null;
-        if (Pending.Any(t => !t.IsCompleted) || RunManager.Instance.ActionExecutor?.IsRunning == true) return null;
+            return LiveUi.SelectionReady(selection)
+                ? JsonSerializer.SerializeToElement(_snapshot.Capture(_run!, decision: "card_selection", source: selection.Offer)) : null;
+        if (RunManager.Instance.ActionExecutor?.IsRunning == true) return null;
         if (CombatManager.Instance.IsInProgress && CombatManager.Instance.PlayerActionsDisabled) return null;
+        // Terminal rewards remain in the overlay stack underneath the map.
+        // The visible map takes precedence over that retained rewards screen.
+        if (NMapScreen.Instance is { IsOpen: true } map)
+            return map.IsTravelEnabled
+                ? JsonSerializer.SerializeToElement(_snapshot.Capture(_run!, decision: "MoveToMapCoordAction")) : null;
         var overlay = NOverlayStack.Instance?.Peek();
         if (Crystal() is { IsFinished: false } crystal)
             return JsonSerializer.SerializeToElement(_snapshot.Capture(_run!, decision: "crystal_sphere_cell", source: crystal));
         if (overlay != null && overlay.GetType().Name != "NRewardsScreen") return null;
-        return JsonSerializer.SerializeToElement(_snapshot.Capture(_run!, decision: "UsePotionAction"));
+        if (overlay == null && Pending.Any(t => !t.IsCompleted)) return null;
+        string decision = overlay is NRewardsScreen ? "take_reward" : "UsePotionAction";
+        if (overlay == null && NMapScreen.Instance?.IsOpen != true && _run!.CurrentRoom is TreasureRoom)
+        {
+            var room = LiveUi.Nodes(NGame.Instance).OfType<NTreasureRoom>().FirstOrDefault(r => r.IsVisibleInTree());
+            if (room == null) return null;
+            // Opening a chest has effects and reveals its relics: it is the policy's action.
+            if (LiveUi.ChestButton(room) != null) decision = "open_chest";
+            else if (!LiveUi.TreasureReady(room)) return null;
+        }
+        var captured = JsonSerializer.SerializeToNode(_snapshot.Capture(_run!, decision: decision))!;
+        var actions = captured["legal"]!["actions"]!.AsArray();
+        bool hadUiAction = false, hasUiAction = false;
+        for (int i = actions.Count - 1; i >= 0; i--)
+        {
+            var action = JsonSerializer.SerializeToElement(actions[i]);
+            var command = action.GetProperty("command").GetString()!;
+            if (LiveUi.Handles(command))
+            {
+                hadUiAction = true;
+                if (LiveUi.Resolve(command, action.GetProperty("args"), _snapshot) == null) actions.RemoveAt(i);
+                else hasUiAction = true;
+            }
+        }
+        if (hadUiAction && !hasUiAction) return null;
+        LiveRewards.Expand(captured, _snapshot);
+        return JsonSerializer.SerializeToElement(captured);
     }
 
     private static string Hash(JsonElement state)
@@ -149,8 +270,8 @@ internal static class LiveBridge
 
     private static object Observe()
     {
-        if (!Ready()) return new { status = "waiting", reason = "Start or load a single-player A10 run" };
-        if (Recorder.LiveOutcome is bool outcome) return new { status = "terminal", victory = outcome };
+        if (!Ready()) return new { status = "waiting", reason = "Start or load a single-player run matching the model's ascension" };
+        if (_outcome is bool outcome) return new { status = "terminal", victory = outcome };
         var captured = Capture();
         if (captured == null) return new { status = "waiting", reason = "Game is animating or waiting for its UI" };
         var state = captured.Value;
@@ -194,11 +315,27 @@ internal static class LiveBridge
             throw new InvalidOperationException("Invalid buffered card selection");
     }
 
-    private static void Track(Task task) => Pending.Add(task);
+    internal static void Track(Task task)
+    {
+        LiveRewards.Track(task);
+        if (!Pending.Contains(task)) Pending.Add(task);
+    }
     private static int? Index(JsonElement args) => args.GetProperty("index").ValueKind == JsonValueKind.Null ? null : args.GetProperty("index").GetInt32();
 
     private static void Dispatch(string command, JsonElement args)
     {
+        if (LiveRewards.Handles(command))
+        {
+            LiveRewards.Begin(command, args, _snapshot, _run!);
+            return;
+        }
+        if (LiveUi.Handles(command))
+        {
+            var button = LiveUi.Resolve(command, args, _snapshot)
+                ?? throw new InvalidOperationException("Game UI is not ready for " + command);
+            LiveUi.Click(button);
+            return;
+        }
         var manager = RunManager.Instance;
         var player = _run!.Players[0];
         object Object(string key) => _snapshot.Resolve(args.GetProperty(key).GetInt64());
@@ -213,15 +350,7 @@ internal static class LiveBridge
             case "select_map_node":
                 manager.ActionQueueSynchronizer.RequestEnqueue(new MoveToMapCoordAction(player,
                     new MapCoord(args.GetProperty("col").GetInt32(), args.GetProperty("row").GetInt32()))); break;
-            case "choose_event_option": Track(((EventOption)Object("option_instance_id")).Chosen()); break;
-            case "choose_rest_option": Track(manager.RestSiteSynchronizer.ChooseLocalOption(args.GetProperty("index").GetInt32())); break;
             case "purchase": Track(((MerchantEntry)Object("entry_instance_id")).OnTryPurchaseWrapper(((MerchantRoom)_run.CurrentRoom!).GetLocalInventory())); break;
-            case "leave_shop": NMapScreen.Instance.Open(); break;
-            case "pick_relic":
-                if (Index(args) == null) _skippedTreasure = _run.CurrentRoom;
-                manager.TreasureRoomRelicSynchronizer.PickRelicLocally(Index(args)); break;
-            case "take_reward": Track(manager.RewardsSetSynchronizer.SelectLocalReward((Reward)Object("reward_instance_id"))); break;
-            case "skip_rewards": manager.RewardsSetSynchronizer.SkipLocalRewardsSet(); break;
             case "select_reward_option": CompleteSelection<int?>(Index(args)); break;
             case "select_bundle":
                 CompleteSelection<IEnumerable<IReadOnlyList<CardModel>>>(new[] { SelectionCapture.Active!.Offer!.Bundles![Index(args)!.Value] }); break;
@@ -239,13 +368,11 @@ internal static class LiveBridge
     private static void CompleteSelection<T>(T value)
     {
         var overlay = NOverlayStack.Instance?.Peek();
-        var nodes = overlay is Node top ? new[] { top } : Nodes(NGame.Instance).Where(n => n.GetType().Name == "NPlayerHand");
+        var nodes = overlay is Node top ? new[] { top } : LiveUi.Nodes(NGame.Instance).Where(n => n.GetType().Name == "NPlayerHand");
         foreach (var node in nodes)
         {
-            var source = Snapshot.Read(node, "_completionSource") ?? Snapshot.Read(node, "_selectionCompletionSource");
-            if (source is TaskCompletionSource<T> completion && !completion.Task.IsCompleted)
+            if (LiveUi.CompleteSelectionTask(node, value))
             {
-                if (!completion.TrySetResult(value)) throw new InvalidOperationException("Selection already completed");
                 // Grid screens normally close in their click handlers; other selectors close in their awaiting task.
                 if (node is NCardGridSelectionScreen grid && GodotObject.IsInstanceValid(grid) && grid.IsInsideTree())
                     NOverlayStack.Instance.Remove(grid);
@@ -257,29 +384,18 @@ internal static class LiveBridge
 
     private static object Advance()
     {
-        if (!Ready() || Recorder.LiveOutcome != null || SelectionCapture.Active != null ||
-            Pending.Any(t => !t.IsCompleted) || RunManager.Instance.ActionExecutor?.IsRunning == true ||
+        if (!Ready() || _outcome != null || LiveRewards.BlocksCapture() || SelectionCapture.Active != null ||
+            RunManager.Instance.ActionExecutor?.IsRunning == true ||
             CombatManager.Instance.IsInProgress || DateTime.UtcNow - _lastAdvance < TimeSpan.FromSeconds(.5))
             return new { status = "waiting" };
-        var overlay = NOverlayStack.Instance?.Peek();
-        if (overlay != null)
+        // Pending event/reward tasks may themselves await a visible Continue.
+        // Their lifetime must not block presentation or nested reward screens.
+        var button = LiveUi.PresentationButton(_run!);
+        if (button != null)
         {
-            if (overlay.GetType().Name != "NRewardsScreen") return new { status = "waiting" };
-            var rewards = Snapshot.ActiveRewardsSet(_run!, null);
-            if (rewards?.Rewards.Any(r => !r.SuccessfullySelected) == true) return new { status = "waiting" };
-        }
-        // Advance only presentation controls. Never pick a card, event option or map node here.
-        foreach (var node in Nodes(NGame.Instance).OfType<NButton>())
-        {
-            if (!node.IsVisibleInTree() || Snapshot.Read(node, "IsEnabled") is not true) continue;
-            var name = node.GetType().Name;
-            if (name == "NProceedButton" && Snapshot.Read(node, "IsSkip") is true && _skippedTreasure != _run!.CurrentRoom) continue;
-            if (name is "NProceedButton" or "NAncientDialogueHitbox" or "NTreasureButton")
-            {
-                _lastAdvance = DateTime.UtcNow;
-                node.EmitSignal("Released", node);
-                return new { status = "advanced" };
-            }
+            _lastAdvance = DateTime.UtcNow;
+            LiveUi.Click(button);
+            return new { status = "advanced", control = button.GetType().Name };
         }
         return new { status = "waiting" };
     }

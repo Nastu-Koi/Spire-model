@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Threading.Tasks;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
@@ -16,13 +17,19 @@ namespace RunRecorder;
 
 internal static class SelectionPatches
 {
+    internal static void CombatPileScreenCreated(object __result) =>
+        SelectionCapture.Safe(() => SelectionCapture.BindCombatPileScreen(__result));
+
+    internal static void CombatPileScreenRefreshed(object __instance) =>
+        SelectionCapture.Safe(() => SelectionCapture.RefreshCombatPileScreen(__instance));
+
     internal static void SelectionHandEntry(CardSelectorPrefs __0, Func<CardModel, bool>? __1)
     {
-        Recorder.Safe(() => SelectionCapture.ObserveHandEntry(__0, __1));
+        SelectionCapture.Safe(() => SelectionCapture.ObserveHandEntry(__0, __1));
     }
 	internal static void RewardScreenCreated(object? __result)
 	{
-		Recorder.Safe(delegate
+		SelectionCapture.Safe(delegate
 		{
 			SelectionCapture.BindRewardScreen(__result);
 		});
@@ -30,11 +37,25 @@ internal static class SelectionPatches
 
 	internal static void RewardScreenRefreshed(object __instance, IReadOnlyList<CardCreationResult> __0, IReadOnlyList<CardRewardAlternative> __1)
 	{
-		Recorder.Safe(delegate
+		SelectionCapture.Safe(delegate
 		{
 			SelectionCapture.RefreshRewardScreen(__instance, __0.ToArray(), __1.ToArray());
 		});
 	}
+
+    internal static void RewardSelectionStarted(object __instance)
+    {
+        SelectionCapture.Safe(() =>
+        {
+            // CardReward removes a taken card from its mutable list without
+            // calling RefreshOptions when a relic allows another pick.
+            if (Snapshot.Read(__instance, "_options") is IReadOnlyList<CardCreationResult> cards &&
+                Snapshot.Read(__instance, "_extraOptions") is IReadOnlyList<CardRewardAlternative> alternatives)
+                SelectionCapture.RefreshRewardScreen(__instance, cards.ToArray(), alternatives.ToArray());
+            if (Snapshot.Read(Snapshot.Read(__instance, "_completionSource"), "Task") is Task completion)
+                LiveRewards.RewardRoundStarted(__instance, completion);
+        });
+    }
 
 	internal static void SelectionEnter(MethodBase __originalMethod, object? __instance, object[] __args, out SelectionScope? __state)
 	{
@@ -57,7 +78,7 @@ internal static class SelectionPatches
 
 	internal static void ChoiceReserved(Player __0, uint __result)
 	{
-		Recorder.Safe(delegate
+		SelectionCapture.Safe(delegate
 		{
 			SelectionCapture.Reserved(__0, __result);
 		});
@@ -65,7 +86,7 @@ internal static class SelectionPatches
 
 	internal static void SelectionScreen(MethodBase __originalMethod, object[] __args)
 	{
-		Recorder.Safe(delegate
+		SelectionCapture.Safe(delegate
 		{
 			SelectionCapture.ObserveScreen(__originalMethod, __args);
 		});
@@ -73,7 +94,7 @@ internal static class SelectionPatches
 
 	internal static void SelectionHand(NPlayerHand __instance)
 	{
-		Recorder.Safe(delegate
+		SelectionCapture.Safe(delegate
 		{
 			SelectionCapture.ObserveHand(__instance);
 		});

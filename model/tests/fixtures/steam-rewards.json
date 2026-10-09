@@ -1,0 +1,1332 @@
+{
+ "status": "decision",
+ "token": "dc48b5a4d50c4f82a80b71e17f860675",
+ "episode": "9c0933792b7e47ac9e38f7287c9ee84d",
+ "state": {
+  "run": {
+   "seed": "KXRULCF97ZFS",
+   "ascension": 10,
+   "act": 1,
+   "floor": 2,
+   "total_floor": 2,
+   "location": {
+    "type": "MegaCrit.Sts2.Core.Map.MapCoord",
+    "col": 4,
+    "row": 1
+   },
+   "room": "Monster",
+   "room_id": "SEAPUNK_WEAK",
+   "game_over": false,
+   "engine_game_over": false,
+   "ended": false,
+   "victory": null,
+   "abandoned": false,
+   "win_time": 0,
+   "boss": "LAGAVULIN_MATRIARCH_BOSS",
+   "visited": [
+    {
+     "type": "MegaCrit.Sts2.Core.Map.MapCoord",
+     "col": 3,
+     "row": 0
+    },
+    {
+     "type": "MegaCrit.Sts2.Core.Map.MapCoord",
+     "col": 4,
+     "row": 1
+    }
+   ]
+  },
+  "domain": "strategic",
+  "legal": {
+   "schema": 1,
+   "status": "complete",
+   "scope": "reward_choice",
+   "reason": null,
+   "context": {
+    "reward_set_id": 0,
+    "disallow_skipping": false,
+    "rewards": [
+     {
+      "instance_id": 139,
+      "type": "MegaCrit.Sts2.Core.Rewards.GoldReward",
+      "reward_type": "Gold",
+      "selected": false,
+      "description": "LocString table gameplay_ui entry COMBAT_REWARD_GOLD",
+      "cards": null,
+      "value": 12
+     },
+     {
+      "instance_id": 140,
+      "type": "MegaCrit.Sts2.Core.Rewards.CardReward",
+      "reward_type": "Card",
+      "selected": false,
+      "description": "LocString table gameplay_ui entry COMBAT_REWARD_ADD_CARD",
+      "cards": [
+       {
+        "instance_id": 141,
+        "id": "STOMP",
+        "type": "MegaCrit.Sts2.Core.Models.Cards.Stomp",
+        "upgraded": false,
+        "upgrade_level": 0,
+        "cost": 3,
+        "current_cost": 3,
+        "costs_x": false,
+        "target_type": "AllEnemies",
+        "card_type": "Attack",
+        "rarity": "Uncommon",
+        "keywords": [],
+        "vars": {
+         "Damage": {
+          "base_value": 12,
+          "value": 12
+         }
+        },
+        "enchantment": null,
+        "affliction": null,
+        "star_cost": -1,
+        "current_star_cost": -1,
+        "base_star_cost": -1,
+        "stars_x": false,
+        "retain": false,
+        "exhaust_on_next_play": false,
+        "saved_properties": null,
+        "mad_science": null,
+        "playability": null
+       },
+       {
+        "instance_id": 142,
+        "id": "FLAME_BARRIER",
+        "type": "MegaCrit.Sts2.Core.Models.Cards.FlameBarrier",
+        "upgraded": false,
+        "upgrade_level": 0,
+        "cost": 2,
+        "current_cost": 2,
+        "costs_x": false,
+        "target_type": "Self",
+        "card_type": "Skill",
+        "rarity": "Uncommon",
+        "keywords": [],
+        "vars": {
+         "Block": {
+          "base_value": 12,
+          "value": 12
+         },
+         "DamageBack": {
+          "base_value": 4,
+          "value": 4
+         }
+        },
+        "enchantment": null,
+        "affliction": null,
+        "star_cost": -1,
+        "current_star_cost": -1,
+        "base_star_cost": -1,
+        "stars_x": false,
+        "retain": false,
+        "exhaust_on_next_play": false,
+        "saved_properties": null,
+        "mad_science": null,
+        "playability": null
+       },
+       {
+        "instance_id": 143,
+        "id": "FIGHT_ME",
+        "type": "MegaCrit.Sts2.Core.Models.Cards.FightMe",
+        "upgraded": false,
+        "upgrade_level": 0,
+        "cost": 2,
+        "current_cost": 2,
+        "costs_x": false,
+        "target_type": "AnyEnemy",
+        "card_type": "Attack",
+        "rarity": "Uncommon",
+        "keywords": [],
+        "vars": {
+         "Damage": {
+          "base_value": 5,
+          "value": 5
+         },
+         "Repeat": {
+          "base_value": 2,
+          "value": 2
+         },
+         "StrengthPower": {
+          "base_value": 3,
+          "value": 3
+         },
+         "EnemyStrength": {
+          "base_value": 1,
+          "value": 1
+         }
+        },
+        "enchantment": null,
+        "affliction": null,
+        "star_cost": -1,
+        "current_star_cost": -1,
+        "base_star_cost": -1,
+        "stars_x": false,
+        "retain": false,
+        "exhaust_on_next_play": false,
+        "saved_properties": null,
+        "mad_science": null,
+        "playability": null
+       }
+      ],
+      "value": null,
+      "alternatives": [],
+      "expanded_card_reward": true
+     }
+    ],
+    "expanded_card_rewards": true
+   },
+   "selection": null,
+   "actions": [
+    {
+     "command": "take_reward",
+     "args": {
+      "reward_instance_id": 139
+     }
+    },
+    {
+     "command": "take_card_reward",
+     "args": {
+      "reward_instance_id": 140,
+      "card_instance_id": 141
+     }
+    },
+    {
+     "command": "take_card_reward",
+     "args": {
+      "reward_instance_id": 140,
+      "card_instance_id": 142
+     }
+    },
+    {
+     "command": "take_card_reward",
+     "args": {
+      "reward_instance_id": 140,
+      "card_instance_id": 143
+     }
+    },
+    {
+     "command": "skip_rewards",
+     "args": {
+      "reward_set_id": 0
+     }
+    }
+   ]
+  },
+  "current_event": null,
+  "event_state_ready": false,
+  "players": [
+   {
+    "character": "IRONCLAD",
+    "creature": {
+     "instance_id": 8,
+     "combat_id": 0,
+     "id": "IRONCLAD",
+     "hp": 54,
+     "max_hp": 80,
+     "block": 0,
+     "alive": true,
+     "powers": [],
+     "move": null,
+     "intents": []
+    },
+    "gold": 99,
+    "deck": [
+     {
+      "instance_id": 9,
+      "id": "STRIKE_IRONCLAD",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.StrikeIronclad",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 1,
+      "current_cost": 1,
+      "costs_x": false,
+      "target_type": "AnyEnemy",
+      "card_type": "Attack",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Damage": {
+        "base_value": 6,
+        "value": 6
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 10,
+      "id": "STRIKE_IRONCLAD",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.StrikeIronclad",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 1,
+      "current_cost": 1,
+      "costs_x": false,
+      "target_type": "AnyEnemy",
+      "card_type": "Attack",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Damage": {
+        "base_value": 6,
+        "value": 6
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 11,
+      "id": "STRIKE_IRONCLAD",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.StrikeIronclad",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 1,
+      "current_cost": 1,
+      "costs_x": false,
+      "target_type": "AnyEnemy",
+      "card_type": "Attack",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Damage": {
+        "base_value": 6,
+        "value": 6
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 12,
+      "id": "STRIKE_IRONCLAD",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.StrikeIronclad",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 1,
+      "current_cost": 1,
+      "costs_x": false,
+      "target_type": "AnyEnemy",
+      "card_type": "Attack",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Damage": {
+        "base_value": 6,
+        "value": 6
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 13,
+      "id": "STRIKE_IRONCLAD",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.StrikeIronclad",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 1,
+      "current_cost": 1,
+      "costs_x": false,
+      "target_type": "AnyEnemy",
+      "card_type": "Attack",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Damage": {
+        "base_value": 6,
+        "value": 6
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 14,
+      "id": "DEFEND_IRONCLAD",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.DefendIronclad",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 1,
+      "current_cost": 1,
+      "costs_x": false,
+      "target_type": "Self",
+      "card_type": "Skill",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Block": {
+        "base_value": 5,
+        "value": 5
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 15,
+      "id": "DEFEND_IRONCLAD",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.DefendIronclad",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 1,
+      "current_cost": 1,
+      "costs_x": false,
+      "target_type": "Self",
+      "card_type": "Skill",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Block": {
+        "base_value": 5,
+        "value": 5
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 16,
+      "id": "DEFEND_IRONCLAD",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.DefendIronclad",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 1,
+      "current_cost": 1,
+      "costs_x": false,
+      "target_type": "Self",
+      "card_type": "Skill",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Block": {
+        "base_value": 5,
+        "value": 5
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 17,
+      "id": "DEFEND_IRONCLAD",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.DefendIronclad",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 1,
+      "current_cost": 1,
+      "costs_x": false,
+      "target_type": "Self",
+      "card_type": "Skill",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Block": {
+        "base_value": 5,
+        "value": 5
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 18,
+      "id": "BASH",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.Bash",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": 2,
+      "current_cost": 2,
+      "costs_x": false,
+      "target_type": "AnyEnemy",
+      "card_type": "Attack",
+      "rarity": "Basic",
+      "keywords": [],
+      "vars": {
+       "Damage": {
+        "base_value": 8,
+        "value": 8
+       },
+       "VulnerablePower": {
+        "base_value": 2,
+        "value": 2
+       }
+      },
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     },
+     {
+      "instance_id": 19,
+      "id": "ASCENDERS_BANE",
+      "type": "MegaCrit.Sts2.Core.Models.Cards.AscendersBane",
+      "upgraded": false,
+      "upgrade_level": 0,
+      "cost": -1,
+      "current_cost": 0,
+      "costs_x": false,
+      "target_type": "None",
+      "card_type": "Curse",
+      "rarity": "Curse",
+      "keywords": [
+       "Eternal",
+       "Unplayable",
+       "Ethereal"
+      ],
+      "vars": {},
+      "enchantment": null,
+      "affliction": null,
+      "star_cost": -1,
+      "current_star_cost": -1,
+      "base_star_cost": -1,
+      "stars_x": false,
+      "retain": false,
+      "exhaust_on_next_play": false,
+      "saved_properties": null,
+      "mad_science": null,
+      "playability": null
+     }
+    ],
+    "relics": [
+     {
+      "instance_id": 20,
+      "id": "BURNING_BLOOD",
+      "type": "MegaCrit.Sts2.Core.Models.Relics.BurningBlood",
+      "title": "LocString table relics entry BURNING_BLOOD.title",
+      "description": "LocString table relics entry BURNING_BLOOD.description",
+      "amount": null,
+      "counter": 0,
+      "status": "Normal",
+      "target_type": null,
+      "vars": {
+       "Heal": {
+        "base_value": 6,
+        "value": 6
+       }
+      },
+      "saved_properties": null,
+      "passive_value": null,
+      "evoke_value": null
+     },
+     {
+      "instance_id": 2,
+      "id": "BOOMING_CONCH",
+      "type": "MegaCrit.Sts2.Core.Models.Relics.BoomingConch",
+      "title": "LocString table relics entry BOOMING_CONCH.title",
+      "description": "LocString table relics entry BOOMING_CONCH.description",
+      "amount": null,
+      "counter": 0,
+      "status": "Normal",
+      "target_type": null,
+      "vars": {
+       "Cards": {
+        "base_value": 2,
+        "value": 2
+       },
+       "Energy": {
+        "base_value": 1,
+        "value": 1
+       }
+      },
+      "saved_properties": null,
+      "passive_value": null,
+      "evoke_value": null
+     }
+    ],
+    "potions": [
+     {
+      "slot": 0,
+      "potion": null
+     },
+     {
+      "slot": 1,
+      "potion": null
+     }
+    ],
+    "max_potions": 2,
+    "combat": {
+     "phase": "None",
+     "energy": 0,
+     "max_energy": 3,
+     "stars": 0,
+     "hand": [],
+     "draw": [],
+     "discard": [],
+     "exhaust": [],
+     "play": [],
+     "orbs": [],
+     "orb_slots": 0
+    },
+    "osty": null
+   }
+  ],
+  "combat": {
+   "instance_id": 92,
+   "in_progress": false,
+   "round": 8,
+   "actions_disabled": false,
+   "enemies": []
+  },
+  "map": [
+   {
+    "col": 0,
+    "row": 3,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 0,
+      "row": 4
+     }
+    ]
+   },
+   {
+    "col": 0,
+    "row": 4,
+    "type": "Shop",
+    "children": [
+     {
+      "col": 1,
+      "row": 5
+     }
+    ]
+   },
+   {
+    "col": 0,
+    "row": 11,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 0,
+      "row": 12
+     }
+    ]
+   },
+   {
+    "col": 0,
+    "row": 12,
+    "type": "RestSite",
+    "children": [
+     {
+      "col": 0,
+      "row": 13
+     }
+    ]
+   },
+   {
+    "col": 0,
+    "row": 13,
+    "type": "Elite",
+    "children": [
+     {
+      "col": 1,
+      "row": 14
+     }
+    ]
+   },
+   {
+    "col": 1,
+    "row": 2,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 0,
+      "row": 3
+     }
+    ]
+   },
+   {
+    "col": 1,
+    "row": 5,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 1,
+      "row": 6
+     }
+    ]
+   },
+   {
+    "col": 1,
+    "row": 6,
+    "type": "RestSite",
+    "children": [
+     {
+      "col": 2,
+      "row": 7
+     },
+     {
+      "col": 1,
+      "row": 7
+     }
+    ]
+   },
+   {
+    "col": 1,
+    "row": 7,
+    "type": "Elite",
+    "children": [
+     {
+      "col": 1,
+      "row": 8
+     }
+    ]
+   },
+   {
+    "col": 1,
+    "row": 8,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 1,
+      "row": 9
+     }
+    ]
+   },
+   {
+    "col": 1,
+    "row": 9,
+    "type": "Treasure",
+    "children": [
+     {
+      "col": 1,
+      "row": 10
+     },
+     {
+      "col": 2,
+      "row": 10
+     }
+    ]
+   },
+   {
+    "col": 1,
+    "row": 10,
+    "type": "Elite",
+    "children": [
+     {
+      "col": 2,
+      "row": 11
+     },
+     {
+      "col": 0,
+      "row": 11
+     }
+    ]
+   },
+   {
+    "col": 1,
+    "row": 14,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 1,
+      "row": 15
+     }
+    ]
+   },
+   {
+    "col": 1,
+    "row": 15,
+    "type": "RestSite",
+    "children": [
+     {
+      "col": 3,
+      "row": 16
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 1,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 1,
+      "row": 2
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 2,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 2,
+      "row": 3
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 3,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 2,
+      "row": 4
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 4,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 3,
+      "row": 5
+     },
+     {
+      "col": 1,
+      "row": 5
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 6,
+    "type": "Elite",
+    "children": [
+     {
+      "col": 2,
+      "row": 7
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 7,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 1,
+      "row": 8
+     },
+     {
+      "col": 3,
+      "row": 8
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 10,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 2,
+      "row": 11
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 11,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 3,
+      "row": 12
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 13,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 1,
+      "row": 14
+     }
+    ]
+   },
+   {
+    "col": 2,
+    "row": 14,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 1,
+      "row": 15
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 1,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 2,
+      "row": 2
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 2,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 3,
+      "row": 3
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 3,
+    "type": "Shop",
+    "children": [
+     {
+      "col": 2,
+      "row": 4
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 5,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 3,
+      "row": 6
+     },
+     {
+      "col": 2,
+      "row": 6
+     },
+     {
+      "col": 4,
+      "row": 6
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 6,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 2,
+      "row": 7
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 8,
+    "type": "RestSite",
+    "children": [
+     {
+      "col": 4,
+      "row": 9
+     },
+     {
+      "col": 3,
+      "row": 9
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 9,
+    "type": "Treasure",
+    "children": [
+     {
+      "col": 2,
+      "row": 10
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 10,
+    "type": "RestSite",
+    "children": [
+     {
+      "col": 4,
+      "row": 11
+     },
+     {
+      "col": 3,
+      "row": 11
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 11,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 3,
+      "row": 12
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 12,
+    "type": "RestSite",
+    "children": [
+     {
+      "col": 3,
+      "row": 13
+     },
+     {
+      "col": 2,
+      "row": 13
+     },
+     {
+      "col": 4,
+      "row": 13
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 13,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 2,
+      "row": 14
+     },
+     {
+      "col": 4,
+      "row": 14
+     }
+    ]
+   },
+   {
+    "col": 4,
+    "row": 1,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 3,
+      "row": 2
+     },
+     {
+      "col": 4,
+      "row": 2
+     }
+    ]
+   },
+   {
+    "col": 4,
+    "row": 2,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 5,
+      "row": 3
+     },
+     {
+      "col": 3,
+      "row": 3
+     }
+    ]
+   },
+   {
+    "col": 4,
+    "row": 6,
+    "type": "RestSite",
+    "children": [
+     {
+      "col": 4,
+      "row": 7
+     }
+    ]
+   },
+   {
+    "col": 4,
+    "row": 7,
+    "type": "Elite",
+    "children": [
+     {
+      "col": 3,
+      "row": 8
+     }
+    ]
+   },
+   {
+    "col": 4,
+    "row": 9,
+    "type": "Treasure",
+    "children": [
+     {
+      "col": 5,
+      "row": 10
+     },
+     {
+      "col": 3,
+      "row": 10
+     }
+    ]
+   },
+   {
+    "col": 4,
+    "row": 11,
+    "type": "Elite",
+    "children": [
+     {
+      "col": 3,
+      "row": 12
+     }
+    ]
+   },
+   {
+    "col": 4,
+    "row": 13,
+    "type": "Elite",
+    "children": [
+     {
+      "col": 5,
+      "row": 14
+     }
+    ]
+   },
+   {
+    "col": 4,
+    "row": 14,
+    "type": "Shop",
+    "children": [
+     {
+      "col": 4,
+      "row": 15
+     }
+    ]
+   },
+   {
+    "col": 4,
+    "row": 15,
+    "type": "RestSite",
+    "children": [
+     {
+      "col": 3,
+      "row": 16
+     }
+    ]
+   },
+   {
+    "col": 5,
+    "row": 3,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 5,
+      "row": 4
+     }
+    ]
+   },
+   {
+    "col": 5,
+    "row": 4,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 5,
+      "row": 5
+     }
+    ]
+   },
+   {
+    "col": 5,
+    "row": 5,
+    "type": "Unknown",
+    "children": [
+     {
+      "col": 4,
+      "row": 6
+     }
+    ]
+   },
+   {
+    "col": 5,
+    "row": 10,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 6,
+      "row": 11
+     }
+    ]
+   },
+   {
+    "col": 5,
+    "row": 14,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 4,
+      "row": 15
+     }
+    ]
+   },
+   {
+    "col": 6,
+    "row": 11,
+    "type": "Monster",
+    "children": [
+     {
+      "col": 6,
+      "row": 12
+     }
+    ]
+   },
+   {
+    "col": 6,
+    "row": 12,
+    "type": "RestSite",
+    "children": [
+     {
+      "col": 6,
+      "row": 13
+     }
+    ]
+   },
+   {
+    "col": 6,
+    "row": 13,
+    "type": "Elite",
+    "children": [
+     {
+      "col": 5,
+      "row": 14
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 0,
+    "type": "Ancient",
+    "children": [
+     {
+      "col": 2,
+      "row": 1
+     },
+     {
+      "col": 3,
+      "row": 1
+     },
+     {
+      "col": 4,
+      "row": 1
+     }
+    ]
+   },
+   {
+    "col": 3,
+    "row": 16,
+    "type": "Boss",
+    "children": []
+   }
+  ],
+  "executor": {
+   "running": false,
+   "current_action_id": null
+  },
+  "visibility": {
+   "draw_pile_order": "engine_internal",
+   "rng_state_included": false
+  }
+ },
+ "id": "b00340fec03246eabf7d0974b7c58969"
+}

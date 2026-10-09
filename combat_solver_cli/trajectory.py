@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 from model.data import validate_run
+from model.control import controller_for
 from model.protocol import (
     SCHEMA,
     clean_frame,
@@ -21,12 +22,15 @@ from .client import SolverEngine, configuration
 from .search_support import ReplayMismatch, resolve, state_key
 
 
-def native_replay_error(engine):
-    """Reject native faults even when the engine still emits a terminal frame."""
+def native_replay_error(engine, since=0):
+    """Reject native faults even when the engine still emits a terminal frame.
+
+    `since` is how much the engine had logged before the part to judge began.
+    """
     stream = engine.stderr
     stream.flush()
     size = os.fstat(stream.fileno()).st_size
-    offset, pending = 0, b""
+    offset, pending = since, b""
     while offset < size:
         if hasattr(os, "pread"):
             block = os.pread(stream.fileno(), min(65536, size - offset), offset)
@@ -94,6 +98,7 @@ def verify_and_export(config, prefix_path, output, timeout=600):
                     frame = engine.send({"cmd": "advance_to_boundary"})
 
             previous = None
+            environment = []
             for record in data["records"]:
                 frame = settle(frame)
                 if (
@@ -105,13 +110,18 @@ def verify_and_export(config, prefix_path, output, timeout=600):
                 step = {
                     "frame": clean_frame(frame),
                     "candidate_ref": candidate["candidate_ref"],
-                    "forced": len(frame["legal"]["candidates"]) == 1 or record.get("policy_excluded") is True,
+                    "forced": len(frame["legal"]["candidates"]) == 1,
                 }
                 key = segment_key(frame)
-                if key != previous:
-                    macros.append({"phase": frame["public"]["phase"], "steps": []})
-                    previous = key
-                macros[-1]["steps"].append(step)
+                controller = controller_for(frame["public"]["phase"], frame["legal"]["candidates"])
+                if controller is not None or record.get("policy_excluded") is True:
+                    environment.append(dict(actor=record["actor"], **step))
+                    previous = None
+                else:
+                    if key != previous:
+                        macros.append({"phase": frame["public"]["phase"], "steps": []})
+                        previous = key
+                    macros[-1]["steps"].append(step)
                 actors[record["actor"]] += 1
                 stream.write(
                     json.dumps(
@@ -145,7 +155,7 @@ def verify_and_export(config, prefix_path, output, timeout=600):
                 )
                 + "\n"
             )
-        automatic = sum(
+        automatic = len(environment) + sum(
             len(m["steps"]) for m in macros if all(s["forced"] for s in m["steps"])
         )
         macros = [m for m in macros if any(not s["forced"] for s in m["steps"])]
@@ -163,9 +173,10 @@ def verify_and_export(config, prefix_path, output, timeout=600):
             "contract": contract,
             "macros": macros,
             "automatic_steps": automatic,
+            "environment_actions": environment,
             "provenance": {
                 "bc_only": True,
-                "importer": "combat-solver-cli-v1",
+                "importer": "combat-solver-cli-v2",
                 "verified_outcome": f"A{ascension}_final_boss_victory",
                 "verified_by": "fresh_native_seed_replay",
                 "bosses": sorted(ledger.bosses),

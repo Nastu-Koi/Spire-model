@@ -15,6 +15,7 @@ internal sealed class PendingOperation
     private string _description = "";
 
     public bool IsActive => _task != null;
+    public bool IsRunning => _task is { IsCompleted: false };
 
     public void NotifyProgress() => _changed.Set();
 

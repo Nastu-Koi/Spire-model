@@ -19,6 +19,7 @@ public partial class RunSimulator
     {
         public List<Dictionary<string, object?>> Entities { get; } = new();
         public List<object> Relations { get; } = new();
+        public List<Dictionary<string, object?>> Memory { get; set; } = new();
         public Dictionary<CardModel, string> Cards { get; } = new(ReferenceEqualityComparer.Instance);
         public Dictionary<Creature, string> Creatures { get; } = new(ReferenceEqualityComparer.Instance);
         public Dictionary<PotionModel, string> Potions { get; } = new(ReferenceEqualityComparer.Instance);
@@ -168,16 +169,31 @@ public partial class RunSimulator
             {
                 var reference = $"map:{point.coord.col}:{point.coord.row}";
                 snapshot.Map[point.coord] = reference;
-                snapshot.Entities.Add(new() { ["ref"] = reference, ["entity_type"] = "map_node",
+                var node = new Dictionary<string, object?> { ["ref"] = reference, ["entity_type"] = "map_node",
                     ["content_id"] = point.PointType.ToString(), ["floor"] = (int)point.coord.row,
                     ["col"] = (int)point.coord.col, ["current"] = _runState.CurrentMapCoord == point.coord,
-                    ["visited"] = _runState.VisitedMapCoords.Contains(point.coord) });
+                    ["visited"] = _runState.VisitedMapCoords.Contains(point.coord) };
+                // The map shows who ends the act from the moment the act begins.
+                var boss = point.coord == map.BossMapPoint.coord ? _runState.Act?.BossEncounter
+                    : point.coord == map.SecondBossMapPoint?.coord ? _runState.Act?.SecondBossEncounter : null;
+                if (boss != null) node["encounter"] = boss.Id.ToString();
+                snapshot.Entities.Add(node);
             }
             foreach (var point in points)
                 foreach (var child in point.Children)
                     if (snapshot.Map.TryGetValue(child.coord, out var target))
                         snapshot.Relations.Add(new { source = snapshot.Map[point.coord], target, role = "map_edge" });
         }
+        snapshot.Memory = Spire.PublicHistory.NativeHistory.Capture(_runState, obj => obj switch
+        {
+            CardModel card when snapshot.Cards.TryGetValue(card, out var reference) => reference,
+            Creature creature when snapshot.Creatures.TryGetValue(creature, out var reference) => reference,
+            _ => null,
+        });
+        var known = snapshot.Memory.Where(m => Equals(m["entity_type"], "known_draw_position"))
+            .OrderBy(m => (int)m["position"]!).ToArray();
+        for (int i = 1; i < known.Length; i++)
+            snapshot.Relations.Add(new { source = known[i - 1]["owner_ref"], target = known[i]["owner_ref"], role = "known_draw_before" });
         return snapshot;
     }
 
@@ -186,18 +202,61 @@ public partial class RunSimulator
         kind = "effect", op = "OPAQUE_RULE", content_id = content, coverage = "opaque",
     };
 
+    private static Dictionary<string, string?>? _contentTitles;
+
+    // The card, relic, potion or enchantment a displayed name stands for: the one
+    // whose title it is. A title two contents share names neither of them.
+    private static string? ContentNamed(string? title)
+    {
+        if (string.IsNullOrEmpty(title)) return null;
+        if (_contentTitles == null)
+        {
+            var titles = new Dictionary<string, string?>(StringComparer.Ordinal);
+            foreach (var model in ModelDb.All)
+            {
+                string? shown;
+                try
+                {
+                    shown = model switch
+                    {
+                        CardModel card => card.Title, RelicModel relic => relic.Title.GetFormattedText(),
+                        PotionModel potion => potion.Title.GetFormattedText(),
+                        EnchantmentModel enchantment => enchantment.Title.GetFormattedText(), _ => null,
+                    };
+                }
+                catch (Exception) { continue; }
+                if (string.IsNullOrEmpty(shown)) continue;
+                titles[shown] = titles.ContainsKey(shown) ? null : model.Id.ToString();
+            }
+            _contentTitles = titles;
+        }
+        return _contentTitles.GetValueOrDefault(title);
+    }
+
     private static void AddDisplayedVariables(PublicSnapshot snapshot, string owner, params LocString?[] texts)
     {
         var emitted = new HashSet<string>();
         foreach (var text in texts.Where(t => t != null))
         {
             // LocString can carry variables not used on the current page. Export
-            // only numeric variables actually referenced by its visible template.
-            var names = Regex.Matches(text!.GetRawText(), @"\{([A-Za-z_][A-Za-z0-9_]*)")
+            // only the variables actually referenced by its visible template: a
+            // number as its amount, a name as the content it names. The game's own
+            // table lookup is replaced here by one that returns the key, so the
+            // template is read from the localization data loaded beside it.
+            var template = _loc.En(text!.LocTable, text.LocEntryKey) ?? text.GetRawText();
+            var names = Regex.Matches(template, @"\{([A-Za-z_][A-Za-z0-9_]*)")
                 .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
             foreach (var (name, value) in text.Variables)
             {
                 if (!names.Contains(name) || !emitted.Add(name)) continue;
+                if (value is StringVar shown)
+                {
+                    // Other text (a description quoted in the option) names no content.
+                    if (ContentNamed(shown.StringValue) is { } content)
+                        snapshot.Entities.Add(new() { ["entity_type"] = "displayed_variable", ["owner_ref"] = owner,
+                            ["content_id"] = name, ["names"] = content, ["known"] = true });
+                    continue;
+                }
                 object? number = value is DynamicVar variable ? variable.BaseValue
                     : value is int or long or decimal or float or double ? value : null;
                 if (number == null) continue;

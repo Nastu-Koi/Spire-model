@@ -1,11 +1,15 @@
 using System.Reflection;
 using System.Text.Json;
+using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.CardPools;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Runs.History;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Saves.Runs;
 
@@ -19,6 +23,10 @@ public partial class RunSimulator
     public const string AnchorInitialization = "summary-anchor-v1";
     private string? _protocolInitialization;
     private bool _anchorRoomEntered;
+    // Keep game types out of value-type fields: their layout is resolved before
+    // Program.Main installs the assembly resolver in a standalone headless run.
+    private object? _anchorChestRoom;
+    private int? _anchorChestGoldRoll;
 
     /// Install a serialized run at one node. A summary records the type of every
     /// visited node, not its coordinates: `route` (the act's recorded types) places
@@ -126,8 +134,13 @@ public partial class RunSimulator
 
     /// Enter the anchor's room and stop at its first decision. room.type: combat
     /// (encounter), rest_site, card_reward (cards, as serialized deck cards), map
-    /// (the travel decision after the node), or ancient (event, options: the recorded
-    /// offer in its recorded order).
+    /// (the travel decision after the node), ancient (event, options: the recorded
+    /// offer in its recorded order), shop (cards: the recorded character card of
+    /// each slot, relics: the recorded relic of each slot), event (event: the
+    /// event entered as the game generates it for this run and state), or rewards
+    /// (potions, relics, cards: a reward screen holding exactly these), treasure
+    /// (relic: the recorded single-player offer, gold_roll: one possible raw chest
+    /// roll, 42..52, to be constrained by the caller against the node outcome).
     public Dictionary<string, object?> AnchorRoom(JsonElement cmd)
     {
         if (_protocolInitialization == null || !_protocolTrainingRun || _anchorRoomEntered || _runState == null)
@@ -145,6 +158,47 @@ public partial class RunSimulator
                     return EnterRoom("combat", room.GetProperty("encounter").GetString(), null, decisionProtocol: true);
                 case "rest_site":
                     return EnterRoom("rest_site", null, null, decisionProtocol: true);
+                case "treasure":
+                {
+                    var roll = room.GetProperty("gold_roll").GetInt32();
+                    if (roll is < 42 or > 52) return Error("Chest gold_roll must be 42-52");
+                    var relic = ModelDb.GetById<RelicModel>(AnchorId(room.GetProperty("relic").GetString()));
+                    AnchorTreasure.Install();
+                    var frame = EnterRoom("treasure", null, null, decisionProtocol: true);
+                    // The grab bag is not in .run. Replace only the hidden offer,
+                    // before opening; room-entry hooks and treasure suppression ran.
+                    var synchronizer = RunManager.Instance.TreasureRoomRelicSynchronizer;
+                    if (synchronizer.CurrentRelics is not { Count: 1 })
+                        return Error("Chest does not have one relic offer");
+                    _anchorChestRoom = runState.CurrentRoom;
+                    _anchorChestGoldRoll = roll;
+                    typeof(MegaCrit.Sts2.Core.Multiplayer.Game.TreasureRoomRelicSynchronizer)
+                        .GetField("_currentRelics", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .SetValue(synchronizer, new List<RelicModel> { relic });
+                    return frame;
+                }
+                case "event":
+                    // An event draws from a stream of its own, seeded by the run and the event.
+                    return EnterRoom("event", null, room.GetProperty("event").GetString(), decisionProtocol: true);
+                case "shop":
+                {
+                    // The merchant draws its stock on entry. The record gives the rarity of
+                    // each character card and the relics; the shop stream installed with the
+                    // anchor draws the rest. Whether the stock then equals the record is for
+                    // the caller to judge from the frame: nothing is corrected here.
+                    var rarities = room.GetProperty("cards").EnumerateArray()
+                        .Select(id => ModelDb.GetById<CardModel>(AnchorId(id.GetString())).Rarity).ToList();
+                    var relics = room.GetProperty("relics").EnumerateArray()
+                        .Select(id => ModelDb.GetById<RelicModel>(AnchorId(id.GetString()))).ToList();
+                    AnchorMerchant.Begin(rarities, relics);
+                    Dictionary<string, object?> frame;
+                    try { frame = EnterRoom("shop", null, null, decisionProtocol: true); }
+                    finally
+                    {
+                        if (!AnchorMerchant.End()) InvalidateDecisionProtocol();
+                    }
+                    return _protocolTrainingRun ? frame : Error("The merchant did not take the recorded stock");
+                }
                 case "map":
                     _protocolMapVisible = true;
                     return AdvanceToBoundary();
@@ -170,6 +224,32 @@ public partial class RunSimulator
                     typeof(AncientEventModel).GetField("_generatedOptions", hidden)!.SetValue(ancient, options);
                     typeof(EventModel).GetMethod("SetEventState", hidden)!
                         .Invoke(ancient, [ancient.InitialDescription, options]);
+                    return AdvanceToBoundary();
+                }
+                case "rewards":
+                {
+                    // A reward screen as the record leaves it: the rewards named, in the
+                    // order the game lists them. Nothing is generated, so no relic or
+                    // stream changes what the record shows.
+                    var rewards = new List<Reward>();
+                    if (room.TryGetProperty("potions", out var potions))
+                        rewards.AddRange(potions.EnumerateArray().Select(id =>
+                            new PotionReward(ModelDb.GetById<PotionModel>(AnchorId(id.GetString())).ToMutable(), player)));
+                    if (room.TryGetProperty("relics", out var relics))
+                        rewards.AddRange(relics.EnumerateArray().Select(id =>
+                            new RelicReward(ModelDb.GetById<RelicModel>(AnchorId(id.GetString())).ToMutable(), player)));
+                    if (room.TryGetProperty("cards", out var offer) && offer.GetArrayLength() > 0)
+                        rewards.Add(new CardReward(offer.EnumerateArray().Select(card => runState.LoadCard(
+                            JsonSerializer.Deserialize<SerializableCard>(card.GetRawText(), JsonSerializationUtility.Options)!,
+                            player)).ToList(), CardCreationSource.Encounter, player,
+                            CardCreationOptions.ForRoom(player, RoomType.Monster)));
+                    if (rewards.Count == 0) return Error("rewards needs at least one reward");
+                    var screen = new RewardsSet(player).WithCustomRewards(
+                        rewards.OrderBy(reward => reward.RewardsSetIndex).ToList());
+                    typeof(RewardsSet).GetField("_isGenerated", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .SetValue(screen, true);
+                    _pendingOperation.Start("anchor rewards", screen.Offer);
+                    WaitForPendingOperation();
                     return AdvanceToBoundary();
                 }
                 case "card_reward":
@@ -199,6 +279,93 @@ public partial class RunSimulator
             InvalidateDecisionProtocol();
             return ErrorWithTrace("AnchorRoom failed", ex);
         }
+    }
+
+    // Not a generic helper constrained to a game type: the runtime would need the game
+    // assembly to load this class, before Program.Main has said where that assembly is.
+    private static ModelId AnchorId(string? id)
+    {
+        var parts = (id ?? "").Split('.', 2);
+        if (parts.Length != 2) throw new ArgumentException("Content IDs are CATEGORY.ENTRY: " + id);
+        return new ModelId(parts[0], parts[1]);
+    }
+
+    /// Read-only: what the game's shop rules read from a card, relic or potion.
+    /// These are static properties of the content, the same for every run.
+    public Dictionary<string, object?> ContentInfo(JsonElement cmd)
+    {
+        if (!cmd.TryGetProperty("ids", out var ids) || ids.ValueKind != JsonValueKind.Array)
+            return Error("content_info requires ids");
+        try
+        {
+            EnsureModelDbInitialized();
+            var items = new Dictionary<string, object?>();
+            foreach (var id in ids.EnumerateArray().Select(i => i.GetString() ?? ""))
+            {
+                items[id] = id.Split('.', 2)[0] switch
+                {
+                    "CARD" => ModelDb.GetById<CardModel>(AnchorId(id)) is var card ? new Dictionary<string, object?>
+                    {
+                        ["card_type"] = card.Type.ToString(), ["rarity"] = card.Rarity.ToString(),
+                        ["colorless"] = card.Pool is ColorlessCardPool,
+                    } : null,
+                    "RELIC" => ModelDb.GetById<RelicModel>(AnchorId(id)) is var relic ? new Dictionary<string, object?>
+                    {
+                        ["rarity"] = relic.Rarity.ToString(), ["allowed_in_shops"] = relic.IsAllowedInShops,
+                    } : null,
+                    "POTION" => new Dictionary<string, object?> { ["rarity"] = ModelDb.GetById<PotionModel>(AnchorId(id)).Rarity.ToString() },
+                    _ => throw new ArgumentException("Unknown content category: " + id),
+                };
+            }
+            return new() { ["type"] = "content_info", ["items"] = items };
+        }
+        catch (Exception ex) { return Error(ex.Message); }
+    }
+
+    /// Read-only: for each option of the event page on screen, the entry the game
+    /// would write to the run history if it were chosen (title and variables, in
+    /// the game's own serialization), or null where the game writes none; and the
+    /// event's variables as they stand. A history entry holds the variables
+    /// themselves, so what a summary shows for a choice is their value when the
+    /// run was saved, after the event, not when the choice was made.
+    public Dictionary<string, object?> AnchorEvent()
+    {
+        var localEvent = _runState == null ? null : RunManager.Instance.EventSynchronizer.GetLocalEvent();
+        if (localEvent == null) return Error("No event in progress");
+        try
+        {
+            static JsonElement Written(EventOptionHistoryEntry entry) => JsonDocument.Parse(
+                JsonSerializer.Serialize(entry, JsonSerializationUtility.Options)).RootElement.Clone();
+            var all = new EventOptionHistoryEntry { Title = new LocString("events", localEvent.Id.Entry), Variables = new() };
+            foreach (var variable in localEvent.DynamicVars.Values) all.Variables[variable.Name] = variable;
+            var options = localEvent.CurrentOptions.Select(option =>
+            {
+                object? history = null;
+                if (option.ShouldSaveChoiceToHistory)
+                {
+                    var name = option.HistoryName;
+                    if (ReferenceEquals(name, option.Title))
+                    {
+                        // The game's option button adds the event's variables to the title it
+                        // shows, and the history takes them from there. No button is shown
+                        // here: add them to a copy, so that the option on screen stays as it is.
+                        name = new LocString(option.Title.LocTable, option.Title.LocEntryKey);
+                        name.AddVariablesFrom(option.Title);
+                        localEvent.DynamicVars.AddTo(name);
+                    }
+                    var entry = new EventOptionHistoryEntry { Title = name, Variables = new() };
+                    if (option.ShouldSaveVariablesToHistory)
+                        foreach (var (key, value) in name.Variables) entry.Variables[key] = value;
+                    history = Written(entry);
+                }
+                return new Dictionary<string, object?>
+                    { ["text_key"] = option.TextKey, ["locked"] = option.IsLocked, ["history"] = history };
+            }).ToList();
+            return new() { ["type"] = "anchor_event", ["event"] = localEvent.Id.ToString(),
+                ["finished"] = localEvent.IsFinished, ["options"] = options,
+                ["variables"] = Written(all).TryGetProperty("variables", out var variables) ? variables : null };
+        }
+        catch (Exception ex) { return Error(ex.Message); }
     }
 
     /// Read-only: the installed run as the game serializes it, to check an anchor.

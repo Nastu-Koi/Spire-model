@@ -16,6 +16,9 @@ from .protocol import (
     segment_key,
     validate_frame,
 )
+from .rewards import require_reward_version
+from .control import CONTROL_VERSION, controller_for, is_policy_frame, policy_macros
+from .dataset_index import INDEX, read_index
 
 
 def validate_run(run, *, on_policy=False):
@@ -88,6 +91,13 @@ def validate_run(run, *, on_policy=False):
         for step in steps:
             frame = step["frame"]
             validate_frame(frame)
+            phase = frame["public"]["phase"]
+            if on_policy and controller_for(phase, frame["legal"]["candidates"]) is not None:
+                raise ProtocolError(
+                    "Controller actions are environment steps, not PPO policy samples"
+                )
+            if phase != macro["phase"]:
+                raise ProtocolError("Macro phase disagrees with its decision frames")
             if frame["contract"].get("fixed_ascension") != ascension:
                 raise ProtocolError("Frame ascension disagrees with run")
             if frame["contract"] != run["contract"]:
@@ -118,6 +128,13 @@ def validate_run(run, *, on_policy=False):
                     "Advantage must equal complete return minus old value"
                 )
     if on_policy:
+        from .public_history import require_history_version
+
+        require_history_version(run.get("contract", {}).get("public_history_version"))
+        if run.get("control_version") != CONTROL_VERSION:
+            raise ProtocolError("PPO requires the current policy control version; collect new rollouts")
+        require_reward_version(run.get("reward_version"))
+        require_reward_version(run.get("ledger", {}).get("version"))
         total = 0.0
         for macro in reversed(run["macros"]):
             total += macro["reward"]
@@ -144,7 +161,7 @@ def audit_files(paths, accepted, quarantine):
                 for macro in run["macros"]:
                     for step in macro["steps"]:
                         step["frame"] = clean_frame(step["frame"])
-                    counts[run["character"] + "/" + macro["phase"]] += 1
+                counts.update(run["character"] + "/" + macro["phase"] for macro in policy_macros(run))
                 good.write(json.dumps(run, allow_nan=False) + "\n")
                 counts["accepted_runs"] += 1
             except (ValueError, KeyError, TypeError, OSError, ProtocolError) as exc:
@@ -194,9 +211,6 @@ def split_runs(runs, validation_fraction=0.2):
     return train, validation
 
 
-INDEX = "index.jsonl.gz"
-
-
 class RunShards:
     """Imported runs kept as gzip shards and read a few shards at a time.
 
@@ -207,9 +221,8 @@ class RunShards:
     def __init__(self, directory, rows=None):
         self.directory = Path(directory)
         if rows is None:
-            with gzip.open(self.directory / INDEX, "rt", encoding="utf-8") as stream:
-                rows = [json.loads(line) for line in stream if line.strip()]
-        self.rows = rows
+            rows = read_index(self.directory)
+        self.rows = [row for row in rows if row["phases"]]
 
     @staticmethod
     def is_at(path):
@@ -251,39 +264,72 @@ class RunShards:
             "training_seed_pool_hash": fingerprint(sorted((r["character"], str(r["seed"])) for r in self.rows)),
         }
 
-    def windows(self, shards=8, shuffle=False):
-        """Lists of validated runs, each from `shards` shard files."""
-        wanted = defaultdict(set)
-        for row in self.rows:
-            wanted[row["shard"]].add(row["run_id"])
-        names = sorted(wanted)
+    def window_names(self, shards=8, shuffle=False):
+        """The shard files of every window, `shards` to a window."""
+        names = sorted({row["shard"] for row in self.rows})
         if shuffle:
             random.shuffle(names)
-        for start in range(0, len(names), shards):
-            runs = []
-            for name in names[start : start + shards]:
-                with gzip.open(self.directory / name, "rt", encoding="utf-8") as stream:
-                    for line in stream:
+        return [names[start : start + shards] for start in range(0, len(names), shards)]
+
+    def read(self, names):
+        """The validated runs of these shard files that belong to this part of the data.
+        Lines of other runs are skipped unparsed: a held-out part is a tenth of a shard."""
+        names = list(names)
+        selected = set(names)
+        wanted = defaultdict(dict)
+        for row in self.rows:
+            if row["shard"] in selected:
+                wanted[row["shard"]][row["line"]] = row
+        runs = []
+        for name in names:
+            found = 0
+            with gzip.open(self.directory / name, "rt", encoding="utf-8") as stream:
+                for number, line in enumerate(stream):
+                    if number in wanted[name]:
                         run = json.loads(line)
-                        if run["run_id"] in wanted[name]:
-                            runs.append(validate_run(run))
-            yield runs
+                        row = wanted[name][number]
+                        if run["run_id"] != row["run_id"]:
+                            raise ProtocolError("Shard does not hold its runs in the order of the index")
+                        validate_run(run)
+                        if Counter(m["phase"] for m in policy_macros(run)) != row["phases"]:
+                            raise ProtocolError("Policy index counts disagree with the shard; rebuild the index")
+                        runs.append(run)
+                        found += 1
+            if found != len(wanted[name]):
+                raise ProtocolError("Shard is missing indexed runs; rebuild the index")
+        return runs
+
+    def windows(self, shards=8, shuffle=False):
+        """Lists of validated runs, each from `shards` shard files."""
+        for names in self.window_names(shards, shuffle):
+            yield self.read(names)
 
 
 @dataclass
 class Sample:
-    macro: dict
+    """A macro-action to learn from. `macro` is None where only the packed tensors of
+    its frames travel on: the fields after it say what a report needs of it."""
+
+    macro: dict | None
     character: str
     run_id: str
     weight: float
+    phase: str
+    branches: int  # decisions of the macro-action that had a choice
+    ascension: int | None
     _lengths: tuple[tuple[int, int], ...] | None = field(
         default=None, repr=False, compare=False
     )
 
 
+def _sample(run, macro, weight):
+    return Sample(macro, run["character"], run["run_id"], weight, macro["phase"],
+                  sum(is_policy_frame(step["frame"]) for step in macro["steps"]), run.get("ascension"))
+
+
 def samples(runs, *, ppo=False, horizon_scale=100.0, counts=None):
-    """Weighted samples. `counts` gives the macros per (character, phase) of the
-    whole data set when `runs` is only a window of it."""
+    """Weighted samples. `counts` gives the policy macros per (character, phase)
+    from the current index when `runs` is only a window of the whole data set."""
     result = []
     if ppo:
         counts = Counter(r["character"] for r in runs)
@@ -303,30 +349,16 @@ def samples(runs, *, ppo=False, horizon_scale=100.0, counts=None):
         for run in runs:
             validate_run(run, on_policy=True)
             for macro in run["macros"]:
-                result.append(
-                    Sample(
-                        macro,
-                        run["character"],
-                        run["run_id"],
-                        1 / (5 * counts[run["character"]] * horizon_scale),
-                    )
-                )
+                result.append(_sample(run, macro, 1 / (5 * counts[run["character"]] * horizon_scale)))
     else:
         if counts is None:
             counts = Counter(
-                (r["character"], m["phase"]) for r in runs for m in r["macros"]
+                (r["character"], m["phase"]) for r in runs for m in policy_macros(r)
             )
         for run in runs:
             validate_run(run)
-            for macro in run["macros"]:
-                result.append(
-                    Sample(
-                        macro,
-                        run["character"],
-                        run["run_id"],
-                        1 / (len(counts) * counts[run["character"], macro["phase"]]),
-                    )
-                )
+            for macro in policy_macros(run):
+                result.append(_sample(run, macro, 1 / (len(counts) * counts[run["character"], macro["phase"]])))
     return result
 
 
@@ -334,14 +366,15 @@ def bucket_size(length, buckets):
     return next((b for b in buckets if b >= length), length)
 
 
-def sample_lengths(item):
+def sample_lengths(item, observe=None):
     """(tokens, action slots) of every branching decision of a sample."""
-    from .representation import observation
+    if observe is None:
+        from .representation import observation as observe
 
     lengths = []
     for step in item.macro["steps"]:
-        if not step["forced"]:
-            obs = observation(step["frame"])
+        if is_policy_frame(step["frame"]):
+            obs = observe(step["frame"])
             lengths.append((len(obs.tokens), len(obs.slot_refs)))
     return tuple(lengths)
 
@@ -368,10 +401,11 @@ def microbatches(logical, config):
 
     A replay holds one row per branching decision, so a sample costs as many rows
     as it has of them. A sample is never split: one that exceeds the budgets on
-    its own forms a batch of its own.
+    its own forms a batch of its own. Samples are taken shortest first, so that
+    where a logical batch must be split the short ones are not padded to the long.
     """
     result, batch, max_n, rows = [], [], 0, 0
-    for item in logical:
+    for item in sorted(logical, key=lambda item: sample_pad_size(item, config)):
         n = sample_pad_size(item, config)
         candidate_n = max(max_n, n)
         count = rows + len(item._lengths)

@@ -15,6 +15,8 @@ internal sealed class SelectionScope
 
 	public SelectionOffer? Offer { get; set; }
 
+    public SelectionMetadata Metadata { get; init; } = new();
+
 	public JsonElement State { get; set; }
 
     public DateTimeOffset CapturedUtc { get; set; }

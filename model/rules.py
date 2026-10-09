@@ -61,10 +61,28 @@ def digest():
     ).hexdigest()
 
 
+def reward_alternatives():
+    """Option ids of what a card reward offers beside its cards: reroll, sacrifice, skip."""
+    table = json.loads((LOCALIZATION / "card_reward_ui.json").read_text())
+    return {key[7:-5] for key in table if key.startswith("OPTION_") and key.endswith(".name")}
+
+
+@lru_cache(maxsize=None)
+def canonical_content_id(content_id):
+    """Dynamic relic event options use the relic's title key, not a new content."""
+    if content_id.endswith(".title"):
+        entry = content_id[:-6]
+        matches = [name for name, table in _tables().items() if content_id in table]
+        if matches == ["relics"] and f"{entry}.description" in _tables()["relics"]:
+            return "RELIC." + entry
+    return content_id
+
+
 @lru_cache(maxsize=None)
 def template(content_id):
     """Description template of a content id, or None when the game states none."""
     tables = _tables()
+    content_id = canonical_content_id(content_id)
     category, _, entry = content_id.partition(".")
     if category in CATEGORIES:
         table, keys = CATEGORIES[category]
@@ -189,12 +207,26 @@ def _shown(value):
 
 def _values(entity):
     values = {}
+    def public(name):
+        if ((entity.get("known_masks") or {}).get(name) is False
+                or (entity.get("applicable_masks") or {}).get(name) is False):
+            return None
+        return _shown(entity.get(name))
     for key, value in (entity.get("stats") or {}).items():
         values[key.lower()] = _shown(value)
+    # A name the text displays stands for a content, given by its id.
+    for key, value in (entity.get("named") or {}).items():
+        values[key.lower()] = value
     values["ifupgraded"] = entity.get("upgraded") is True
     values["ismultiplayer"] = False
-    if entity.get("card_type") is not None:
-        values["cardtype"] = entity["card_type"]
+    if public("card_type") is not None:
+        values["cardtype"] = public("card_type")
+    if entity.get("content_id") == "CARD.MAD_SCIENCE":
+        rider = public("rider_effect")
+        values["hasrider"] = rider != "None" if isinstance(rider, str) else None
+        for name in ("Violence", "Sapping", "Choking", "Energized", "Wisdom", "Chaos",
+                     "Expertise", "Curious", "Improvement"):
+            values[name.lower()] = rider == name if isinstance(rider, str) else None
     if entity.get("entity_type") == "power":
         values["onplayer"] = entity.get("owner_ref") == "player"
     amount = entity.get("stacks", entity.get("counter"))
@@ -214,14 +246,19 @@ def program(entity):
             # An enchantment displays one amount, under whichever name its text uses.
             amount = entity.get(key + "_amount")
             parts.append((entity[key], {name.lower(): amount for name in variables(entity[key])}))
-    return _program(json.dumps(parts, sort_keys=True))
+    key = tuple((content, tuple(sorted(values.items()))) for content, values in parts)
+    try:
+        return _program(key)
+    except TypeError:
+        # A value that cannot be hashed is rendered without the cache.
+        return _program.__wrapped__(key)
 
 
 @lru_cache(maxsize=16384)
-def _program(encoded):
+def _program(parts):
     tokens = []
-    for content, values in json.loads(encoded):
-        tokens.extend(_render(template(content), values))
+    for content, values in parts:
+        tokens.extend(_render(template(content), dict(values)))
     tokens = tokens[:TOKEN_LIMIT]
     if not tokens:
         return None
@@ -229,8 +266,12 @@ def _program(encoded):
     for kind, *token in tokens:
         if kind == "variable":
             name, value = token
-            # A displayed variable whose value is not public stays an explicit unknown.
-            node = {"variable": name, "value": {"value": _number(value), "known": _number(value) is not None}}
+            if isinstance(value, str):
+                # A displayed name: the content it stands for.
+                node = {"variable": name, "content_id": value}
+            else:
+                # A displayed variable whose value is not public stays an explicit unknown.
+                node = {"variable": name, "value": {"value": _number(value), "known": _number(value) is not None}}
         else:
             node = {kind: token[0]}
         effect.nodes.append(fields_of(node))
@@ -277,4 +318,4 @@ def symbols():
 
 TEXT_RELATIONS = ("text_contains", "text_within", "text_after", "text_before",
                   "text_next", "text_previous", "text_next2", "text_previous2")
-TEXT_FIELDS = ("kind", "word", "number", "variable", "value")
+TEXT_FIELDS = ("kind", "word", "number", "variable", "value", "content_id")
