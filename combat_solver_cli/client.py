@@ -37,13 +37,21 @@ def configuration(path=DEFAULT_CONFIG):
         raise InfrastructureError(f"Invalid worker configuration: {exc}") from exc
 
 
+# The solver's search allocates quickly. The runtime's default young generation is a
+# few megabytes, collected in step with a background collector, which interrupts the
+# search every few milliseconds of work; with a larger one a search cut off by its
+# time budget expands about a quarter more nodes. The caller's environment overrides.
+RUNTIME = {"DOTNET_gcConcurrent": "0", "DOTNET_GCgen0size": hex(128 << 20)}
+
+
 def environment(config):
-    return dict(
-        os.environ,
-        STS2_LIB=str(Path(config["game_dll"]).parent),
-        COMBAT_SOLVER_DLL=config["solver_dll"],
-        COMBAT_SOLVER_DEPENDENCIES=os.pathsep.join(config["dependency_dirs"]),
-    )
+    return {
+        **RUNTIME,
+        **os.environ,
+        "STS2_LIB": str(Path(config["game_dll"]).parent),
+        "COMBAT_SOLVER_DLL": config["solver_dll"],
+        "COMBAT_SOLVER_DEPENDENCIES": os.pathsep.join(config["dependency_dirs"]),
+    }
 
 
 class SolverEngine(CliEngine):

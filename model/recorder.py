@@ -11,10 +11,12 @@ from collections import Counter
 from pathlib import Path
 
 from .data import validate_run
+from .public_history import HISTORY_VERSION, recorded_memory, draw_relations
+from .control import controller_for
 from .protocol import CHARACTERS, SCHEMA, ProtocolError, clean_frame, fingerprint
 
 RECORDER_SCHEMA = "sts2-run-recorder/v2"
-IMPORT_VERSION = "run-recorder-import-v2"
+IMPORT_VERSION = "run-recorder-import-v6"
 PHASES = {
     "combat_play": "combat",
     "map_select": "map",
@@ -38,8 +40,11 @@ VERBS = {
     "choose_rest_option": "CHOOSE_REST_OPTION",
     "purchase": "BUY_ITEM",
     "leave_shop": "LEAVE_ROOM",
+    "open_chest": "OPEN_CHEST",
     "pick_relic": "TAKE_TREASURE_RELIC",
     "take_reward": "TAKE_REWARD",
+    "take_card_reward": "TAKE_CARD_REWARD",
+    "take_reward_alternative": "CHOOSE_REWARD_ALTERNATIVE",
     "skip_rewards": "LEAVE_REWARDS",
     "select_card": "SELECT_ONE",
     "select_bundle": "SELECT_BUNDLE",
@@ -73,28 +78,36 @@ def content_id(raw, category):
 
 
 def card_fields(raw):
+    """A recorded card with the fields of the engine's card export: the same names,
+    and null where the engine publishes null."""
     result = {
         "entity_type": "card",
         "content_id": content_id(raw, "card"),
         "effect_coverage": "opaque",
+        "rider_effect": None,
     }
     for src, dst in {
         "current_cost": "cost",
-        "cost": "base_cost",
         "costs_x": "x_cost",
         "upgraded": "upgraded",
         "upgrade_level": "upgrade_level",
         "card_type": "card_type",
         "rarity": "rarity",
-        "star_cost": "star_cost",
+        "base_star_cost": "base_star_cost",
         "target_type": "target_type",
-        "keywords": "keywords",
         "retain": "retain",
         "stars_x": "stars_x",
         "exhaust_on_next_play": "exhaust_on_next_play",
     }.items():
         if src in raw:
             result[dst] = raw[src]
+    # The engine's star cost is the current one; recordings also carry the printed one.
+    for src in ("current_star_cost", "star_cost"):
+        if src in raw:
+            result["star_cost"] = raw[src]
+            break
+    if "keywords" in raw:
+        result["keywords"] = sorted(raw["keywords"] or [])
     result["stats"] = base_values(raw)
     if result["content_id"] == "CARD.MAD_SCIENCE":
         variant = raw.get("mad_science") or {}
@@ -107,10 +120,8 @@ def card_fields(raw):
         result["rider_effect"] = variant["rider_effect"]
     for key in ("enchantment", "affliction"):
         value = raw.get(key)
-        if isinstance(value, dict):
-            result[key] = value.get("id")
-            if "amount" in value:
-                result[key + "_amount"] = value["amount"]
+        result[key] = content_id(value, key) if isinstance(value, dict) else None
+        result[key + "_amount"] = value.get("amount") if isinstance(value, dict) else None
     result["semantic_program"] = opaque(result["content_id"])
     return result
 
@@ -144,6 +155,9 @@ class PublicSnapshot:
         self.entities, self.relations, self.refs, self.keys = [], [], {}, {}
         run, combat = state["run"], state.get("combat") or {}
         pcs = player.get("combat") or {}
+        # The game keeps the last fight's energy and stars after it ends; they are
+        # shown, and published by the engine's anchors, only during a fight.
+        fighting = pcs if combat.get("in_progress") else {}
         self.add(
             player["creature"],
             "player",
@@ -155,13 +169,14 @@ class PublicSnapshot:
                 "act": run["act"],
                 "floor": run["floor"],
                 "gold": player["gold"],
-                "energy": pcs.get("energy"),
-                "max_energy": pcs.get("max_energy"),
-                "stars": pcs.get("stars"),
-                "round": combat.get("round"),
+                "energy": fighting.get("energy"),
+                "max_energy": fighting.get("max_energy"),
+                "stars": fighting.get("stars"),
+                "round": combat.get("round") if fighting else None,
                 "capacity": player.get("max_potions"),
                 # Absent from recordings made before the mod exported it: unknown.
                 "free_travel": run.get("free_travel"),
+                "lost_hp_this_turn": fighting.get("lost_hp_this_turn"),
             },
         )
         self.powers(player["creature"], "player")
@@ -172,7 +187,6 @@ class PublicSnapshot:
                 ("draw", "draw_pile"),
                 ("discard", "discard_pile"),
                 ("exhaust", "exhaust_pile"),
-                ("play", "play"),
             ):
                 self.pile(pcs.get(source, []), zone, ordered=source == "hand")
             for i, creature in enumerate(combat.get("enemies", [])):
@@ -220,32 +234,39 @@ class PublicSnapshot:
                         "content_id": cid,
                         "slot": slot["slot"],
                         "owner_ref": "player",
+                        "target_type": potion.get("target_type"),
+                        "stats": base_values(potion),
                         "effect_coverage": "opaque",
                         "semantic_program": opaque(cid),
                     },
                 )
+        # The map names the bosses of the act, in the order they are fought. Absent
+        # from recordings made before the mod exported them: unknown.
+        ends = sorted((n for n in state.get("map") or [] if n["type"] == "Boss"), key=lambda n: n["row"])
+        bosses = dict(zip(map(self.map_ref, ends), (run.get("boss"), run.get("second_boss"))))
         for node in state.get("map") or []:
             ref = self.map_ref(node)
             current = run.get("location") or {}
-            self.entities.append(
-                {
-                    "entity_type": "map_node",
-                    "ref": ref,
-                    "content_id": node["type"],
-                    "floor": node["row"],
-                    "col": node["col"],
-                    "current": (node["row"], node["col"])
-                    == (current.get("row"), current.get("col")),
-                    "visited": any(
-                        self.map_ref(x) == ref for x in run.get("visited", [])
-                    ),
-                }
-            )
+            entity = {
+                "entity_type": "map_node",
+                "ref": ref,
+                "content_id": node["type"],
+                "floor": node["row"],
+                "col": node["col"],
+                "current": (node["row"], node["col"])
+                == (current.get("row"), current.get("col")),
+                "visited": any(self.map_ref(x) == ref for x in run.get("visited", [])),
+            }
+            if bosses.get(ref):
+                entity["encounter"] = "ENCOUNTER." + bosses[ref]
+            self.entities.append(entity)
             self.relations.extend(
                 {"source": ref, "target": self.map_ref(child), "role": "map_edge"}
                 for child in node.get("children", [])
             )
         self.context(state["legal"])
+        self.memory = recorded_memory(state, self.refs, self.entities)
+        self.relations.extend(draw_relations(self.memory))
 
     @staticmethod
     def map_ref(node):
@@ -256,6 +277,15 @@ class PublicSnapshot:
         if raw.get("instance_id") is not None:
             self.refs[raw["instance_id"]] = ref
         return ref
+
+    def displayed(self, option, ref):
+        """The numbers and names an option's visible text refers to, as the engine publishes them."""
+        for name, amount in (option.get("displayed_variables") or {}).items():
+            self.entities.append({"entity_type": "displayed_variable", "owner_ref": ref,
+                                  "content_id": name, "amount": amount, "known": True})
+        for name, content in (option.get("displayed_names") or {}).items():
+            self.entities.append({"entity_type": "displayed_variable", "owner_ref": ref,
+                                  "content_id": name, "names": content, "known": True})
 
     def powers(self, creature, ref):
         for power in creature.get("powers") or []:
@@ -295,7 +325,15 @@ class PublicSnapshot:
                 )
             self.entities.append(visible)
 
-    def pile(self, cards, zone, ordered=False):
+    def offer(self, cards, prefix):
+        """Cards of a card reward, in the order shown. Unlike a pile, an offer has no summary."""
+        return [
+            self.add(card, "card", f"{prefix}:{i}",
+                     {**card_fields(card), "zone": "reward", "owner_ref": "player"})
+            for i, card in enumerate(cards)
+        ]
+
+    def pile(self, cards, zone, ordered=False, summary=True):
         # Canonicalize using public values only; instance IDs and hidden array order
         # never choose features, slots or positional encodings.
         cards = list(cards)
@@ -316,6 +354,8 @@ class PublicSnapshot:
                     **({"position": i} if ordered else {}),
                 },
             )
+        if not summary:
+            return  # The cards offered by a selection are not a pile of their own.
         self.entities.append(
             {
                 "entity_type": "pile_summary",
@@ -344,6 +384,7 @@ class PublicSnapshot:
                         "semantic_program": opaque(option["text_key"]),
                     },
                 )
+                self.displayed(option, f"option:{i}")
         elif scope in {"rest_site", "treasure"}:
             for item in context:
                 i = item["index"]
@@ -358,14 +399,18 @@ class PublicSnapshot:
                     ref,
                     {
                         "content_id": cid,
-                        "enabled": item.get("enabled", True),
+                        # A rest option can be shown disabled; a relic in an open chest is its zone.
+                        **({"enabled": item.get("enabled", True)} if scope == "rest_site" else {"zone": "treasure"}),
                         "effect_coverage": "opaque",
                         "semantic_program": opaque(cid),
                     },
                 )
+                self.displayed(item, ref)
                 self.keys[(scope, i)] = ref
         elif scope == "reward_choice":
             for i, item in enumerate(context["rewards"]):
+                if item.get("selected"):
+                    continue  # A collected reward has left the screen.
                 cid = item["reward_type"] + "Reward"
                 value = item.get("value")
                 if isinstance(value, dict) and item["reward_type"] in {
@@ -380,56 +425,60 @@ class PublicSnapshot:
                 }
                 if item["reward_type"] == "Gold":
                     fields["gold"] = value
-                # CardReward.cards is unrevealed until its separate selection opens.
-                self.add(item, "reward", f"reward:{i}", fields)
+                reward = self.add(item, "reward", f"reward:{i}", fields)
+                # The cards of a card reward are generated before the screen is shown and
+                # looking at them is free: the bridge publishes them with the reward.
+                # Without that flag they are unknown until the separate selection opens.
+                if not item.get("expanded_card_reward"):
+                    continue
+                for ref in self.offer(item["cards"], f"{reward}:card"):
+                    self.relations.append({"source": reward, "target": ref, "role": "offers"})
+                for option in item.get("alternatives") or []:
+                    cid = option.get("OptionId")
+                    require(isinstance(cid, str), "Unknown reward alternative")
+                    ref = f"{reward}:alternative:{cid}"
+                    self.entities.append(
+                        {
+                            "entity_type": "reward_alternative",
+                            "ref": ref,
+                            "content_id": cid,
+                            "effect_coverage": "opaque",
+                            "semantic_program": opaque(cid),
+                        }
+                    )
+                    self.keys[(scope, item["instance_id"], cid)] = ref
         elif scope == "shop":
             for i, item in enumerate(context):
                 value = item["value"]
                 card = (value.get("CreationResult") or {}).get("Card")
-                obj = card or value.get("Model")
                 typename = value.get("type", "").rsplit(".", 1)[-1]
-                kind = (
-                    "card"
-                    if card or typename == "MerchantCardEntry"
-                    else "relic"
-                    if typename == "MerchantRelicEntry"
-                    else "potion"
-                    if typename == "MerchantPotionEntry"
-                    else "service"
-                )
-                sold_out = value.get("IsStocked") is False
-                require(
-                    kind == "service" or obj is not None or sold_out,
-                    "Missing visible shop item",
-                )
-                fields = (
-                    card_fields(card)
-                    if card
-                    else {
-                        "content_id": content_id(obj, kind)
-                        if obj
-                        else "card_removal"
-                        if kind == "service"
-                        else None
-                    }
-                )
-                fields.update(
-                    price=value.get("Cost"),
-                    sold_out=not value.get("IsStocked", True),
-                    zone="shop",
-                    effect_coverage="opaque",
-                    semantic_program=opaque(fields["content_id"]),
-                )
-                self.add(item, "shop_item", f"shop:{i}", fields)
+                kind = {"MerchantRelicEntry": "relic", "MerchantPotionEntry": "potion"}.get(typename)
+                model = value.get("Model")
+                # As the engine names an entry: by what it sells, or by its own type
+                # when that is a service or nothing is left of it.
+                cid = (content_id(card, "card") if card
+                       else content_id(model, kind) if kind and model else typename)
+                require(cid, "Missing visible shop item")
+                ref = f"shop:{i}"
+                if card:
+                    offered = self.add(card, "card", f"{ref}:card",
+                                       {**card_fields(card), "zone": "shop", "owner_ref": "player"})
+                    self.relations.append({"source": ref, "target": offered, "role": "offers"})
+                self.add(item, "shop_item", ref, {
+                    "content_id": cid,
+                    "price": value.get("Cost"),
+                    "sold_out": not value.get("IsStocked", True),
+                    "effect_coverage": "opaque",
+                    "semantic_program": opaque(cid),
+                })
         elif scope == "card_select":
             require(isinstance(context, list), "Missing pre-selection card offer")
             # Rebind offered cards to the option zone, not to an internal/deck order.
-            self.pile(context, "selection")
+            self.pile(context, "selection", summary=False)
         elif scope == "card_reward":
             cards = context["cards"]
-            self.pile(cards, "reward")
-            for i, card in enumerate(cards):
-                self.keys[(scope, i)] = self.refs[card["instance_id"]]
+            for i, ref in enumerate(self.offer(cards, "reward")):
+                self.keys[(scope, i)] = ref
             for i, option in enumerate(context["alternatives"], len(cards)):
                 cid = option.get("OptionId")
                 require(isinstance(cid, str), "Unknown reward alternative")
@@ -515,6 +564,8 @@ class PublicSnapshot:
             and args.get("index") is None
         ):
             result["verb"] = "LEAVE_ROOM" if command == "pick_relic" else "SKIP"
+        elif command == "take_reward_alternative":
+            result["source_ref"] = self.keys[(scope, args["reward_instance_id"], args["option_id"])]
         else:
             source = next(
                 (
@@ -558,6 +609,11 @@ class PublicSnapshot:
         if target is not None:
             require(target in self.refs, "Candidate refers to an unobserved target")
             result["target_refs"] = [self.refs[target]]
+        # The shape of an engine candidate.
+        source = result.pop("source_ref", None)
+        result["source_refs"] = [] if source is None else [source]
+        result.setdefault("target_refs", [])
+        result["effect_coverage"] = "opaque"
         return result
 
 
@@ -615,7 +671,7 @@ def decision_macro(decision, run_id, contract):
         "phase": PHASES[scope],
         "entities": snapshot.entities,
         "relations": snapshot.relations,
-        "memory": [],
+        "memory": snapshot.memory,
         "decoder_bank": bank,
     }
     frame = {
@@ -765,7 +821,7 @@ def selection_macro(decision, run_id, contract, snapshot):
                 "phase": "card_select",
                 "entities": snapshot.entities,
                 "relations": snapshot.relations,
-                "memory": [],
+                "memory": snapshot.memory,
                 "decoder_bank": bank,
                 "selection_context": context,
             },
@@ -922,7 +978,8 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
         verify_teachers(decisions)
     contract = {
         "adapter_version": IMPORT_VERSION,
-        "observation_schema": "public-state-v3",
+        "observation_schema": "public-state-v6",
+        "public_history_version": HISTORY_VERSION,
         "action_schema": "candidate-v0",
         "fixed_ascension": ascension,
         "training_ready": True,
@@ -942,7 +999,7 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
         "purpose": "offline_behavior_cloning",
     }
     require(contract["game_assembly_mvid"], "Missing recorded game assembly identity")
-    macros, automatic, rejected = [], 0, []
+    macros, automatic, rejected, environment = [], 0, [], []
     previous = None  # (decision, macro appended for it or None)
     for decision in decisions:
         try:
@@ -989,13 +1046,21 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
             )
             previous = (decision, None)
             continue
-        if all(s["forced"] for s in macro["steps"]):
+        controllers = [controller_for(s["frame"]["public"]["phase"], s["frame"]["legal"]["candidates"])
+                       for s in macro["steps"]]
+        if any(controllers):
+            require(all(controllers), "Macro mixes policy and environment steps")
+            environment.extend(dict(actor=decision.get("actor", "unknown"),
+                                    action_id=decision["action_id"], **step) for step in macro["steps"])
+            automatic += len(macro["steps"])
+            previous = (decision, None)
+        elif all(s["forced"] for s in macro["steps"]):
             automatic += len(macro["steps"])
             previous = (decision, None)
         else:
             macros.append(macro)
             previous = (decision, macro)
-    require(macros, "Recording contains no branching decisions")
+    require(macros or environment, "Recording contains no branching decisions")
     run = {
         "schema": SCHEMA,
         "source": "demonstration",
@@ -1009,6 +1074,7 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
         "contract": contract,
         "macros": macros,
         "automatic_steps": automatic,
+        "environment_actions": environment,
         "provenance": {
             "importer": IMPORT_VERSION,
             "raw_sha256": digest,

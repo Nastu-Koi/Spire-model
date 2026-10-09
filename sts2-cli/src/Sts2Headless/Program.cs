@@ -85,7 +85,7 @@ class Program
             try
             {
                 var cmd = JsonSerializer.Deserialize<JsonElement>(line);
-                result = HandleCommand(sim, cmd);
+                result = HandleCommand(ref sim, cmd);
             }
             catch (JsonException ex)
             {
@@ -108,9 +108,18 @@ class Program
         }
     }
 
-    static Dictionary<string, object?>? HandleCommand(RunSimulator sim, JsonElement cmd)
+    static Dictionary<string, object?>? HandleCommand(ref RunSimulator sim, JsonElement cmd)
     {
         var cmdType = cmd.GetProperty("cmd").GetString() ?? "";
+        if (cmdType is "start_run" or "load_save" or "enter_anchor" && sim.HasBegun)
+        {
+            // One simulator drives one run. The next run of this process gets a new
+            // simulator once the old run has ended.
+            if (sim.EndRun() is { } reason)
+                return new() { ["type"] = "error", ["code"] = "run_not_ended",
+                    ["message"] = "The run in progress cannot be ended: " + reason };
+            sim = new RunSimulator();
+        }
         if (cmdType is "start_run" or "load_save" or "action" or "set_player" or "enter_room"
             or "set_draw_order" or "quit" or "enter_anchor")
             sim.InvalidateDecisionProtocol();
@@ -188,6 +197,10 @@ class Program
                 return sim.AnchorRoom(cmd);
             case "anchor_state":
                 return sim.AnchorState();
+            case "content_info":
+                return sim.ContentInfo(cmd);
+            case "anchor_event":
+                return sim.AnchorEvent();
             case "get_map":
                 return sim.GetFullMap();
             case "public_catalog":

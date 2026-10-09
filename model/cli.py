@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -8,9 +9,10 @@ from pathlib import Path
 
 import torch
 
-from .checkpoint import load_model, restore_training, save_checkpoint
+from .checkpoint import archive_checkpoint, load_model, restore_training, save_checkpoint
 from .config import ModelConfig, TrainConfig
-from .data import RunShards, audit_files, load_runs
+from .control import environment_action
+from .data import RunShards, audit_files, load_runs, policy_macros
 from .engine import CliEngine
 from .history import TrainingHistory
 from .model import PolicyValue
@@ -23,7 +25,7 @@ from .protocol import (
     validate_frame,
 )
 from .representation import Vocabulary
-from .rewards import MilestoneLedger
+from .rewards import MilestoneLedger, require_reward_version
 from .rollout import RolloutRunner, collect_round, precision_context, write_run
 from .runtime import configure_runtime
 from .seeds import RandomSeedSchedule, validate_evaluation_seeds
@@ -31,7 +33,7 @@ from .trainer import Learner, evaluate_runs
 
 
 def vocabulary_for(runs, config):
-    frames = (s["frame"] for r in runs for m in r["macros"] for s in m["steps"])
+    frames = (s["frame"] for r in runs for m in policy_macros(r) for s in m["steps"])
     return Vocabulary.from_frames(frames, config)
 
 
@@ -152,24 +154,26 @@ def parser():
     )
     x.add_argument("--shard-samples", type=int, default=2000,
                    help="Decision steps per gzip shard; Bootstrap holds a few shards in memory at a time")
+    x.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) // 2),
+                   help="Processes that convert sample groups; default one for every two logical cores")
+    x = sub.add_parser("reindex", help="Recount policy choices in existing demonstration shards")
+    x.add_argument("--data", required=True)
+    x.add_argument("--workers", type=int, default=4)
     x = sub.add_parser("bootstrap")
     x.add_argument("--data", required=True)
-    validation = x.add_mutually_exclusive_group()
-    validation.add_argument("--validation")
-    validation.add_argument(
-        "--all-training-data",
-        action="store_true",
-        help="Use all supplied runs for Bootstrap without an automatic validation holdout",
-    )
-    x.add_argument("--epochs", type=int, default=1)
-    x.add_argument("--holdout", type=float, default=0.0,
-                   help="Sharded data only: fraction of seeds kept out of training and used for validation")
+    x.add_argument("--epochs", type=int,
+                   help="Optional explicit epoch budget; otherwise continue until interrupted")
     x.add_argument("--window-shards", type=int, default=8,
                    help="Sharded data only: shards read into memory and shuffled together")
     x.add_argument("--tiny", action="store_true")
     x.add_argument("--architecture")
     x.add_argument("--config", help="Native model/training JSON profile")
     x.add_argument("--checkpoint")
+    x.add_argument("--weights-only", action="store_true",
+                   help="Start new BC from checkpoint weights with fresh optimizer, warmup and RNG")
+    x.add_argument("--decay-updates", type=int, default=0,
+                   help="Finish BC from the given current checkpoint: decay every rate linearly "
+                        "to zero over this many updates, then stop")
     x.add_argument("--precision", choices=["no", "bf16"], default="bf16")
     x.add_argument("--output", required=True)
     for command in ("collect", "evaluate", "train"):
@@ -197,6 +201,13 @@ def parser():
                 required=True,
                 help="JSON mapping all five characters to disjoint seeds",
             )
+            if command == "evaluate":
+                x.add_argument(
+                    "--claim-rewards",
+                    action="store_true",
+                    help="Take gold, relics and potions the belt has room for from reward "
+                         "screens for the policy, as the demonstrations assume",
+                )
         x.add_argument("--engine-root")
         x.add_argument("--output", required=True)
         x.add_argument("--max-steps", type=int, default=10000)
@@ -238,31 +249,50 @@ def parser():
     x.add_argument("--engine-root")
     x.add_argument("--character", choices=CHARACTERS, default="Ironclad")
     x.add_argument("--game-seed", default="protocol-inspect")
-    x.add_argument("--ascension", type=int, default=10)
+    x.add_argument("--ascension", type=int, default=0)
     return p
 
 
-def _learner(checkpoint, device):
-    model, vocab, manifest = load_model(checkpoint, device)
+def _learner(checkpoint, device, *, require_current_rewards=False, weights_only=False, training=None,
+             decay_updates=0, inference=False):
+    """A checkpoint's policy with its training state. `inference` loads it to play only:
+    nothing is resumed, so a checkpoint whose training has ended, a finished decay among
+    them, is accepted."""
+    model, vocab, manifest = load_model(checkpoint, device, allow_legacy_encoding=weights_only)
+    if require_current_rewards:
+        require_reward_version(manifest.get("progress", {}).get("reward_version"))
+    saved_training = TrainConfig.from_dict(manifest["training"])
+    if not weights_only and training is not None and asdict(training) != asdict(saved_training):
+        raise ValueError("Strict resume cannot change training configuration; use --weights-only")
+    if weights_only:
+        vocab = vocab.expanded()
     learner = Learner(
         model,
         vocab,
-        TrainConfig.from_dict(manifest["training"]),
-        policy_version=manifest["progress"].get("policy_version", 0),
+        training or saved_training,
+        policy_version=0 if weights_only else manifest["progress"].get("policy_version", 0),
+        decay_updates=decay_updates,
     )
-    if "optimizer" in manifest:
+    if weights_only:
+        learner.checkpoint_metadata = {
+            "training_seeds": manifest["progress"].get("training_seeds", []),
+            "initialization": "weights-only",
+            "source_checkpoint": str(Path(checkpoint).resolve()),
+            "source_updates": manifest["progress"].get("updates", 0),
+        }
+        return learner, manifest
+    if inference:
+        learner.updates = manifest["progress"].get("updates", 0)
+    elif "optimizer" in manifest:
         progress = restore_training(checkpoint, learner.optimizer, learner.scheduler)
         learner.updates = progress.get("updates", 0)
+    else:
+        raise ValueError("Checkpoint has no optimizer state; use --weights-only")
     learner.checkpoint_metadata = {
         k: v
         for k, v in manifest["progress"].items()
         if k not in {"policy_version", "updates"}
     }
-    legacy_epochs = learner.checkpoint_metadata.pop("completed_bc_epochs", None)
-    if legacy_epochs is not None:
-        learner.checkpoint_metadata.setdefault(
-            "completed_bootstrap_epochs", legacy_epochs
-        )
     return learner, manifest
 
 
@@ -289,14 +319,6 @@ def _save(path, learner, extra=None):
         },
     )
     learner.checkpoint_metadata = metadata
-
-
-def _seeds(runs):
-    return runs.seeds if isinstance(runs, RunShards) else {str(r["seed"]) for r in runs}
-
-
-def _identities(runs):
-    return runs.identities if isinstance(runs, RunShards) else {r["run_id"] for r in runs}
 
 
 def _round_metadata(runs, demonstrations):
@@ -418,15 +440,35 @@ def main(argv=None):
         elif args.command == "import-independent":
             from .independent import import_samples
 
-            summary = import_samples(args.samples, args.output, args.shard_samples)
+            summary = import_samples(args.samples, args.output, args.shard_samples, args.workers)
             emit(summary)
             if not summary["accepted_runs"]:
                 return 2
+        elif args.command == "reindex":
+            from .dataset_index import rebuild_index
+
+            emit(rebuild_index(args.data, workers=args.workers))
         elif args.command == "inspect":
             with CliEngine(root=args.engine_root) as engine:
                 frame = engine.reset(args.character, args.game_seed, args.ascension)
             emit(frame)
         elif args.command == "bootstrap":
+            if args.weights_only and not args.checkpoint:
+                raise ValueError("--weights-only requires --checkpoint")
+            if args.epochs is not None and args.epochs < 1:
+                raise ValueError("Bootstrap needs at least one epoch")
+            if args.decay_updates < 0:
+                raise ValueError("Decay updates must be non-negative")
+            if args.decay_updates and (not args.checkpoint or args.weights_only):
+                raise ValueError("--decay-updates continues a checkpoint's optimizer: "
+                                 "pass its current checkpoint without --weights-only")
+            output = Path(args.output)
+            if ((output / "current").exists() or (output / "history.jsonl").exists()
+                    or (output / "updates.jsonl").exists()
+                    or any(output.glob("epoch-*"))):
+                if (args.weights_only or not args.checkpoint
+                        or Path(args.checkpoint).resolve() != (output / "current").resolve()):
+                    raise ValueError("Existing BC output requires resume from its current checkpoint; use a new output directory")
             streamed = RunShards.is_at(args.data)
             runs = RunShards(args.data) if streamed else load_runs(args.data)
             if streamed and not args.checkpoint:
@@ -441,33 +483,19 @@ def main(argv=None):
                     f"No accepted behavior-cloning samples: {args.data} contains zero runs."
                     " Import eligible recordings before starting Bootstrap." + detail
                 )
-            if args.validation:
-                validation = (RunShards(args.validation) if RunShards.is_at(args.validation)
-                              else load_runs(args.validation))
-                if _seeds(runs) & _seeds(validation) or _identities(runs) & _identities(validation):
-                    raise ProtocolError("Training/validation run or seed overlap")
-            elif streamed and args.holdout:
-                runs, validation = runs.split(args.holdout)
-            else:
-                validation = []
-            if not (runs.counts if streamed else any(r["macros"] for r in runs)):
+            if not (runs.counts if streamed else any(next(policy_macros(r), None) for r in runs)):
                 raise ProtocolError(
-                    "No accepted behavior-cloning samples in the training split "
-                    f"({len(runs)} training runs, {len(validation)} validation runs). "
-                    "Add training demonstrations; validation runs are not used for updates."
+                    "No accepted behavior-cloning samples in the supplied data"
                 )
+            profile = json.loads(Path(args.config).read_text()) if args.config else None
             if args.checkpoint:
-                learner, _ = _learner(args.checkpoint, args.device)
-                # What an earlier session trained on stays training data for this one.
-                seen = set(map(str, learner.checkpoint_metadata.get("training_seeds", [])))
-                if validation and seen & _seeds(validation):
-                    raise ProtocolError(
-                        "Validation seed overlaps the checkpoint's training seeds"
-                    )
+                learner, _ = _learner(args.checkpoint, args.device, require_current_rewards=True,
+                                      weights_only=args.weights_only,
+                                      training=TrainConfig.from_dict(profile["training"]) if profile else None,
+                                      decay_updates=args.decay_updates)
+                if profile and ModelConfig(**profile["model"]) != learner.model.config:
+                    raise ValueError("A checkpoint's model architecture cannot be changed by --config")
             else:
-                profile = (
-                    json.loads(Path(args.config).read_text()) if args.config else None
-                )
                 config = (
                     ModelConfig(**profile["model"])
                     if profile
@@ -493,24 +521,27 @@ def main(argv=None):
             )
             metadata = {"runtime": runtime, **(runs.metadata() if streamed else _data_metadata(runs))}
             epoch_started = time.monotonic()
+            completed = 0
+
+            def update_done(metrics, *, epoch, stage):
+                history.append_update(metrics, round=start_epoch + epoch, stage=stage,
+                                      optimization_epoch=epoch, policy_version=learner.policy_version)
 
             def epoch_done(index, metrics):
-                nonlocal epoch_started
+                nonlocal epoch_started, completed
                 epoch = start_epoch + index
-                validation_metrics = (
-                    learner.evaluate_bootstrap(validation) if validation else {}
-                )
+                archived = output / f"epoch-{epoch:06d}"
+                if archived.exists():
+                    raise FileExistsError("Epoch checkpoint already exists; use a new output directory")
                 record = history.append(
                     epoch,
                     metrics,
-                    validation=validation_metrics,
                     training_runs=len(runs),
-                    validation_runs=len(validation),
                     duration_seconds=time.monotonic() - epoch_started,
                     policy_version=learner.policy_version,
                 )
                 _save(
-                    Path(args.output) / "current",
+                    output / "current",
                     learner,
                     {
                         **metadata,
@@ -518,12 +549,17 @@ def main(argv=None):
                         "last_training_record": record,
                     },
                 )
+                # Retain completed epochs for manual comparison. Hard links survive
+                # the next atomic replacement of current without copying tensors.
+                archive_checkpoint(output / "current", archived)
                 emit(record)
+                completed = index
                 epoch_started = time.monotonic()
 
-            history.status("updating", round=start_epoch + 1)
-            learner.bootstrap(runs, args.epochs, on_epoch=epoch_done, window_shards=args.window_shards)
-            history.status("completed", round=start_epoch + args.epochs)
+            history.status("updating", round=start_epoch + 1, updates=learner.updates)
+            learner.bootstrap(runs, args.epochs, on_epoch=epoch_done, window_shards=args.window_shards,
+                              on_update=update_done)
+            history.status("completed", round=start_epoch + completed)
         elif args.command == "infer":
             model, vocabulary, manifest = load_model(args.checkpoint, args.device)
             model.eval()
@@ -540,6 +576,12 @@ def main(argv=None):
             ):
                 for frame in frames:
                     validate_frame(frame)
+                    automatic = environment_action(frame)
+                    if automatic is not None:
+                        policy.reset()
+                        emit(dict(command=execution_command(frame, automatic["candidate_ref"]),
+                                  ranking=None, control=automatic))
+                        continue
                     choice = policy.choose(frame, sample=False, top_k=args.top_k)
                     emit(
                         {
@@ -548,12 +590,17 @@ def main(argv=None):
                         }
                     )
         elif args.command == "ppo":
-            learner, _ = _learner(args.checkpoint, args.device)
+            learner, _ = _learner(args.checkpoint, args.device, require_current_rewards=True)
             runs = load_runs(args.data)
             history = TrainingHistory(args.output, "ppo", asdict(learner.config))
             number = learner.checkpoint_metadata.get("completed_ppo_rounds", 0) + 1
-            history.status("updating", round=number)
-            metrics = learner.ppo(runs)
+            history.status("updating", round=number, updates=learner.updates)
+
+            def update_done(metrics, *, epoch, stage):
+                history.append_update(metrics, round=number, stage=stage,
+                                      optimization_epoch=epoch, policy_version=learner.policy_version)
+
+            metrics = learner.ppo(runs, on_update=update_done)
             record = history.append(
                 number,
                 metrics,
@@ -582,7 +629,11 @@ def main(argv=None):
                     raise ValueError(
                         "--runs-per-character requires random seeds and a positive count"
                     )
-            learner, manifest = _learner(args.checkpoint, args.device)
+            learner, manifest = _learner(
+                args.checkpoint, args.device,
+                require_current_rewards=args.command in {"collect", "train"},
+                inference=args.command == "evaluate",
+            )
             auxiliary_runs = (
                 (RunShards(args.demonstrations) if RunShards.is_at(args.demonstrations)
                  else load_runs(args.demonstrations))
@@ -614,6 +665,7 @@ def main(argv=None):
                     version=learner.policy_version,
                     max_steps=args.max_steps,
                     ascension=learner.config.ascension,
+                    claim_rewards=args.claim_rewards,
                 )
                 paths = collect_round(
                     factory,
@@ -643,7 +695,7 @@ def main(argv=None):
                 for local_index in range(rounds):
                     round_index = start_round + local_index
                     if history:
-                        history.status("collecting", round=round_index + 1)
+                        history.status("collecting", round=round_index + 1, updates=learner.updates)
                     round_started = time.monotonic()
                     runner = RolloutRunner(
                         learner.model,
@@ -686,10 +738,15 @@ def main(argv=None):
                         used_demonstrations = []
                         if history:
                             history.status("updating", round=round_index + 1)
+
+                        def update_done(metrics, *, epoch, stage):
+                            history.append_update(metrics, round=round_index + 1, stage=stage,
+                                                  optimization_epoch=epoch, policy_version=learner.policy_version)
+
                         if args.value_warmup and local_index == 0:
-                            metrics = learner.value_warmup(runs)
+                            metrics = learner.value_warmup(runs, on_update=update_done)
                         else:
-                            metrics = learner.ppo(runs, auxiliary_runs)
+                            metrics = learner.ppo(runs, auxiliary_runs, on_update=update_done)
                             used_demonstrations = auxiliary_runs or []
                             completed_ppo_rounds += 1
                         seed_metadata = {"seed_mode": "random" if schedule else "fixed"}

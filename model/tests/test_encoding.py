@@ -91,7 +91,7 @@ def test_adjacent_large_numbers_stay_distinct():
 def test_map_keeps_the_current_node_and_its_frontier():
     obs = observation(map_frame())
     assert {ref for ref in obs.refs if ref.startswith("map:")} == {"map:0:0", "map:0:1", "map:1:1"}
-    assert len(obs.tokens) == 1 + 1 + 3 + 2  # global, player, three map nodes, two moves
+    assert len(obs.tokens) == 1 + 1 + 3 + 15 + 2  # global, player, map, unknown history, moves
     sizes = {ref: len(obs.effects[index].nodes) for ref, index in obs.refs.items() if ref.startswith("map:")}
     # Each frontier node carries itself, its branch and the boss; the current node carries no map.
     assert sizes == {"map:0:0": 1, "map:0:1": 3, "map:1:1": 3}
@@ -123,6 +123,28 @@ def test_only_the_reachable_map_reaches_the_model():
     assert torch.equal(a, b)
     # The changed room lies behind map:1:1 only, and that move's score follows it.
     assert (a - c).abs().max() > 1e-4
+
+
+def test_the_boss_of_the_act_reaches_the_model():
+    def named(boss):
+        result = map_frame()
+        next(e for e in result["public"]["entities"] if e.get("content_id") == "Boss")["encounter"] = boss
+        return result
+    unnamed, fysh, giant = map_frame(), named("ENCOUNTER.SOUL_FYSH_BOSS"), named("ENCOUNTER.WATERFALL_GIANT_BOSS")
+    assert len({observation(f).digest for f in (unnamed, fysh, giant)}) == 3
+    # Every branch ends at the boss, so every frontier node carries who it is.
+    obs = observation(fysh)
+    for ref in ("map:0:1", "map:1:1"):
+        symbols = {f.symbol for row in obs.effects[obs.refs[ref]].nodes for f in row}
+        assert "encounter=ENCOUNTER.SOUL_FYSH_BOSS" in symbols
+    # The static catalog registers every encounter, also the ones no frame has shown yet.
+    catalog = frame([{"entity_type": "encounter", "content_id": "ENCOUNTER." + name}
+                     for name in ("SOUL_FYSH_BOSS", "WATERFALL_GIANT_BOSS")], [action("a")])
+    model, vocabulary = build([catalog, unnamed])
+    known = {vocabulary.encode("encounter=ENCOUNTER." + name) for name in ("SOUL_FYSH_BOSS", "WATERFALL_GIANT_BOSS")}
+    assert len(known) == 2 and 1 not in known  # 1 is <unknown>
+    a, b = logits(model, vocabulary, [fysh, giant])
+    assert (a - b).abs().max() > 1e-4 and not vocabulary.unregistered()
 
 
 def test_a_map_node_an_action_refers_to_stays_an_entity():

@@ -15,7 +15,24 @@ import torch
 from . import rules
 from .config import ModelConfig, TrainConfig
 from .model import PolicyValue
-from .representation import Vocabulary
+from .representation import ENCODING_VERSION, Vocabulary
+from .optim import TRAINING_VERSION
+from .rewards import REWARD_VERSION
+from .public_history import HISTORY_VERSION, require_history_version
+
+
+def archive_checkpoint(source, destination):
+    """Publish an immutable epoch snapshot without duplicating its tensor files."""
+    destination = Path(destination)
+    if destination.exists():
+        raise FileExistsError("Epoch checkpoint already exists; use a new output directory")
+    stage = destination.with_name(destination.name + ".staging-" + uuid.uuid4().hex)
+    try:
+        shutil.copytree(source, stage, copy_function=os.link)
+        stage.rename(destination)
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
 
 
 def save_checkpoint(
@@ -40,11 +57,14 @@ def save_checkpoint(
     try:
         manifest = {
             "format": 1,
+            "encoding_version": ENCODING_VERSION,
+            "training_version": TRAINING_VERSION,
+            "public_history_version": HISTORY_VERSION,
             "model": asdict(model.config),
             "vocabulary": vocabulary.state(),
             "rules": rules.digest(),
             "training": asdict(training or TrainConfig()),
-            "progress": progress or {},
+            "progress": {"reward_version": REWARD_VERSION, **(progress or {})},
             "torch_version": str(torch.__version__),
         }
         torch.save(model.state_dict(), stage / "weights.pt")
@@ -60,6 +80,7 @@ def save_checkpoint(
                 if torch.cuda.is_available()
                 else [],
                 "scheduler": scheduler.state_dict() if scheduler else None,
+                "training": asdict(training or TrainConfig()),
             },
             stage / "runtime.pt",
         )
@@ -95,15 +116,20 @@ def save_checkpoint(
         raise
 
 
-def load_model(path, device="cpu"):
+def load_model(path, device="cpu", *, allow_legacy_encoding=False):
     path = Path(path)
     manifest = json.loads((path / "manifest.json").read_text())
     if manifest.get("format") != 1:
         raise ValueError("Unsupported checkpoint format")
+    require_history_version(manifest.get("public_history_version"))
+    if manifest.get("encoding_version") != ENCODING_VERSION and not allow_legacy_encoding:
+        raise ValueError("Checkpoint input encoding changed; use bootstrap --weights-only to start a new run")
     if manifest.get("model", {}).get("architecture_version") != 2:
         raise ValueError("Unsupported checkpoint architecture version")
     if manifest.get("rules") != rules.digest():
         raise ValueError("Checkpoint was trained with different rule text")
+    if "ascension" not in manifest.get("training", {}):
+        raise ValueError("Checkpoint has no declared ascension; do not infer a new default")
     config = ModelConfig(**manifest["model"])
     # Allocate once on the destination without a second full CPU model.
     with torch.device("meta"):
@@ -129,30 +155,36 @@ def restore_training(path, optimizer, scheduler=None):
     manifest = json.loads((path / "manifest.json").read_text())
     if manifest.get("format") != 1 or "optimizer" not in manifest:
         raise ValueError("Checkpoint has no optimizer state")
-    if isinstance(manifest["optimizer"], str):
-        restored = torch.load(
-            path / manifest["optimizer"], map_location="cpu", weights_only=True
-        )
-    else:
-        # Read checkpoints written before optimizer state was saved in one file.
-        restored = {}
-        for kind, part in manifest["optimizer"].items():
-            state = {}
-            for name in part["shards"]:
-                shard = torch.load(path / name, map_location="cpu", weights_only=True)
-                if state.keys() & shard.keys():
-                    raise ValueError("Duplicate optimizer checkpoint tensors")
-                state.update(shard)
-            restored[kind] = {"state": state, "param_groups": part["groups"]}
-        if set(restored) == {"single"}:
-            restored = restored["single"]
+    if manifest.get("training_version") != TRAINING_VERSION:
+        raise ValueError("Checkpoint optimizer/loss version changed; start with --weights-only")
+    if manifest.get("encoding_version") != ENCODING_VERSION:
+        raise ValueError("Checkpoint input encoding changed; start with --weights-only")
+    require_history_version(manifest.get("public_history_version"))
+    runtime = torch.load(path / "runtime.pt", map_location="cpu", weights_only=True)
+    if runtime.get("training") != manifest["training"]:
+        raise ValueError("Checkpoint training configuration conflicts with saved runtime; use --weights-only")
+    restored = torch.load(path / manifest["optimizer"], map_location="cpu", weights_only=True)
+    # A strict resume restores its original groups. It must never swallow requested settings.
+    groups = (restored["adamw"]["param_groups"] + restored["muon"]["param_groups"]
+              if set(restored) == {"adamw", "muon"} else restored["param_groups"])
+    current = optimizer.param_groups
+    keys = ("name", "initial_lr", "weight_decay", "betas", "eps", "momentum", "ns_steps")
+    if len(groups) != len(current) or any(
+        len(old["params"]) != len(new["params"]) or any(old.get(k) != new.get(k) for k in keys)
+        for old, new in zip(groups, current)
+    ):
+        raise ValueError("Optimizer configuration differs from checkpoint; use --weights-only")
+    if scheduler:
+        # Validate the schedule before changing any optimizer or RNG state.
+        if runtime["scheduler"] is None:
+            raise ValueError("Checkpoint has no schedule state; use --weights-only")
+        scheduler.check(runtime["scheduler"])
     # Delegate dtype/device restoration to the actual optimizer, including Muon.
     optimizer.load_state_dict(restored)
-    runtime = torch.load(path / "runtime.pt", map_location="cpu", weights_only=True)
     torch.set_rng_state(runtime["torch"])
     random.setstate(runtime["python"])
     if runtime["cuda"] and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(runtime["cuda"])
-    if scheduler and runtime["scheduler"] is not None:
+    if scheduler:
         scheduler.load_state_dict(runtime["scheduler"])
     return manifest["progress"]

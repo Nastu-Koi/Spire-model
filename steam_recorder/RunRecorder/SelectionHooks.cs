@@ -50,7 +50,18 @@ internal static class SelectionHooks
 			method = "UpdateSelectModeCardVisibility"
 		});
 		Type typeFromHandle = typeof(NCardRewardSelectionScreen);
+        var pileScreen = typeof(NCombatPileCardSelectScreen);
+        harmony.Patch(AccessTools.DeclaredMethod(pileScreen, "Create"),
+            postfix: new HarmonyMethod(typeof(SelectionPatches), "CombatPileScreenCreated"));
+        harmony.Patch(AccessTools.DeclaredMethod(pileScreen, "UpdatePileContents"),
+            postfix: new HarmonyMethod(typeof(SelectionPatches), "CombatPileScreenRefreshed"));
+        Recorder.HookReport.Add(new { type = pileScreen.FullName,
+            methods = new[] { "Create", "UpdatePileContents" }, purpose = "selection_offer_and_refresh" });
 		harmony.Patch(AccessTools.Method(typeFromHandle, "ShowScreen"), null, new HarmonyMethod(typeof(SelectionPatches), "RewardScreenCreated"));
+        harmony.Patch(AccessTools.Method(typeFromHandle, "OptionSelected"),
+            postfix: new HarmonyMethod(typeof(SelectionPatches), "RewardSelectionStarted"));
+        Recorder.HookReport.Add(new { type = typeFromHandle.FullName,
+            method = "OptionSelected", purpose = "selection_each_reward_round" });
 		if (includeRewardRefresh)
 		{
 			harmony.Patch(AccessTools.Method(typeFromHandle, "RefreshOptions"), null, new HarmonyMethod(typeof(SelectionPatches), "RewardScreenRefreshed"));

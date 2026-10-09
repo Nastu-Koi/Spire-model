@@ -21,7 +21,8 @@ public partial class RunSimulator
     private static readonly Lazy<Dictionary<string, object?>> ProtocolContract = new(() => new()
     {
         ["adapter_version"] = "engine-candidates-v1",
-        ["observation_schema"] = "public-state-v3",
+        ["observation_schema"] = "public-state-v6",
+        ["public_history_version"] = Spire.PublicHistory.OddsHistory.Version,
         ["action_schema"] = "candidate-v0",
         ["auto_advance_version"] = "pending-continuation-v0",
         // Outside combat a native cancel only undoes the opening action, so it is
@@ -70,9 +71,9 @@ public partial class RunSimulator
         _protocolRewardsOffered.Clear();
         _protocolOpenedChests.Clear();
         _protocolFinishedChests.Clear();
-        _protocolClosedMerchants.Clear();
         _protocolCompletedRestSites.Clear();
         _protocolWon.Clear();
+        _protocolEncounterIds.Clear();
         _protocolEvents.Clear();
         _protocolVictory = false;
         _protocolLoss = false;
@@ -301,7 +302,7 @@ public partial class RunSimulator
             .Append(Candidate("FINISH_SELECTION", "stop"))
             .Concat(canCancel ? new[] { Candidate("CANCEL", "cancel") } : []).ToArray();
         return PublishDecision("card_select", snapshot.Entities, bindings, context, slots, session.Id, session.Revision,
-            snapshot.Relations);
+            snapshot.Relations, snapshot.Memory);
     }
 
     private Dictionary<string, object?> PublishBundleBoundary()
@@ -338,7 +339,7 @@ public partial class RunSimulator
     private Dictionary<string, object?> PublishDecision(string phase,
         List<Dictionary<string, object?>> entities, List<CandidateBinding> bindings,
         object? context = null, object? bank = null, string? selectionId = null, long? revision = null,
-        object? relations = null)
+        object? relations = null, object? memory = null)
     {
         if (bindings.Count == 0) return ProtocolError("empty_legal_set");
         var decisionId = $"{_episodeId}:{++_decisionSequence}";
@@ -354,7 +355,7 @@ public partial class RunSimulator
             },
             ["public"] = new
             {
-                phase, entities, relations = relations ?? Array.Empty<object>(), memory = Array.Empty<object>(),
+                phase, entities, relations = relations ?? Array.Empty<object>(), memory = memory ?? Array.Empty<object>(),
                 selection_context = context, decoder_bank = bank,
             },
             ["legal"] = new { candidates = bindings.Select((binding, i) => new Dictionary<string, object?>(binding.Public)

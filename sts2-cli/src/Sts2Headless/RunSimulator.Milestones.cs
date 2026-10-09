@@ -11,6 +11,7 @@ public partial class RunSimulator
 {
     private readonly ConcurrentQueue<object> _protocolEvents = new();
     private readonly HashSet<CombatRoom> _protocolWon = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<CombatRoom, string> _protocolEncounterIds = new(ReferenceEqualityComparer.Instance);
     private volatile bool _protocolVictory;
     private volatile bool _protocolLoss;
     private volatile bool _protocolPlayerDied;
@@ -20,8 +21,10 @@ public partial class RunSimulator
     private void RegisterProtocolMilestones()
     {
         var manager = CombatManager.Instance;
+        manager.CombatBegan -= ProtocolCombatBegan;
         manager.CombatWon -= ProtocolCombatWon;
         manager.CombatEnded -= ProtocolCombatEnded;
+        manager.CombatBegan += ProtocolCombatBegan;
         manager.CombatWon += ProtocolCombatWon;
         manager.CombatEnded += ProtocolCombatEnded;
         RunManager.Instance.ActionExecutor.AfterActionExecuted -= ProtocolActionEnded;
@@ -33,6 +36,15 @@ public partial class RunSimulator
         _protocolPlayerCreature.Died += ProtocolPlayerDied;
     }
 
+    private void UnregisterProtocolMilestones()
+    {
+        CombatManager.Instance.CombatBegan -= ProtocolCombatBegan;
+        CombatManager.Instance.CombatWon -= ProtocolCombatWon;
+        CombatManager.Instance.CombatEnded -= ProtocolCombatEnded;
+        if (_protocolPlayerCreature != null) _protocolPlayerCreature.Died -= ProtocolPlayerDied;
+        _protocolPlayerCreature = null;
+    }
+
     private void ProtocolPlayerDied(Creature creature) => _protocolPlayerDied = true;
 
     private void ProtocolActionEnded(GameAction action)
@@ -40,6 +52,32 @@ public partial class RunSimulator
         if (!_protocolEnabled || action.Exception == null) return;
         Log("Protocol game action failed: " + action.Exception);
         _protocolFailure = "native_action_failed";
+    }
+
+    private static string EncounterKind(CombatRoom room) =>
+        room.RoomType == RoomType.Boss ? "boss" : room.RoomType == RoomType.Elite ? "elite" : "normal";
+
+    // One identity for a fight from its start to its result. Call under the lock.
+    private string EncounterId(CombatRoom room)
+    {
+        if (!_protocolEncounterIds.TryGetValue(room, out var id))
+            _protocolEncounterIds[room] = id = $"{_episodeId}:encounter:{++_protocolEncounterSequence}";
+        return id;
+    }
+
+    // Which fight begins: the encounter is what the player now faces, so naming it
+    // tells nothing the enemies on screen do not. It labels the fight's outcome.
+    private void ProtocolCombatBegan(CombatState combat)
+    {
+        if (!_protocolEnabled || !ReferenceEquals(combat.RunState, _runState)) return;
+        if (_runState!.CurrentRoom is not CombatRoom room || !ReferenceEquals(room.CombatState, combat)) return;
+        lock (_protocolWon)
+        {
+            if (_protocolEncounterIds.ContainsKey(room)) return;
+            _protocolEvents.Enqueue(new { type = "encounter_started", encounter_id = EncounterId(room),
+                encounter = room.Encounter.Id.ToString(), act = _runState.CurrentActIndex + 1,
+                kind = EncounterKind(room), from_event = room.ParentEventId != null });
+        }
     }
 
     private void ProtocolCombatWon(CombatRoom room)
@@ -52,8 +90,8 @@ public partial class RunSimulator
             int act = state.CurrentActIndex + 1;
             bool final = room.RoomType == RoomType.Boss && (state.Map.SecondBossMapPoint is { } second
                 ? state.CurrentMapCoord == second.coord : state.CurrentMapCoord == state.Map.BossMapPoint.coord);
-            string kind = room.RoomType == RoomType.Boss ? "boss" : room.RoomType == RoomType.Elite ? "elite" : "normal";
-            _protocolEvents.Enqueue(new { type = "encounter_completed", encounter_id = $"{_episodeId}:encounter:{++_protocolEncounterSequence}",
+            string kind = EncounterKind(room);
+            _protocolEvents.Enqueue(new { type = "encounter_completed", encounter_id = EncounterId(room),
                 act, kind, result = "victory", final_in_act = final });
             if (act == 3 && final)
             {

@@ -13,19 +13,25 @@
         "relation_size": 128,
         "backend": "sdpa",
         "checkpoint_layers": false,
-        "compile_blocks": false
+        "compile_blocks": true
     },
     "training": {
+        "ascension": 0,
         "optimizer": "muon_adamw",
         "muon_lr": 0.001,
         "muon_momentum": 0.95,
         "muon_ns_steps": 5,
         "backbone_lr": 1e-05,
+        "embedding_lr": 0.01,
+        "embedding_lr_final": 0.001,
+        "embedding_decay_updates": 10624,
         "head_lr": 3e-05,
+        "bootstrap_warmup_updates": 200,
+        "update_stats_every": 100,
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
-        "logical_batch_size": 32,
-        "microbatch_size": 32,
+        "logical_batch_size": 512,
+        "microbatch_size": 512,
         "clip_ratio": 0.2,
         "target_kl": 0.015,
         "ppo_epochs": 2,
@@ -55,8 +61,9 @@
             512,
             1024
         ],
-        "token_budget": 32768,
-        "pair_budget": 16777216,
-        "loader_workers": 8
+        "token_budget": 163840,
+        "pair_budget": 41943040,
+        "loader_workers": 6,
+        "loader_feeders": 4
     }
 }

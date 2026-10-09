@@ -10,11 +10,14 @@ import torch
 
 from .checkpoint import load_model
 from .policy import SessionPolicy
-from .crystal_rule import collection_candidate as crystal_candidate
-from .reward_rule import collection_candidate as reward_candidate
+from .control import environment_action
 from .protocol import ProtocolError, clean_frame, validate_frame
-from .recorder import PHASES, SELECTION_CANCEL, PublicSnapshot, cancel_offered, opaque, require
+from .recorder import PHASES, SELECTION_CANCEL, PublicSnapshot, cancel_offered, require
 from .rollout import precision_context
+from .public_history import HISTORY_VERSION
+
+# What the bridge must speak: card rewards arrive with their cards, a chest is opened by an action.
+PROTOCOL = "steam-live-v2"
 
 
 class SteamBridge:
@@ -34,10 +37,11 @@ class SteamBridge:
     def request(self, command, **payload):
         request_id = uuid.uuid4().hex
         request = self.directory / "request.json"
-        response = self.directory / "response.json"
+        # An answer of its own: the game cannot replace a file this side still has open.
+        response = self.directory / f"response-{request_id}.json"
         temporary = request.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps(dict(id=request_id, command=command, **payload))
+            json.dumps(dict(id=request_id, command=command, unique_response=True, **payload))
         )
         temporary.replace(request)
         deadline = time.monotonic() + self.timeout
@@ -45,8 +49,16 @@ class SteamBridge:
             try:
                 result = json.loads(response.read_text())
                 if result.get("id") == request_id:
+                    response.unlink(missing_ok=True)
+                    if result.get("protocol") != PROTOCOL:
+                        raise ProtocolError(
+                            f"The installed RunRecorder speaks {result.get('protocol') or 'an older protocol'}, "
+                            f"not {PROTOCOL}: reinstall it with steam_recorder/install.py"
+                        )
                     if result.get("status") == "error":
                         raise ProtocolError(result.get("error", "Steam bridge failed"))
+                    if result.get("status") == "paused":
+                        raise ProtocolError("Model control is switched off in the game's RunRecorder panel")
                     return result
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
@@ -61,13 +73,8 @@ class SteamBridge:
         self.lock.close()
 
 
-def live_frame(message, selected=(), opened_reward=False):
-    """The decision frame of a Steam state, in the engine protocol's terms.
-
-    `opened_reward` marks a card-reward screen the controller opened from the
-    rewards screen. The engine shows such an offer on the rewards screen itself,
-    where declining it is leaving; the frame is published the same way.
-    """
+def live_frame(message, selected=()):
+    """The decision frame of a Steam state, in the engine protocol's terms."""
     state, token = message["state"], message["token"]
     ascension = state["run"]["ascension"]
     require(type(ascension) is int and 0 <= ascension <= 10, "Start or load a single-player run")
@@ -75,8 +82,14 @@ def live_frame(message, selected=(), opened_reward=False):
     require(raw_legal["status"] == "complete", "Steam has no complete legal action set")
     scope = raw_legal["scope"]
     require(scope in PHASES, f"Unsupported Steam decision: {scope}")
-    snapshot = PublicSnapshot(state)
     offered = raw_legal["actions"]
+    if scope == "reward_choice":
+        # Opening a card reward is never a decision: its cards come with the screen.
+        unseen = {r.get("instance_id") for r in raw_legal["context"]["rewards"]
+                  if r["reward_type"] == "Card" and not r.get("expanded_card_reward")}
+        require(not any(a["command"] == "take_reward" and a["args"].get("reward_instance_id") in unseen
+                        for a in offered), "Steam offers a card reward without its cards")
+    snapshot = PublicSnapshot(state)
     selection = raw_legal.get("selection")
     raw_bank = list(offered)
     offer_cancel = False
@@ -96,22 +109,11 @@ def live_frame(message, selected=(), opened_reward=False):
     bank = [
         snapshot.action(action, index, scope) for index, action in enumerate(raw_bank)
     ]
-    phase = PHASES[scope]
-    if opened_reward and scope == "card_reward":
-        phase = "rewards"
-        offered_cards = [e["ref"] for e in snapshot.entities
-                         if e.get("entity_type") == "card" and e.get("zone") == "reward"]
-        snapshot.entities.append({"entity_type": "reward", "ref": "reward:0", "content_id": "CardReward",
-                                  "effect_coverage": "opaque", "semantic_program": opaque("CardReward")})
-        snapshot.relations.extend({"source": "reward:0", "target": ref, "role": "offers"} for ref in offered_cards)
-        for candidate in bank:
-            if candidate["verb"] == "SKIP":
-                candidate["verb"] = "LEAVE_REWARDS"
     public = {
-        "phase": phase,
+        "phase": PHASES[scope],
         "entities": snapshot.entities,
         "relations": snapshot.relations,
-        "memory": [],
+        "memory": snapshot.memory,
         "decoder_bank": bank,
     }
     routing = {
@@ -123,6 +125,7 @@ def live_frame(message, selected=(), opened_reward=False):
     if selection:
         minimum, maximum = selection["min"], selection["max"]
         require(0 <= minimum <= maximum, "Invalid Steam selection bounds")
+        described = selection.get("metadata") or {}
         candidates = [
             bank[i]
             for i, action in enumerate(raw_bank)
@@ -146,6 +149,10 @@ def live_frame(message, selected=(), opened_reward=False):
             "can_skip": False,
             "repetition_allowed": False,
             "order_matters": selection.get("ordered", True),
+            # What the selection does, in the engine's words; unknown where the game does not say.
+            **{key: described.get(key, "unknown") for key in ("operation", "source", "destination")},
+            "known_masks": described.get("known_masks") or dict.fromkeys(
+                ("operation", "source", "destination", "order_matters"), False),
         }
         routing.update(
             selection_id=token,
@@ -163,7 +170,8 @@ def live_frame(message, selected=(), opened_reward=False):
                 "fixed_ascension": ascension,
                 "training_ready": True,
                 "adapter_version": "steam-live-v1",
-                "observation_schema": "public-state-v3",
+                "observation_schema": "public-state-v6",
+                "public_history_version": HISTORY_VERSION,
                 "action_schema": "candidate-v0",
                 "selection_cancel": SELECTION_CANCEL,
             },
@@ -178,57 +186,16 @@ def live_frame(message, selected=(), opened_reward=False):
     }
 
 
-class RewardInspection:
-    """Card rewards of the current rewards screen that the controller has opened.
-
-    Looking at a card offer costs nothing, so it is never a policy decision: the
-    controller opens every card reward before the policy acts on the screen, and
-    leaves on its own once the policy has declined all that is left.
-    """
-
-    def __init__(self):
-        self.opened, self.declined = None, set()
-
-    def rule(self, message):
-        """The controller's own action on a rewards screen, or None when the policy acts."""
-        legal = message["state"]["legal"]
-        if legal["scope"] != "reward_choice":
-            return None
-        cards = {r.get("instance_id") for r in legal["context"]["rewards"] if r["reward_type"] == "Card"}
-        takes = [a for a in legal["actions"] if a["command"] == "take_reward"]
-        for action in takes:
-            key = action["args"].get("reward_instance_id")
-            if key in cards and key not in self.declined:
-                self.opened = key
-                return action
-        leave = next((a for a in legal["actions"] if a["command"] == "skip_rewards"), None)
-        if leave and takes and all(a["args"].get("reward_instance_id") in self.declined for a in takes):
-            return leave
-        return None
-
-
-def choose_action(policy, message, rewards=None):
-    rewards = rewards or RewardInspection()
-    scope = message["state"]["legal"]["scope"]
-    if scope not in {"reward_choice", "card_reward"}:
-        rewards.opened, rewards.declined = None, set()
-    opened = rewards.opened if scope == "card_reward" else None
+def choose_action(policy, message):
     selected = []
     while True:
-        frame, commands = live_frame(message, selected, opened_reward=opened is not None)
-        rule = crystal_candidate(frame) or reward_candidate(frame)
+        frame, commands = live_frame(message, selected)
+        rule = environment_action(frame)
         if rule is not None:
-            # Same environment rules as training rollouts.
+            # Use the same controller decision and reveal order as rollouts.
             return commands[rule["candidate_ref"]]
-        inspect = rewards.rule(message)
-        if inspect is not None:
-            return inspect
         choice = policy.choose(frame, sample=False)
         action = commands[choice.candidate_ref]
-        if opened is not None:
-            rewards.opened = None
-            if action["command"] == "select_reward_option" and action["args"].get("index") is None:
-                rewards.declined.add(opened)
         if action["command"] == "select_card" and message["state"]["legal"].get(
             "selection"
         ):
@@ -252,7 +219,7 @@ def play(checkpoint, directory, device="cpu", timeout=120, max_decisions=10000):
     model, vocabulary, manifest = load_model(checkpoint, device)
     model.eval()
     policy = SessionPolicy(model, vocabulary)
-    rewards = RewardInspection()
+    trained = manifest["training"]["ascension"]
     bridge = SteamBridge(directory, timeout)
     count, last_progress = 0, time.monotonic()
     try:
@@ -270,11 +237,17 @@ def play(checkpoint, directory, device="cpu", timeout=120, max_decisions=10000):
                         "victory": message.get("victory"),
                     }
                 if status == "decision":
-                    action = choose_action(policy, message, rewards)
+                    require(message["state"]["run"]["ascension"] == trained,
+                            f"The checkpoint was trained on ascension {trained}")
+                    action = choose_action(policy, message)
                     result = bridge.request(
                         "execute", token=message["token"], action=action
                     )
                     if result["status"] == "stale":
+                        # The game moved on between observing and acting: look again,
+                        # but not forever.
+                        if time.monotonic() - last_progress > timeout:
+                            raise TimeoutError("Steam state kept changing before an action could be executed")
                         policy.reset()
                         continue
                     require(

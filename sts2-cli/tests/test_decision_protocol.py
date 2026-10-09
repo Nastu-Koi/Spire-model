@@ -318,3 +318,62 @@ def test_optional_single_card_keeps_stop_candidate(game):
         "SELECT_ONE",
         "FINISH_SELECTION",
     ]
+
+
+def start(client, seed, ascension=10):
+    return client.send(
+        {
+            "cmd": "start_run",
+            "character": "Ironclad",
+            "seed": seed,
+            "ascension": ascension,
+            "decision_protocol": True,
+        }
+    )
+
+
+def test_next_run_of_a_process_equals_the_first_run_of_a_new_one(game):
+    from conftest import Game
+
+    # Leave the first run at an open card selection: the game is waiting for the
+    # player, which is where a run can be ended.
+    assert smith(game)["public"]["phase"] == "card_select"
+    second = start(game, "protocol_second")
+    fresh = Game()
+    try:
+        first = start(fresh, "protocol_second")
+    finally:
+        fresh.close()
+    assert second["boundary"] == "decision", second
+    assert second["contract"] == first["contract"] and second["contract"]["training_ready"] is True
+    assert second["public"] == first["public"]
+    assert second["legal"] == first["legal"]
+    # The simulator of the run is new: versions restart, the episode differs.
+    for key in ("state_version", "base_public_version"):
+        assert second["routing"][key] == first["routing"][key]
+    assert second["routing"]["episode_id"] != first["routing"]["episode_id"]
+    # The new run is played like any other.
+    assert execute(game, second)["boundary"] in ("decision", "waiting")
+
+
+def test_map_names_the_boss_of_the_act(game):
+    frame = start(game, "protocol_boss")
+    nodes = [e for e in frame["public"]["entities"] if e["entity_type"] == "map_node"]
+    drawn = game.get_map()["boss"]["id"]
+    # Shown on the map from the first decision of the act, and on no other node.
+    assert [e.get("encounter") for e in nodes if e["content_id"] == "Boss"] == ["ENCOUNTER." + drawn]
+    assert not any("encounter" in e for e in nodes if e["content_id"] != "Boss")
+    assert frame["contract"]["observation_schema"] == "public-state-v6"
+    assert frame["contract"]["public_history_version"] == "public-history-v1"
+
+
+def test_run_in_combat_is_not_ended(game):
+    prepare(game)
+    game.enter_room("combat", decision_protocol=True)
+    frame = advance(game)
+    assert frame["public"]["phase"] == "combat"
+    refused = start(game, "protocol_refused")
+    assert (refused["type"], refused["code"]) == ("error", "run_not_ended")
+    # The run in progress is untouched, its published decision included.
+    assert advance(game) == frame
+    assert execute(game, frame)["boundary"] == "decision"

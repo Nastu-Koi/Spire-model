@@ -5,8 +5,10 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Godot;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Combat.History.Entries;
 using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -17,6 +19,8 @@ using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Hooks;
+using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
@@ -48,7 +52,7 @@ internal sealed class Snapshot
 	{
 		"NMapPoint", "NEventOptionButton", "NAncientDialogueLine", "NAncientDialogueHitbox", "NRestSiteButton", "NRewardButton", "NMerchantCard", "NMerchantRelic", "NMerchantPotion", "NMerchantCardRemoval",
 		"NCardBundle", "NGridCardHolder", "NHandCardHolder", "NCardRewardSelectionScreen", "NChooseACardSelectionScreen", "NChooseABundleSelectionScreen", "NCardGridSelectionScreen", "NCardSelectScreen", "NDeckUpgradeSelectScreen", "NDeckTransformSelectScreen",
-		"NDeckEnchantSelectScreen", "NPlayerHand", "NRewardsScreen", "NConfirmButton", "NProceedButton", "NChoiceSelectionSkipButton", "NCardRewardAlternativeButton", "NCrystalSphereScreen", "NTreasureRoomRelicHolder"
+		"NDeckEnchantSelectScreen", "NSimpleCardSelectScreen", "NDeckCardSelectScreen", "NCombatPileCardSelectScreen", "NPlayerHand", "NRewardsScreen", "NConfirmButton", "NProceedButton", "NChoiceSelectionSkipButton", "NCardRewardAlternativeButton", "NCrystalSphereScreen", "NTreasureRoomRelicHolder"
 	};
 
 	internal object? SelectionKey(SelectionOffer offer, PlayerChoiceResult result)
@@ -480,7 +484,8 @@ internal sealed class Snapshot
 						min = selectionOffer.Min,
 						max = selectionOffer.Max,
 						cancelable = selectionOffer.Cancelable,
-						ordered = true
+						ordered = true,
+                        metadata = selectionOffer.Metadata
 					};
 					CardModel[] cards = selectionOffer.Cards;
 					foreach (CardModel obj in cards)
@@ -572,7 +577,9 @@ internal sealed class Snapshot
 						option_id = option.OptionId,
 						enabled = option.IsEnabled,
 						title = option.Title?.ToString(),
-						description = option.Description?.ToString()
+							description = option.Description?.ToString(),
+                            displayed_variables = DisplayedVariables(option.Title, option.Description),
+                            displayed_names = DisplayedNames(option.Title, option.Description)
 					}).ToArray();
 					for (int num4 = 0; num4 < localOptions.Count; num4++)
 					{
@@ -716,12 +723,20 @@ internal sealed class Snapshot
 					flag2 = !flag;
 					if (flag2)
 					{
-						bool flag4 = ((decision == "PickRelicAction" || decision == "skip_treasure") ? true : false);
+						bool flag4 = ((decision == "PickRelicAction" || decision == "skip_treasure" || decision == "open_chest") ? true : false);
 						flag2 = flag4;
 					}
 					if (flag2)
 					{
 						scope = "treasure";
+						if (decision == "open_chest")
+						{
+							// The relics are drawn when the room is entered but shown only once the
+							// chest is open: a closed chest offers its lid and nothing about its contents.
+							context = Array.Empty<object>();
+							Add("open_chest", new { });
+							goto IL_0e12;
+						}
 						IReadOnlyList<RelicModel> currentRelics = RunManager.Instance.TreasureRoomRelicSynchronizer.CurrentRelics;
 						if (currentRelics == null)
 						{
@@ -937,9 +952,15 @@ internal sealed class Snapshot
 				abandoned = RunManager.Instance.IsAbandoned,
 				win_time = RunManager.Instance.WinTime,
 				boss = run.Acts.ElementAtOrDefault(run.CurrentActIndex)?.BossEncounter?.Id.Entry,
+				second_boss = run.Acts.ElementAtOrDefault(run.CurrentActIndex)?.SecondBossEncounter?.Id.Entry,
 				visited = Value(run.VisitedMapCoords)
 			},
 			domain = (flag ? "combat" : "strategic"),
+            public_history = new
+            {
+                version = Spire.PublicHistory.OddsHistory.Version,
+                memory = Spire.PublicHistory.NativeHistory.Capture(run, obj => Id(obj).ToString(System.Globalization.CultureInfo.InvariantCulture))
+            },
 			legal = LegalActions(run, ended, decision, source, arguments),
 			current_event = ((eventModel == null) ? null : Event(eventModel)),
 			event_state_ready = (eventModel != null),
@@ -1017,6 +1038,8 @@ internal sealed class Snapshot
 			text_key = option.TextKey,
 			title = option.Title?.ToString(),
 			description = option.Description?.ToString(),
+            displayed_variables = DisplayedVariables(option.Title, option.Description),
+            displayed_names = DisplayedNames(option.Title, option.Description),
 			locked = option.IsLocked,
 			proceed = option.IsProceed,
 			was_chosen = option.WasChosen,
@@ -1075,6 +1098,11 @@ internal sealed class Snapshot
 				energy = playerCombatState.Energy,
 				max_energy = playerCombatState.MaxEnergy,
 				stars = playerCombatState.Stars,
+				// The turn-scoped fact the game shows as Spite's glow, as the headless engine publishes it.
+				lost_hp_this_turn = ((CombatManager.Instance.IsInProgress && player.Creature.CombatState != null)
+					? CombatManager.Instance.History.Entries.OfType<DamageReceivedEntry>().Any((DamageReceivedEntry e) =>
+						e.HappenedThisTurn(player.Creature.CombatState) && e.Receiver == player.Creature && e.Result.UnblockedDamage > 0)
+					: ((bool?)null)),
 				hand = playerCombatState.Hand.Cards.Select((CardModel c) => Card(c, inHand: true)).ToArray(),
 				draw = playerCombatState.DrawPile.Cards.Select(Card).ToArray(),
 				discard = playerCombatState.DiscardPile.Cards.Select(Card).ToArray(),
@@ -1112,6 +1140,8 @@ internal sealed class Snapshot
 			enchantment = Value(Read(card, "Enchantment")),
 			affliction = Value(Read(card, "Affliction")),
 			star_cost = (card.IsCanonical ? card.CanonicalStarCost : card.GetStarCostWithModifiers()),
+            current_star_cost = card.CurrentStarCost,
+            base_star_cost = card.BaseStarCost,
 			stars_x = card.HasStarCostX,
 			retain = (!card.IsCanonical && card.ShouldRetainThisTurn),
 			exhaust_on_next_play = card.ExhaustOnNextPlay,
@@ -1218,12 +1248,81 @@ internal sealed class Snapshot
 			counter = Read(model, "DisplayAmount"),
 			show_counter = Read(model, "ShowCounter"),
 			status = Read(model, "Status")?.ToString(),
+            target_type = model is PotionModel potion ? potion.TargetType.ToString() : null,
 			vars = Variables(model),
 			saved_properties = Saved(model),
 			passive_value = ((model is OrbModel orbModel) ? new decimal?(orbModel.PassiveVal) : ((decimal?)null)),
 			evoke_value = ((model is OrbModel orbModel2) ? new decimal?(orbModel2.EvokeVal) : ((decimal?)null))
 		};
 	}
+
+    private static Dictionary<string, string?>? _contentTitles;
+
+    // The card, relic, potion or enchantment a displayed name stands for: the one
+    // whose title it is. A title two contents share names neither of them.
+    private static string? ContentNamed(string? title)
+    {
+        if (string.IsNullOrEmpty(title)) return null;
+        if (_contentTitles == null)
+        {
+            var titles = new Dictionary<string, string?>(StringComparer.Ordinal);
+            foreach (var model in ModelDb.All)
+            {
+                string? shown;
+                try
+                {
+                    shown = model switch
+                    {
+                        CardModel card => card.Title, RelicModel relic => relic.Title.GetFormattedText(),
+                        PotionModel potion => potion.Title.GetFormattedText(),
+                        EnchantmentModel enchantment => enchantment.Title.GetFormattedText(), _ => null,
+                    };
+                }
+                catch (Exception) { continue; }
+                if (string.IsNullOrEmpty(shown)) continue;
+                titles[shown] = titles.ContainsKey(shown) ? null : model.Id.ToString();
+            }
+            _contentTitles = titles;
+        }
+        return _contentTitles.GetValueOrDefault(title);
+    }
+
+    // Match the headless public contract: the names used by the currently displayed
+    // title/description, as the content each of them names.
+    internal static Dictionary<string, object> DisplayedNames(params LocString?[] texts)
+    {
+        var result = new Dictionary<string, object>();
+        foreach (var text in texts.Where(t => t != null))
+        {
+            var names = Regex.Matches(text!.GetRawText(), @"\{([A-Za-z_][A-Za-z0-9_]*)")
+                .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+            foreach (var (name, value) in text.Variables)
+                if (names.Contains(name) && !result.ContainsKey(name) && value is StringVar shown
+                    && ContentNamed(shown.StringValue) is { } content)
+                    result[name] = content;
+        }
+        return result;
+    }
+
+    // Match the headless public contract: only numeric values used by the
+    // currently displayed title/description, not every variable on an event.
+    internal static Dictionary<string, object> DisplayedVariables(params LocString?[] texts)
+    {
+        var result = new Dictionary<string, object>();
+        foreach (var text in texts.Where(t => t != null))
+        {
+            var names = Regex.Matches(text!.GetRawText(), @"\{([A-Za-z_][A-Za-z0-9_]*)")
+                .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+            foreach (var (name, value) in text.Variables)
+            {
+                if (!names.Contains(name) || result.ContainsKey(name) || value is StringVar) continue;
+                object? number = value is DynamicVar variable ? variable.BaseValue
+                    : value is int or long or decimal or float or double ? value : null;
+                if (number != null) result[name] = number;
+            }
+        }
+        return result;
+    }
 
 	private static object Variables(object model)
 	{
@@ -1486,7 +1585,9 @@ internal sealed class Snapshot
 					prefs = Value(Read(result, "_prefs")),
 					selected = Value(Read(result, "_selectedCards") ?? Read(result, "_selectedCardHolders")),
 					selecting = Read(result, "IsInCardSelection"),
-					offered_cards = Value(Read(result, "_options") ?? Read(result, "_cards")),
+					offered_cards = Value(name == "NCombatPileCardSelectScreen"
+                        ? Read(Read(result, "_grid"), "CurrentlyDisplayedCards")
+                        : Read(result, "_options") ?? Read(result, "_cards")),
 					alternate_options = Value(Read(result, "_extraOptions"))
 				});
 			}

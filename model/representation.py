@@ -15,6 +15,8 @@ from functools import lru_cache
 
 from .protocol import ProtocolError, fingerprint
 
+ENCODING_VERSION = "public-encoding-v3"
+
 ENTITY_FIELDS = {
     "entity_type",
     "content_id",
@@ -86,10 +88,6 @@ ENTITY_FIELDS = {
     "can_cancel",
     "order_matters",
     "repetition_allowed",
-    "nonboss_paid",
-    "boss_1",
-    "boss_2",
-    "boss_3",
 }
 ENTITY_FIELDS.update(
     [
@@ -119,7 +117,10 @@ ENTITY_FIELDS.update(
     ["enabled", "base_star_cost", "current_star_cost", "source", "amount"]
 )
 ENTITY_FIELDS.update(["rider_effect", "retain", "stars_x", "exhaust_on_next_play"])
-ENTITY_FIELDS.update(["counter", "free_travel", "ascension"])
+ENTITY_FIELDS.update(["counter", "free_travel", "ascension", "encounter"])
+ENTITY_FIELDS.add("probability")
+# The content a displayed variable shows by name (an option's card, relic, potion, enchantment).
+ENTITY_FIELDS.add("names")
 CONTAINERS = {
     "stats",
     "keywords",
@@ -425,6 +426,8 @@ def clean_entity(value, *, action=False):
             "applicable",
             "revealed",
         }
+        if result.get("entity_type") == "previous_intent":
+            public_shape.add("owner_ref")
         result = {k: v for k, v in result.items() if k in public_shape}
     return result
 
@@ -495,7 +498,7 @@ class Table:
 
 REFERENCE_ROLES = ("source", "target", "option", "owner")
 # Roles of the relations the engine publishes between entities.
-ENGINE_RELATIONS = ("map_edge", "offers")
+ENGINE_RELATIONS = ("map_edge", "offers", "known_draw_before")
 MAP_RELATIONS = (
     "self",
     "forward_direct",
@@ -519,10 +522,11 @@ class Vocabulary:
     """Frozen, checkpointed tables: field symbols, field names and relation roles."""
 
     def __init__(self, symbols=None, capacity=16384, *, fields=(), relations=(),
-                 field_capacity=512, relation_capacity=128):
-        self.symbols = tuple(
-            ["<pad>", "<unknown>"] + sorted(set(symbols or []) - {"<pad>", "<unknown>"})
-        )
+                 field_capacity=512, relation_capacity=128, ordered=False):
+        self.symbols = tuple(symbols) if ordered else tuple(
+            ["<pad>", "<unknown>"] + sorted(set(symbols or []) - {"<pad>", "<unknown>"}))
+        if self.symbols[:2] != ("<pad>", "<unknown>") or len(set(self.symbols)) != len(self.symbols):
+            raise ValueError("Invalid frozen symbol table")
         if len(self.symbols) > capacity:
             raise ValueError(
                 "Vocabulary exceeds configured capacity; increase capacity explicitly"
@@ -532,6 +536,7 @@ class Vocabulary:
         self.fields = Table(fields, field_capacity)
         self.relations = Table(relations, relation_capacity)
         self._reported = set()
+        self._unknown_symbols = set()
         self._digest = fingerprint(
             [self.symbols, self.fields.names, field_capacity, self.relations.names, relation_capacity]
         )
@@ -546,19 +551,31 @@ class Vocabulary:
     def from_state(cls, state, config):
         return cls(state["symbols"], config.vocabulary_size, fields=state["fields"],
                    relations=state["relations"], field_capacity=config.field_size,
-                   relation_capacity=config.relation_size)
+                   relation_capacity=config.relation_size, ordered=True)
+
+    def expanded(self):
+        """Add current public schema symbols in spare rows, preserving every old ID."""
+        required, _, _ = names_from_frames(())
+        return Vocabulary(list(self.symbols) + sorted(required - self.lookup.keys()), self.capacity,
+                          fields=self.fields.names, relations=self.relations.names,
+                          field_capacity=self.fields.capacity, relation_capacity=self.relations.capacity,
+                          ordered=True)
 
     def state(self):
         return {"symbols": list(self.symbols), "fields": list(self.fields.names),
                 "relations": list(self.relations.names)}
 
     def encode(self, symbol):
-        return self.lookup.get(symbol, 1)
+        result = self.lookup.get(symbol)
+        if result is None:
+            self._unknown_symbols.add("symbol:" + symbol)
+            return 1
+        return result
 
     def unregistered(self):
-        """Field names and relation roles met after the tables were frozen."""
+        """Missing symbols (prefixed symbol:), field names and relation roles."""
         return sorted(
-            self._reported | self.fields.unregistered.keys() | self.relations.unregistered.keys()
+            self._reported | self._unknown_symbols | self.fields.unregistered.keys() | self.relations.unregistered.keys()
         )
 
     def report(self, names):
@@ -592,6 +609,8 @@ def fields_of(value, prefix=""):
                 "cards",
                 "known_masks",
                 "applicable_masks",
+                # Names an option displays, bound for its rule text; the variable itself is the token.
+                "named",
             }:
                 continue
             item = value[key]
@@ -644,6 +663,10 @@ def scalar_field(name, value, known=True, applicable=True):
     known = bool(known and value is not None and applicable)
     if not known:
         return Field(name, "<unknown>", (0, 0, float(applicable), 0))
+    if name == "content_id" and isinstance(value, str):
+        from .rules import canonical_content_id
+
+        value = canonical_content_id(value)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if not math.isfinite(value):
             raise ProtocolError("Non-finite public number")
@@ -756,11 +779,72 @@ class Observation:
     slot_refs: list[str]
     edges: list[tuple[int, int, str]]
     context: dict
-    digest: str
+    # (entities, edges, map keys): the content the digest is taken over.
+    _source: tuple = field(default=None, repr=False, compare=False)
+    _digest: str | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def digest(self):
+        """Content key of the observation, for the session cache of an unchanged
+        frame; computed when first asked, as training never asks."""
+        if self._digest is None:
+            entities, edges, map_keys = self._source
+            # Dynamic prefix/mask never contaminates cached Transformer input.
+            self._digest = fingerprint({"entities": entities, "edges": edges, "map": map_keys})
+        return self._digest
+
+
+_FIELD_ROWS = {}
+_FIELD_ROWS_LIMIT = 16384
+
+
+def entity_fields(entity):
+    """`fields_of` an entity, shared between equal entities: the cards, relics and
+    powers of a run repeat across its frames and across runs. Rows are read only."""
+    try:
+        key = json.dumps(entity, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return fields_of(entity)
+    rows = _FIELD_ROWS.get(key)
+    if rows is None:
+        rows = fields_of(entity)
+        if len(_FIELD_ROWS) >= _FIELD_ROWS_LIMIT:
+            _FIELD_ROWS.pop(next(iter(_FIELD_ROWS)))
+        _FIELD_ROWS[key] = rows
+    return rows
+
+
+def _bind_displayed_variables(entities, by_ref):
+    """Render an option's text with the public numbers linked to that option."""
+    for item in entities:
+        if item.get("entity_type") != "displayed_variable":
+            continue
+        owner = by_ref.get(item.get("owner_ref"))
+        if owner is None or owner.get("known") is False or owner.get("revealed") is False:
+            continue
+        if isinstance(item.get("names"), str) and isinstance(item.get("content_id"), str):
+            owner.setdefault("named", {})[item["content_id"]] = item["names"]
+            continue
+        fields = {f.name: f for f in fields_of(item)}
+        name, amount = fields.get("content_id"), fields.get("amount")
+        if name is None or not name.number[1] or amount is None:
+            continue
+        value, known, applicable, numeric = amount.number
+        owner.setdefault("stats", {})[item["content_id"]] = {
+            "value": value,
+            "known": bool(known and numeric),
+            "applicable": bool(applicable and item.get("applicable", True)),
+        }
 
 
 def observation(frame):
     public = clean_public(frame["public"])
+    from .public_history import HISTORY_KINDS, unknown_memory
+
+    if not any(e.get("entity_type") in HISTORY_KINDS for e in public["memory"]):
+        # Old BC summaries/recordings have no public prefix. Keep those samples,
+        # but explicitly mask history instead of assigning a new-run prior.
+        public["memory"].extend(unknown_memory(public["entities"]))
     context = public.get("selection_context") or {}
     # Selection progress lives in the input: the global token carries
     # bounds and counts, selected entities are marked (with their order when it
@@ -772,6 +856,7 @@ def observation(frame):
     order_known = (context.get("known_masks") or {}).get("order_matters", True)
     ordered = bool(context.get("order_matters")) and order_known
     by_ref = {item.get("ref"): item for item in entities if item.get("ref")}
+    _bind_displayed_variables(entities, by_ref)
     for index, ref in enumerate(selected):
         if ref not in by_ref:
             raise ProtocolError("Selected reference is not a public entity")
@@ -819,17 +904,15 @@ def observation(frame):
             (source, target, edge["role"]),
             (target, source, "reverse_" + edge["role"]),
         ]
-    # Dynamic prefix/mask never contaminates cached Transformer input.
-    digest = fingerprint({"entities": entities, "edges": edges, "map": map_keys})
     return Observation(
-        [fields_of(x) for x in entities],
+        [entity_fields(x) for x in entities],
         effects,
         refs,
         list(range(action_start, len(entities))),
         [c["decoder_slot_ref"] for c in bank],
         edges,
         context,
-        digest,
+        (entities, edges, map_keys),
     )
 
 
@@ -1034,7 +1117,7 @@ def names_from_frames(frames):
     # snapshot must not collapse combat/map/shop phases to the same unknown ID.
     categories = {
         "phase": "combat map event rest_site shop treasure rewards card_reward card_select bundle_select crystal_sphere",
-        "entity_type": "global action player card pile_summary enemy summon intent orb_slots orb power relic potion map_node displayed_variable event event_option rest_option shop_item reward reward_alternative bundle event_state tool board_cell reward_progress event_context",
+        "entity_type": "global action player card pile_summary enemy summon intent previous_intent history_probability history_rule known_draw_position orb_slots orb power relic potion map_node displayed_variable event event_option rest_option shop_item reward reward_alternative bundle event_state tool board_cell event_context",
         "zone": "deck hand draw_pile discard_pile exhaust_pile selection reward treasure shop",
         "operation": "unknown transform exhaust remove enchant discard upgrade copy obtain",
         "source": "unknown hand deck draw_pile discard_pile exhaust_pile",
@@ -1046,8 +1129,14 @@ def names_from_frames(frames):
         "rarity": "None Basic Common Uncommon Rare Ancient Special Token Event Status Curse Quest",
         "target_type": "None Self AnyEnemy AllEnemies RandomEnemy AnyPlayer AnyAlly AllAllies TargetedNoCreature Osty",
         "intent": "Attack Buff Debuff DebuffStrong Defend Escape Heal Hidden Sleep StatusCard CardDebuff DeathBlow Stun Summon Unknown",
-        "content_id": "Small Big CrystalGold CrystalRelic CrystalPotion CrystalCurse CrystalCard CRYSTAL_SPHERE",
+        "content_id": "Small Big CrystalSphereGold CrystalSphereRelic CrystalSpherePotion CrystalSphereCurse CrystalSphereCardReward empty CRYSTAL_SPHERE potion_drop question_room question_previous_shop",
+        "rider_effect": "None Violence Sapping Choking Energized Wisdom Chaos Expertise Curious Improvement",
+        "op": "OPAQUE_RULE REVEAL",
+        "shape": "cell square",
     }
+    from .public_history import PROBABILITY_SCOPES
+
+    categories["scope"] = " ".join(PROBABILITY_SCOPES)
     symbols = {
         f"{name}={value}"
         for name, values in categories.items()
@@ -1073,9 +1162,6 @@ def names_from_frames(frames):
         "can_cancel",
         "order_matters",
         "repetition_allowed",
-        "boss_1",
-        "boss_2",
-        "boss_3",
         "selected",
     ]:
         symbols.update({f"{name}=True", f"{name}=False"})
@@ -1085,6 +1171,9 @@ def names_from_frames(frames):
     from . import rules
 
     symbols |= rules.symbols()
+    # The alternatives of a card reward have no model of their own; the reward
+    # screen's text table names them.
+    symbols.update("content_id=" + name for name in rules.reward_alternatives())
     fields = set(ENTITY_FIELDS) | CONTAINERS | {"empty", "selected", "selected_order"}
     fields.update(rules.TEXT_FIELDS)
     # Every public field may be a number or a flag, whichever frames were seen.
@@ -1094,6 +1183,12 @@ def names_from_frames(frames):
     for name in rules.displayed() | {"passive", "evoke"}:
         fields.add("stats." + name)
         symbols.add(f"stats.{name}=<number>")
+        # Event/rest options export these as owned displayed_variable entities.
+        symbols.add(f"content_id={name}")
+    # The reveal program of a Crystal Sphere tool.
+    for name in ("shape", "radius", "clip_to_board"):
+        fields.add(name)
+        symbols.update((f"{name}=<number>", f"{name}=True", f"{name}=False"))
     fields.update("reference." + role for role in REFERENCE_ROLES)
     fields.update("binding." + role for role in BINDING_ROLES)
     relations = {"map_" + role for role in MAP_RELATIONS} | set(PROGRAM_RELATIONS)
@@ -1114,11 +1209,15 @@ def names_from_frames(frames):
         for effect in obs.effects:
             relations.update(role for _, _, role in effect.edges)
             fields.update("binding." + role for _, _, role in effect.bindings)
-    # A card names its enchantment or affliction by the content id of that model.
+    # A card names its enchantment or affliction, and a boss node of the map its
+    # encounter, by the content id of that model.
     for symbol in list(symbols):
-        for kind in ("enchantment", "affliction"):
+        for kind in ("enchantment", "affliction", "encounter"):
             if symbol.startswith(f"content_id={kind.upper()}."):
                 symbols.add(kind + symbol[len("content_id"):])
+        # An option names a card, relic, potion or enchantment it gives, takes or applies.
+        if symbol.startswith(("content_id=CARD.", "content_id=RELIC.", "content_id=POTION.", "content_id=ENCHANTMENT.")):
+            symbols.add("names" + symbol[len("content_id"):])
     return symbols, fields, relations
 
 

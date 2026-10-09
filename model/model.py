@@ -218,20 +218,17 @@ class PolicyValue(nn.Module):
         return bias.contiguous()
 
     def _entities(self, batch):
-        """Run the entity encoder in FP64 and return FP32 tokens.
+        """Run the entity encoder in FP32 and return its tokens.
 
         Its batches are small and vary in size with what a decision is batched
-        with, and FP32 kernels then differ in the last bits. Under BF16 the
-        backbone turns such differences into rounding flips, so a decision's
-        probability would depend on its batch. FP64 keeps them below FP32
-        resolution; the encoder is a small share of the computation.
+        with, so FP32 kernels differ in the last bits between batches, and under
+        BF16 the backbone turns that into log-probability differences of about
+        1e-3 per decision. Sampling and PPO replay tolerate this: it is far
+        inside the ratio clip, and the old-policy check allows it per decision.
+        An FP64 encoder would remove it at several times the backbone's cost.
         """
-        exact = {
-            name: tensor.double()
-            for name, tensor in self.encoder.state_dict(keep_vars=True).items()
-        }
         with torch.autocast(device_type=self.device.type, enabled=False):
-            return torch.func.functional_call(self.encoder, exact, (batch,)).float()
+            return self.encoder(batch)
 
     def hidden(self, batch):
         """Final token states of a packed batch: [observations, pad, hidden]."""
@@ -244,11 +241,22 @@ class PolicyValue(nn.Module):
     def _hidden(self, batch):
         self.encoder_calls += 1
         tokens = self._entities(batch)
-        valid = torch.arange(batch.pad, device=tokens.device).unsqueeze(
+        rows, pad, total = len(batch.lengths), batch.pad, tokens.shape[0]
+        valid = torch.arange(pad, device=tokens.device).unsqueeze(
             0
         ) < batch.lengths.unsqueeze(1)
-        hidden = tokens.new_zeros((*valid.shape, tokens.shape[-1]))
-        hidden[valid] = tokens
+        # Place every token by a computed slot: a boolean index would make the
+        # host wait for the token count before the backbone can be queued.
+        row = torch.repeat_interleave(
+            torch.arange(rows, device=tokens.device), batch.lengths, output_size=total
+        )
+        starts = batch.lengths.cumsum(0) - batch.lengths
+        slots = row * pad + torch.arange(total, device=tokens.device) - starts[row]
+        hidden = (
+            tokens.new_zeros((rows * pad, tokens.shape[-1]))
+            .index_copy(0, slots, tokens)
+            .view(rows, pad, -1)
+        )
         bias = self._relation_bias(batch.relations, valid)
         for block in self.blocks:
             if (
@@ -333,11 +341,13 @@ class PolicyValue(nn.Module):
             for index, encoded in enumerate(encoded_list)
         ]
 
-    def replay(self, prepared):
+    def replay(self, prepared, *, with_accuracy=False):
         """Differentiable macro-action statistics of a prepared replay batch.
 
         Returns the summed log-probability, the value at the first decision and
         the summed entropy of every macro-action, as three [macros] tensors.
+        With accuracy enabled, also return [macros, 2] integer counts of correct
+        Top-1 decisions and all decisions. Forced choices do not count.
         """
         batch = prepared.batch
         hidden = self.hidden(batch)
@@ -349,11 +359,20 @@ class PolicyValue(nn.Module):
         chosen = log_probs.gather(1, prepared.labels.unsqueeze(1)).squeeze(1)
         entropy = -(log_probs.exp() * log_probs.masked_fill(~prepared.masks, 0)).sum(-1)
         macros = len(prepared.first)
-        return (
+        result = (
             chosen.new_zeros(macros).index_add(0, prepared.owners, chosen),
             self._heads(self.value, state.index_select(0, prepared.first)).squeeze(-1),
             entropy.new_zeros(macros).index_add(0, prepared.owners, entropy),
         )
+        if with_accuracy:
+            # Observe the same pre-update forward pass, without adding gradients
+            # or weighting short and long macros equally in the decision metric.
+            decisions = prepared.masks.sum(-1) > 1
+            correct = (logits.detach().argmax(-1) == prepared.labels) & decisions
+            counts = torch.stack((correct.long(), decisions.long()), dim=1)
+            counts = counts.new_zeros((macros, 2)).index_add(0, prepared.owners, counts)
+            return (*result, counts)
+        return result
 
     def decode(self, encoded, legal_mask, *, value=True):
         return self.decode_batch([encoded], [legal_mask], value=[value])[0]

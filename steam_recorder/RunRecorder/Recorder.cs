@@ -47,7 +47,16 @@ internal static class Recorder
 	private static bool _ended;
 
 	private static bool? _victory;
-    internal static bool? LiveOutcome => _ended ? _victory : null;
+
+    internal static bool Enabled { get; private set; } = true;
+
+    internal static void SetEnabled(bool enabled)
+    {
+        if (Enabled == enabled) return;
+        if (!enabled) Safe(() => Close("recording_disabled"));
+        else _failed = false;
+        Enabled = enabled;
+    }
 
 	private static int _captureErrors;
 
@@ -65,6 +74,7 @@ internal static class Recorder
 	{
 		get
 		{
+			if (!Enabled) return "记录器：已关闭";
 			if (!_failed)
 			{
 				if (_journal != null)
@@ -81,7 +91,7 @@ internal static class Recorder
 	{
 		get
 		{
-			if (!_failed)
+			if (Enabled && !_failed)
 			{
 				return System.Environment.CurrentManagedThreadId == MainThread;
 			}
@@ -165,7 +175,7 @@ internal static class Recorder
 		_journal.Write("segment_start", new
 		{
 			game_version = NGame.GetGameVersion(),
-			recorder_version = "0.5.0",
+			recorder_version = "0.5.4",
 			recording_mode = "final_choices",
 			seed = runState.Rng.StringSeed,
 			start_time = obj,
@@ -302,7 +312,6 @@ internal static class Recorder
 			_failed = false;
 		Safe(delegate
 		{
-			SelectionCapture.Prune();
 			if (_run != null && RunManager.Instance?.DebugOnlyGetState() != _run)
 			{
 				Close("run_unloaded");
@@ -324,21 +333,9 @@ internal static class Recorder
 		{
 			if (EnsureRun() && scope.Player == _run.Players.Single())
 			{
-				scope.Offer = offer;
 				scope.State = Journal.Freeze(Capture("card_selection", offer));
-                scope.CapturedUtc = DateTimeOffset.UtcNow;
 			}
 		});
-	}
-
-	internal static bool PrepareSelection(Player? player)
-	{
-		bool ready = false;
-		Safe(delegate
-		{
-			ready = player != null && EnsureRun() && player == _run.Players.Single();
-		});
-		return ready;
 	}
 
 	private static Pending New(string command, Origin origin)
@@ -622,6 +619,8 @@ internal static class Recorder
 					}
 					Pending pending = value ?? Parent();
 					Origin origin = DetectOrigin();
+					if (origin.Actor == "model" && text == "crystal_sphere_cell")
+						origin = new Origin("crystal_sphere_planner", "steam_live_bridge_grid");
 					if (origin.Actor == "unknown" && pending != null)
 					{
 						origin = new Origin(pending.Origin.Actor, "parent_action:" + pending.Id);
@@ -875,7 +874,6 @@ internal static class Recorder
 		Actions.Clear();
 		Semantics.Clear();
 		SkippedSets.Clear();
-		SelectionCapture.Reset();
 		CurrentInput.Value = null;
 	}
 }

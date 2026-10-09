@@ -3,6 +3,8 @@
 import random
 import secrets
 
+from spire_codex_data.sources import split_group
+
 from .protocol import CHARACTERS, fingerprint
 
 
@@ -18,7 +20,9 @@ def validate_evaluation_seeds(seeds, progress):
     known.update(
         map(str, (progress.get("random_seed_schedule") or {}).get("used_seeds", []))
     )
-    if known.intersection(values):
+    # Rollouts are recorded under the game seed itself, independent supervised
+    # samples under the split group of the seed they were rebuilt from.
+    if known.intersection(values) or known.intersection(map(split_group, values)):
         raise ValueError("Evaluation seed overlaps checkpoint training seeds")
     return seeds
 

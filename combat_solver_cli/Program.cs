@@ -69,7 +69,10 @@ internal static class Program
                 {
                     if (command is "start_run" or "load_save" or "enter_room" or "action" or "set_player"
                         or "set_draw_order" or "execute_candidate" or "quit" or "enter_anchor" or "anchor_room") solver.Reset();
-                    response = handle.Invoke(null, new[] { simulator, (object)request })!;
+                    // Starting another run replaces the simulator.
+                    object[] arguments = { simulator, request };
+                    response = handle.Invoke(null, arguments)!;
+                    simulator = arguments[0];
                     if (command is "start_run" or "load_save" or "enter_anchor") solver.PrepareEngine();
                     JsonElement result = JsonSerializer.SerializeToElement(response, Json);
                     if (result.TryGetProperty("type", out var type) && type.GetString() == "decision_frame")

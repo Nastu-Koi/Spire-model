@@ -19,6 +19,8 @@ namespace RunRecorder;
 public static class ModEntry
 {
 	private static Timer? _timer;
+    private static FeatureSettings _settings = new();
+    private static string SettingsPath => Path.Combine(Recorder.OutputDirectory, "settings.json");
 
 	public static void Initialize()
 	{
@@ -35,6 +37,9 @@ public static class ModEntry
 			}
 			Recorder.OutputDirectory = ProjectSettings.GlobalizePath("user://run_recorder");
 			Directory.CreateDirectory(Recorder.OutputDirectory);
+            try { _settings = FeatureSettings.Load(SettingsPath); }
+            catch (Exception ex) { GD.PushWarning("[RunRecorder] Cannot read settings; using defaults: " + ex.Message); }
+            ApplySettings();
 			InstallHooks();
 			Callable.From(Start).CallDeferred();
 			GD.Print("[RunRecorder] initialized; output=" + Recorder.OutputDirectory);
@@ -62,23 +67,39 @@ public static class ModEntry
 			Name = "RunRecorderStatus",
 			Layer = 999
 		};
-		Label label = new Label
-		{
-			Text = Recorder.Status,
-			AnchorTop = 1f,
-			AnchorBottom = 1f,
-			OffsetLeft = 18f,
-			OffsetTop = -34f,
-			MouseFilter = Control.MouseFilterEnum.Ignore
-		};
+        var panel = new VBoxContainer
+        {
+            AnchorTop = 1f, AnchorBottom = 1f,
+            OffsetLeft = 18f, OffsetTop = -80f, OffsetBottom = -12f,
+            MouseFilter = Control.MouseFilterEnum.Pass
+        };
+        var switches = new HBoxContainer { MouseFilter = Control.MouseFilterEnum.Pass };
+        var recording = new CheckButton
+        {
+            Text = "录制数据", ButtonPressed = _settings.RecordingEnabled,
+            TooltipText = "记录状态和动作供训练使用；关闭后模型仍可接管。"
+        };
+        var control = new CheckButton
+        {
+            Text = "允许模型接管", ButtonPressed = _settings.ControlEnabled,
+            TooltipText = "允许运行中的模型控制游戏；关闭后暂停接管，可继续手动操作。"
+        };
+        recording.Toggled += value => { _settings.RecordingEnabled = value; ApplySettings(); };
+        control.Toggled += value => { _settings.ControlEnabled = value; ApplySettings(); };
+        switches.AddChild(recording);
+        switches.AddChild(control);
+        panel.AddChild(switches);
+        var label = new Label { MouseFilter = Control.MouseFilterEnum.Ignore };
 		label.AddThemeFontSizeOverride("font_size", 18);
-		canvasLayer.AddChild(label, forceReadableName: false, Node.InternalMode.Disabled);
+        panel.AddChild(label);
+		canvasLayer.AddChild(panel, forceReadableName: false, Node.InternalMode.Disabled);
 		NGame.Instance.AddChild(canvasLayer, forceReadableName: false, Node.InternalMode.Disabled);
 		_timer.Timeout += delegate
 		{
+            SelectionCapture.Safe(SelectionCapture.Tick);
 			Recorder.Tick();
             LiveBridge.Tick();
-			label.Text = Recorder.Status;
+			label.Text = Recorder.Status + " · " + LiveBridge.Status;
 		};
 		_timer.TreeExiting += delegate
 		{
@@ -90,9 +111,18 @@ public static class ModEntry
 		NGame.Instance.AddChild(_timer, forceReadableName: false, Node.InternalMode.Disabled);
 	}
 
+    private static void ApplySettings()
+    {
+        Recorder.SetEnabled(_settings.RecordingEnabled);
+        LiveBridge.SetEnabled(_settings.ControlEnabled);
+        try { _settings.Save(SettingsPath); }
+        catch (Exception ex) { GD.PushWarning("[RunRecorder] Settings changed for this session but could not be saved: " + ex.Message); }
+    }
+
 	private static void InstallHooks()
 	{
 		Harmony harmony = new Harmony("local.sts2.run-recorder");
+        Spire.PublicHistory.NativeHistory.Install(harmony);
 		Assembly assembly = typeof(RunManager).Assembly;
 		(string, string)[] obj = new(string, string)[9]
 		{
@@ -131,6 +161,16 @@ public static class ModEntry
 				});
 			}
 			SelectionHooks.Install(harmony, assembly);
+            // Track the full UI task, including removal/animation after the
+            // synchronizer returns. These hooks also work with recording off.
+            foreach (var target in new[] {
+                ("MegaCrit.Sts2.Core.Nodes.Rewards.NRewardButton", "GetReward"),
+                ("MegaCrit.Sts2.Core.Nodes.RestSite.NRestSiteButton", "SelectOption") })
+            {
+                var method = AccessTools.DeclaredMethod(assembly.GetType(target.Item1), target.Item2)
+                    ?? throw new MissingMethodException(target.Item1, target.Item2);
+                harmony.Patch(method, postfix: new HarmonyMethod(typeof(Patches), "ControlTask"));
+            }
 			MethodInfo[] array2 = new MethodInfo[1] { AccessTools.Method(typeof(PotionModel), "EnqueueManualUse") };
 			foreach (MethodInfo methodInfo in array2)
 			{

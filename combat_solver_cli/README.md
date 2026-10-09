@@ -18,7 +18,7 @@ python -m combat_solver_cli configure \
 ## 组成
 
 - `lib/`（不入库）：`CombatSolver.dll`、`CombatSolver.json` 与本机 `config.json`。
-- `client.py`：`SolverEngine`，一个原生进程对应一局；`step()` 让求解器执行一步战斗（普通/Boss 预算、药水、回合计划复用）。
+- `client.py`：`SolverEngine`，一个原生进程，同一时刻只有一局（开始下一局的条件见[决策协议](../sts2-cli/docs/decision-protocol.md)）；`step()` 让求解器执行一步战斗（普通/Boss 预算、药水、回合计划复用）。
 - `Program.cs` / `SolverAdapter.cs`：worker 主循环、求解请求、当前回合计划复用、真实状态一致性检查；每个决策边界同步求解器状态，出错时重置。
 - `ChoiceTransaction.cs` / `NativeSelectionBridge.cs`：统一选择事务（见下）。`PortfolioDeadline.cs`：限时求解的截止处理。
 - `search_support.py`：动作语义、状态哈希、prefix 记录、公开动作先验（`preference`）。
@@ -33,6 +33,8 @@ python -m combat_solver_cli verify --prefix <prefix.json> --output <新目录>
 ```
 
 在全新的原生进程中重放整条 prefix，逐步核对公开状态哈希与合法动作，并检查三幕 Boss 与最终胜利。任何原生错误或重放差异都会拒绝导出。产物使用监督数据契约 `source=recorder_bc`、`teacher_visibility=unverified`、`bc_only=true`，胜利证据在 provenance 中；不能当作 PPO 的在线数据。
+
+当前导出器 `combat-solver-cli-v2` 使用[主策略的共用控制规则](../model/README.md#策略与控制器)：宝箱、水晶球格子及指定单选事件保留原始帧、动作和 actor，写入 `environment_actions`，不成为策略标签。`forced` 只表示引擎只有一个合法候选，与控制器接管分别记录；商店和战斗的策略选择仍保留。
 
 ## 统一选择事务
 

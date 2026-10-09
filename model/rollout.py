@@ -1,5 +1,5 @@
+import hashlib
 import json
-import random
 import queue
 import threading
 import time
@@ -10,9 +10,10 @@ from pathlib import Path
 
 import torch
 
+from combat_outcome.online import CombatRecorder
+
 from .policy import SessionPolicy, choose_batch
-from .crystal_rule import RULE_VERSION as CRYSTAL_RULE, collection_candidate as crystal_candidate
-from .reward_rule import PER_FLOOR_LIMIT, RULE_VERSION as REWARD_RULE, collection_candidate as reward_candidate
+from .control import CONTROL_VERSION, REWARD_RULE, environment_action, free_reward
 from .protocol import (
     CHARACTERS,
     SCHEMA,
@@ -24,6 +25,7 @@ from .protocol import (
     validate_frame,
 )
 from .rewards import MilestoneLedger
+from .public_history import require_history_version
 
 
 def precision_context(model, precision):
@@ -40,11 +42,33 @@ def numeric_backend(model):
         "attention": model.config.backend,
         "torch": str(torch.__version__),
         "tf32": torch.backends.cuda.matmul.allow_tf32,
+        "entity_encoder": "fp32",
     }
     # The fingerprint names the encoder precision only when it is not inherited.
     if model.config.encoder_precision != "inherit":
         backend["encoder_precision"] = model.config.encoder_precision
     return backend
+
+
+def policy_digest(model):
+    """The weights themselves: a version number does not tell two checkpoints apart."""
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        digest.update(name.encode())
+        digest.update(tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def final_hp(engine):
+    """HP after a fight that ended the run: no frame follows it, the run state still
+    holds it. None when the engine cannot say; the run's outcome stands either way."""
+    try:
+        reply = engine.send({"cmd": "anchor_state"})
+    except (ProtocolError, TimeoutError, OSError):
+        return None
+    if reply.get("type") != "anchor_state":
+        return None
+    return reply["save"]["players"][0]["current_hp"]
 
 
 class RolloutRunner:
@@ -57,16 +81,30 @@ class RolloutRunner:
         version=0,
         max_steps=10000,
         timeout=30,
-        ascension=10,
+        ascension=0,
+        claim_rewards=False,
     ):
         if max_steps < 1 or timeout <= 0:
             raise ValueError("Rollout limits must be positive")
+        if type(ascension) is not int or not 0 <= ascension <= 10:
+            raise ValueError("Ascension must be an integer from 0 to 10")
         self.model, self.vocabulary = model, vocabulary
         self.precision, self.version = precision, version
         self.max_steps, self.timeout = max_steps, timeout
         self.ascension = ascension
+        # Gold, relics and potions the belt has room for are taken for the policy.
+        self.claim_rewards = claim_rewards
+        self._digest = None
 
-    def run(self, engine, character, seed, *, sample=True, journal=None, _policy=None):
+    @property
+    def digest(self):
+        if self._digest is None:
+            self._digest = policy_digest(self.model)
+        return self._digest
+
+    def run(self, engine, character, seed, *, sample=True, journal=None, combats=None, _policy=None):
+        """Play one run. `combats` is where the fights of the run are written as
+        combat-outcome labels of this policy (combat_outcome.online)."""
         if character not in CHARACTERS:
             raise ValueError("Unknown character")
         trace = {
@@ -75,6 +113,7 @@ class RolloutRunner:
             "seed": str(seed),
             "ascension": self.ascension,
             "policy_version": self.version,
+            "policy_digest": self.digest,
             "precision": self.precision,
             "vocabulary_hash": self.vocabulary.digest,
             "numeric_backend": numeric_backend(self.model),
@@ -84,19 +123,18 @@ class RolloutRunner:
             "macros": [],
             "automatic_steps": 0,
             "initial_reward": 0.0,
-            "reward_rule": REWARD_RULE,
-            "crystal_rule": CRYSTAL_RULE,
+            "reward_version": MilestoneLedger().version,
+            "control_version": CONTROL_VERSION,
+            "reward_claim_rule": REWARD_RULE if self.claim_rewards else None,
             "environment_actions": [],
-            "reward_steps": 0,
         }
-        crystal_rng = random.Random(f"{character}:{seed}:{CRYSTAL_RULE}")
-        collected = {}
         ledger = MilestoneLedger()
         policy = _policy or SessionPolicy(
             self.model, self.vocabulary, version=self.version
         )
         pending_steps, current_segment, active_macro = [], None, None
         waiting_since = None
+        recorder = None
         sink = Path(journal).open("w") if journal else nullcontext()
         self.model.eval()
         try:
@@ -106,12 +144,22 @@ class RolloutRunner:
                 precision_context(self.model, self.precision),
             ):
                 frame = engine.reset(character, seed, self.ascension)
+                require_history_version(frame.get("contract", {}).get("public_history_version"))
                 if frame.get("contract", {}).get("fixed_ascension") != self.ascension:
                     raise ProtocolError("Engine started a different ascension than requested")
                 trace["run_id"] = frame.get("routing", {}).get(
                     "episode_id", fingerprint([character, seed])
                 )
                 trace["contract"] = deepcopy(frame.get("contract", {}))
+                if combats:
+                    recorder = CombatRecorder(
+                        combats, seed=seed, character=character, run_id=trace["run_id"],
+                        contract=trace["contract"],
+                        policy=dict(
+                            version=self.version, digest=self.digest,
+                            **{k: trace[k] for k in (
+                                "vocabulary_hash", "precision", "sampling", "numeric_backend")}),
+                    )
                 steps = 0
                 while True:
                     validate_frame(frame)
@@ -130,6 +178,8 @@ class RolloutRunner:
                             + "\n"
                         )
                         stream.flush()
+                    if recorder:
+                        recorder.events(frame.get("events", []))
                     boundary = frame["boundary"]
                     if boundary == "terminal":
                         victory = bool(
@@ -139,6 +189,8 @@ class RolloutRunner:
                             raise ProtocolError(
                                 "Terminal outcome disagrees with milestone events"
                             )
+                        if recorder:
+                            recorder.terminal(victory, lambda: final_hp(engine))
                         trace.update(status="complete", victory=victory)
                         break
                     if boundary == "waiting":
@@ -153,39 +205,33 @@ class RolloutRunner:
                         trace["error"] = "unresolved_step_limit"
                         break
                     frame = clean_frame(frame)
-                    entities = frame["public"]["entities"]
-                    act = next((int(x["act"]) for x in entities if "act" in x), 1)
-                    frame["public"]["memory"].append(ledger.public(act))
-                    crystal = crystal_candidate(frame, crystal_rng)
-                    if crystal is not None:
+                    if recorder:
+                        recorder.decision(frame)
+                    automatic = environment_action(frame)
+                    if automatic is None and self.claim_rewards:
+                        automatic = free_reward(frame)
+                    if automatic is not None:
                         policy.reset()
                         current_segment, pending_steps, active_macro = None, [], None
-                        trace["environment_actions"].append(dict(actor="crystal_sphere_rule",
-                            frame=deepcopy(frame), candidate_ref=crystal["candidate_ref"]))
+                        trace["environment_actions"].append(dict(frame=deepcopy(frame), **automatic))
                         trace["automatic_steps"] += 1
                         steps += 1
-                        frame = engine.send(execution_command(frame, crystal["candidate_ref"]))
-                        continue
-                    rule = reward_candidate(frame)
-                    if rule is not None:
-                        where = next(((x.get("act"), x.get("floor")) for x in entities
-                                      if x.get("entity_type") == "player"), None)
-                        collected[where] = collected.get(where, 0) + 1
-                        if collected[where] > PER_FLOOR_LIMIT:
-                            raise ProtocolError("Reward collection rule did not consume the reward")
-                        # Rule actions are environment steps, never policy labels.
-                        policy.reset()
-                        current_segment, pending_steps, active_macro = None, [], None
-                        trace["reward_steps"] += 1
-                        trace["automatic_steps"] += 1
-                        steps += 1
-                        frame = engine.send(execution_command(frame, rule["candidate_ref"]))
+                        frame = engine.send(execution_command(frame, automatic["candidate_ref"]))
                         continue
                     key = segment_key(frame)
                     if key != current_segment:
                         current_segment, pending_steps, active_macro = key, [], None
                     branching = len(frame["legal"]["candidates"]) > 1
                     choice = policy.choose(frame, sample=sample)
+                    if recorder:
+                        recorder.step(
+                            frame,
+                            next(
+                                c for c in frame["legal"]["candidates"]
+                                if c["candidate_ref"] == choice.candidate_ref
+                            ),
+                            steps,
+                        )
                     step = {
                         "frame": frame,
                         "candidate_ref": choice.candidate_ref,
@@ -214,6 +260,10 @@ class RolloutRunner:
             trace["status"] = "unresolved" if isinstance(exc, TimeoutError) else "error"
             trace["error"] = str(exc)
         trace["ledger"] = ledger.state_dict()
+        if recorder:
+            # The acts whose boss fell; the last act is passed by winning the run.
+            passed = set(ledger.bosses) | ({3} if ledger.victory_paid else set())
+            trace["combats"] = recorder.close(trace["status"], trace.get("victory"), passed)
         if trace["status"] == "complete":
             future = 0.0
             for macro in reversed(trace["macros"]):
@@ -344,6 +394,7 @@ def collect_round(
                 seed,
                 sample=sample,
                 journal=path.with_suffix(".jsonl"),
+                combats=path.with_suffix(".combats.jsonl.gz"),
                 _policy=broker.policy() if broker else None,
             )
         write_run(path, trace)

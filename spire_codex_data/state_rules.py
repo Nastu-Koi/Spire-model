@@ -133,8 +133,10 @@ def complete(state, run, before_global_floor, sample_key, combat=True, travel=Fa
         elif name == 'WONGOS_MYSTERY_TICKET':
             values.update(CombatsFinished=len(fights), GaveRelic=len(fights)>=5)
         elif name == 'MAW_BANK':
-            values['HasItemBeenBought'] = any(any(n['player_stats'][0].get(k) for k in
-                ['bought_cards','bought_relics','bought_potions']) for n in history)
+            # Any paid purchase from a merchant, a card or the removal service included.
+            values['HasItemBeenBought'] = any(n['player_stats'][0].get('gold_spent', 0) > 0 and any(
+                r['room_type'] == 'shop' or r.get('model_id') == 'EVENT.FAKE_MERCHANT' for r in n['rooms'])
+                for n in history)
         elif name == 'BOOK_OF_FIVE_RINGS':
             acquisition = next((n for g,n in past if g == obtained), None)
             def adds(n):

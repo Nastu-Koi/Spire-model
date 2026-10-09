@@ -26,6 +26,7 @@ import random
 import statistics as st
 import time
 from dataclasses import asdict
+from itertools import chain
 from pathlib import Path
 
 import torch
@@ -37,9 +38,9 @@ from model.representation import Vocabulary, observation
 from .baselines import fit_baselines
 from .config import DEFAULT_CONFIG, CombatOutcomeConfig, override
 from .data import SCHEMA, entities, load_data, split_runs
-from .frames import frame_for
+from .frames import encounter_id, frame_for
 from .metrics import report as fit_report
-from .model import CombatOutcomeNet, load_model, save_model
+from .model import CombatOutcomeNet, check_encounters, load_model, save_model
 
 OVERRIDES = ("epochs", "batch_size", "lr", "holdout", "seed", "summary_entity", "ridge_base", "loader_workers")
 
@@ -64,20 +65,42 @@ def batch_loss(frac, logit, batch, training):
         + training.defeat_weight * torch.nn.functional.binary_cross_entropy_with_logits(logit, lost)
 
 
-def fit(train, test, config, device, pretrained=None):
+def public_catalog(path=None):
+    """Static content, independent of the fights selected for training or evaluation."""
+    if path is not None:
+        catalog = json.loads(Path(path).read_text())
+    else:
+        from model.engine import CliEngine
+
+        with CliEngine() as engine:
+            catalog = engine.send({"cmd": "public_catalog"})
+    if catalog.get("type") != "public_catalog" or not any(
+            e.get("entity_type") == "encounter" for e in catalog.get("public", {}).get("entities", [])):
+        raise ValueError("Expected a static public_catalog with encounter entities")
+    return catalog
+
+
+def fit(train, test, config, device, pretrained=None, catalog=None):
     """Train on `train`, report on `test`. Returns (net, vocabulary, report)."""
     training = config.training
     started = time.monotonic()
+    encounters = {encounter_id(r["encounter"]) for r in chain(train, test)}
     if pretrained:
+        if catalog is not None:
+            raise ValueError("A pretrained model keeps its frozen vocabulary; --catalog is for initialization")
         net, vocabulary, manifest = load_model(pretrained, device)
         if manifest["model"] != asdict(config.model) or \
                 manifest["training"]["summary_entity"] != training.summary_entity:
             raise ValueError("The pretrained model was built with a different profile")
         net.train()
     else:
+        catalog = public_catalog(catalog)
+        check_encounters(encounters, {"content_id=" + e["content_id"] for e in catalog["public"]["entities"]
+                                      if e.get("entity_type") == "encounter"})
         frames = (frame_for(entities(r), r["encounter"], training.summary_entity) for r in train)
-        vocabulary = Vocabulary.from_frames(frames, config.model)
+        vocabulary = Vocabulary.from_frames(chain([catalog], frames), config.model)
         net = CombatOutcomeNet(config.model).to(device)
+    check_encounters(encounters, vocabulary.lookup)
     opt = torch.optim.AdamW(net.parameters(), lr=training.lr, weight_decay=training.weight_decay)
     steps = training.epochs * (math.ceil(len(train) / training.batch_size) + 1)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=training.lr, total_steps=steps,
@@ -133,7 +156,10 @@ def main(argv=None):
     parser.add_argument("data", type=Path, help="A combat-outcome label file, or a directory of them")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="combat-outcome profile (model, training)")
     parser.add_argument("--save", type=Path, help="Directory for the trained model (weights, manifest)")
-    parser.add_argument("--pretrained", type=Path, help="Saved model to continue from; its vocabulary is kept")
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument("--pretrained", type=Path, help="Saved model to continue from; its vocabulary is kept")
+    initialization.add_argument("--catalog", type=Path,
+                                help="Exported public_catalog for initialization (default: query the local engine)")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch", type=int, dest="batch_size")
     parser.add_argument("--lr", type=float)
@@ -172,13 +198,15 @@ def main(argv=None):
                   test_runs=len(test_runs), train_runs=len({r["run"] for r in train}),
                   fold=args.fold if args.folds else None, folds=args.folds,
                   sources=sorted({str(r["source"]) for r in rows}),
+                  # Whose fights these are: the solver's, or a policy's by its weights.
+                  policies=sorted({str(r["policy"]) for r in rows}),
                   pretrained=str(args.pretrained) if args.pretrained else None,
                   loss_rate=round(st.mean(r["lost"] for r in rows), 3))
     if not args.no_baselines:
         report["baselines"] = fit_baselines(train, test, training.ridge_base)
     if args.baselines_only:
         return finish(args, report)
-    net, vocabulary, report["entity_model"] = fit(train, test, config, args.device, args.pretrained)
+    net, vocabulary, report["entity_model"] = fit(train, test, config, args.device, args.pretrained, args.catalog)
     finish(args, report)
     if args.save:
         save_model(args.save, net, vocabulary, config, schema=SCHEMA, data=str(args.data), report=report)

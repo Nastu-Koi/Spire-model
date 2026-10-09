@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from combat_outcome.data import fights
 from spire_codex_data import anchor
 from spire_codex_data.map_ambiguity import act_report, analyze
 
@@ -138,6 +139,35 @@ def test_reward_label_follows_the_record_or_is_refused():
                                                    shown[2]]))
 
 
+@pytest.mark.parametrize("controlled,verbs", [
+    ("treasure", ["OPEN_CHEST", "LEAVE_ROOM"]),
+    ("event", ["CHOOSE_EVENT_OPTION", "DISCARD_POTION"]),
+])
+def test_export_omits_controller_only_groups_but_retains_followup_evidence(tmp_path, controlled, verbs):
+    report = dict(kind='noncombat', anchors=[dict(id=group, status='verified', outcome='matched_record')
+                                          for group in ('ordinary', 'selection')])
+    report_path, source, sample_path = (tmp_path / name for name in ('report.json', 'source.json', 'rows.jsonl.gz'))
+    report_path.write_text(json.dumps(report))
+    source.write_text(json.dumps(dict(map_point_history=[])))
+    rows = []
+    for group, phases in (('ordinary', [controlled, controlled]),
+                          ('selection', [controlled, controlled, 'card_select'])):
+        for phase in phases:
+            options = [dict(verb=verb) for verb in verbs] if phase == controlled else [
+                dict(verb='SELECT_ONE', source_refs=['card:0']), dict(verb='SELECT_ONE', source_refs=['card:1'])]
+            rows.append(dict(schema=anchor.SCHEMA, observation=dict(phase=phase, entities=[]),
+                options=options, label=options[0], actor='historical_noncombat',
+                metadata=dict(sample_group=group, anchor_kind=controlled)))
+    with gzip.open(sample_path, 'wt') as out:
+        out.writelines(json.dumps(row) + '\n' for row in rows)
+    member, outcomes, counts, unnamed, automatic = anchor.export_report((report_path, source, sample_path, 'source'))
+    exported = [json.loads(line) for line in gzip.decompress(member).splitlines()]
+    assert [row['metadata']['sample_group'] for row in exported] == ['selection'] * 3
+    assert [row['observation']['phase'] for row in exported] == [controlled, controlled, 'card_select']
+    assert automatic == {controlled: 2} and not outcomes and not unnamed
+    assert counts == {(controlled, 'historical_noncombat'): 3}
+
+
 def test_export_keeps_winning_actions_and_every_fight_outcome(tmp_path):
     hero = dict(entity_type='player', ref='player', hp=50, max_hp=80, round=1)
     potion = dict(entity_type='potion', ref='potion:0', content_id='POTION.FIRE')
@@ -145,10 +175,11 @@ def test_export_keeps_winning_actions_and_every_fight_outcome(tmp_path):
                 dict(entity_type='card', zone='hand', content_id='CARD.BASH'),
                 dict(entity_type='enemy', ref='creature:1', hp=30)]
 
-    def item(group, kind, actor, option=None, **seen):
+    def item(group, kind, actor, option=None, forced=False, **seen):
         option = option or dict(verb='END_TURN')
         public = [dict(e, **seen) if e is hero else e for e in entities]
-        return dict(schema=anchor.SCHEMA, observation=dict(entities=public), options=[option], label=option,
+        options = [option] if forced else [option, dict(verb='PLAY_CARD', source_refs=['hand:0'])]
+        return dict(schema=anchor.SCHEMA, observation=dict(entities=public), options=options, label=option,
                     actor=actor, coverage={}, metadata=dict(sample_group=group, anchor_kind=kind, run_hash='h',
                     split_group='seed-group', character='Ironclad', ascension=7, state_sources=['derived'],
                     source_integrity='unverified_source'))
@@ -158,13 +189,15 @@ def test_export_keeps_winning_actions_and_every_fight_outcome(tmp_path):
     battles = dict(run_hash='h', kind='battle', identity=dict(anchor.BUDGETS), anchors=[
         dict(fight, id='won', room_type='monster', outcome='win', exit_hp=56),
         dict(fight, id='lost', room_type='boss', outcome='loss', exit_hp=None),
-        dict(fight, id='bad', room_type='elite', status='execution_failed', error='x')])
+        dict(fight, id='bad', room_type='elite', status='execution_failed', error='x'),
+        dict(fight, id='idle', room_type='elite', outcome='win', exit_hp=50)])
     rests = dict(run_hash='h', kind='rest', identity={}, anchors=[
         dict(id='rest', kind='rest', status='verified', outcome='matched_record')])
     use = dict(verb='USE_POTION', source_refs=['potion:0'])
     for name, report, rows in (
             ('h.battle', battles, [item('won', 'battle', 'combat_solver', use), item('won', 'battle', 'combat_solver', round=2),
-                                   item('lost', 'battle', 'combat_solver'), item('bad', 'battle', 'combat_solver')]),
+                                   item('lost', 'battle', 'combat_solver'), item('bad', 'battle', 'combat_solver'),
+                                   item('idle', 'battle', 'combat_solver', forced=True)]),
             ('h.rest', rests, [item('rest', 'rest', 'historical_noncombat')])):
         (tmp_path / 'runs' / f'{name}.json').write_text(json.dumps(report))
         with gzip.open(tmp_path / 'samples' / f'{name}.jsonl.gz', 'wt') as stream:
@@ -175,39 +208,75 @@ def test_export_keeps_winning_actions_and_every_fight_outcome(tmp_path):
     assert summary['counts'] == {'battle/combat_solver': 2, 'rest/historical_noncombat': 1}
     with gzip.open(tmp_path / 'independent-training.jsonl.gz', 'rt') as stream:
         assert [json.loads(line)['metadata']['sample_group'] for line in stream] == ['won', 'won', 'rest']
-    # A lost fight teaches no actions, but it is an outcome.
-    assert summary['combat_outcomes']['counts'] == {'boss/loss': 1, 'regular/win': 1}
+    # A lost fight teaches no actions, and neither does one won without a choice; both are outcomes.
+    assert summary['rows_without_decision'] == {'battle': 1}
+    assert summary['combat_outcomes']['counts'] == {'boss/loss': 1, 'elite/win': 1, 'regular/win': 1}
     with gzip.open(tmp_path / 'combat-outcomes.jsonl.gz', 'rt') as stream:
-        won, lost = map(json.loads, stream)
+        won, lost, idle = map(json.loads, stream)
+    assert (idle['result'], idle['frames']['count']) == ('win', 1)
     assert (won['start_hp'], won['end_hp'], won['hp_lost'], won['result'], won['turns']) == (50, 56, -6, 'win', 2)
     assert (lost['start_hp'], lost['end_hp'], lost['hp_lost'], lost['result'], lost['kind']) == (50, 0, 50, 'loss', 'boss')
     assert (won['seed'], won['encounter'], won['act'], won['max_hp']) == ('seed-group', 'TOADPOLES_WEAK', 2, 80)
     assert [e['content_id'] for e in won['potions_used']] == ['POTION.FIRE']
+    # Solver fights, and the decision frames of every one of them: a lost fight keeps its frames.
+    assert (won['actor'], lost['actor'], lost['frames']) == (
+        'combat_solver', 'combat_solver', dict(file='samples/h.battle.jsonl.gz', group='lost', count=1))
+    labelled = {label['anchor']: frames for label, frames in fights(tmp_path / 'combat-outcomes.jsonl.gz')}
+    assert [f['action']['verb'] for f in labelled['won']] == ['USE_POTION', 'END_TURN']
+    assert [next(e for e in f['public']['entities'] if e['entity_type'] == 'player')['hp']
+            for f in labelled['lost']] == [50]
     # The input is the state the fight was entered with: no hand, no enemies.
     assert [(e['entity_type'], e.get('zone')) for e in won['entities']] == [('player', None), ('potion', None), ('card', 'deck')]
+    # Several processes write the rows and the outcomes that one writes, in the same order.
+    again = anchor.export(tmp_path, tmp_path / 'manifest.json', tmp_path / 'again.jsonl.gz',
+                          tmp_path / 'again-outcomes.jsonl.gz', workers=2)
+    assert (again['counts'], again['combat_outcomes']['counts']) == (summary['counts'], summary['combat_outcomes']['counts'])
+    for one, several in (('independent-training', 'again'), ('combat-outcomes', 'again-outcomes')):
+        assert gzip.open(tmp_path / f'{one}.jsonl.gz').read() == gzip.open(tmp_path / f'{several}.jsonl.gz').read()
 
 
 def grid(edges, kinds):
     return {c: dict(coord=c, kind=k, children=edges.get(c, [])) for c, k in kinds.items()}
 
 
-def test_export_names_the_bosses_of_the_current_act_only():
+def test_export_keeps_rows_whose_map_names_the_recorded_bosses():
     boss = lambda *ids: dict(map_point_type='boss', rooms=[dict(room_type='boss', model_id=i) for i in ids])
     fight = dict(map_point_type='monster', rooms=[dict(room_type='monster', model_id='ENCOUNTER.X')])
     bosses = anchor.act_bosses(dict(map_point_history=[[fight, boss('ENCOUNTER.A_BOSS')], [fight, boss('ENCOUNTER.B_BOSS')],
                                                        [boss('ENCOUNTER.C_BOSS'), boss('ENCOUNTER.D_BOSS')]]))
-    node = lambda floor, kind='Boss': dict(entity_type='map_node', content_id=kind, floor=floor, col=3)
+    node = lambda floor, boss=None: dict(dict(entity_type='map_node', content_id='Boss' if boss else 'RestSite',
+                                              floor=floor, col=3), **({'encounter': 'ENCOUNTER.' + boss} if boss else {}))
     row = lambda act, *nodes: dict(observation=dict(entities=[dict(entity_type='player', act=act), *nodes]))
-    first = row(1, node(15, 'RestSite'), node(16))
-    assert anchor.name_bosses(first, bosses)
-    assert [e.get('encounter') for e in first['observation']['entities'][1:]] == [None, 'ENCOUNTER.A_BOSS']
+    assert anchor.shows_bosses(row(1, node(15), node(16, 'A_BOSS')), bosses)
     # Two bosses close the last act of the highest ascension, in the order they are fought.
-    last = row(3, node(17), node(16))
-    assert anchor.name_bosses(last, bosses)
-    assert [e['encounter'] for e in last['observation']['entities'][1:]] == ['ENCOUNTER.D_BOSS', 'ENCOUNTER.C_BOSS']
-    # Nodes the record cannot be paired with are refused, not guessed.
-    assert not anchor.name_bosses(row(2, node(15), node(16)), bosses)
-    assert anchor.name_bosses(row(2), bosses)
+    assert anchor.shows_bosses(row(3, node(17, 'D_BOSS'), node(16, 'C_BOSS')), bosses)
+    assert not anchor.shows_bosses(row(3, node(17, 'C_BOSS'), node(16, 'D_BOSS')), bosses)
+    # A map that names another boss, or more bosses than the record holds, is refused.
+    assert not anchor.shows_bosses(row(1, node(16, 'B_BOSS')), bosses)
+    assert not anchor.shows_bosses(row(2, node(15, 'B_BOSS'), node(16, 'X_BOSS')), bosses)
+    unnamed = row(1, dict(node(16, 'A_BOSS')))
+    del unnamed['observation']['entities'][1]['encounter']
+    assert not anchor.shows_bosses(unnamed, bosses)
+    # The export changes no row.
+    assert anchor.shows_bosses(row(2), bosses) and 'encounter' not in unnamed['observation']['entities'][1]
+
+
+def test_an_anchor_save_holds_the_recorded_bosses():
+    boss = lambda name: dict(node('boss'), rooms=[dict(room_type='boss', model_id=name, turns_taken=5)])
+    run = summary([node('monster'), boss('ENCOUNTER.A_BOSS')])
+    run['map_point_history'] += [[node('monster'), boss('ENCOUNTER.B_BOSS')],
+                                 [node('monster'), boss('ENCOUNTER.C_BOSS'), boss('ENCOUNTER.D_BOSS')]]
+    drawn = lambda first, second=None: dict(rooms=dict(boss_id=first, second_boss_id=second))
+    base = dict(players=[dict(deck=[], relics=[], max_potion_slot_count=3, net_id=1)], extra_fields={},
+                rng=dict(rngs={}), acts=[drawn('ENCOUNTER.SEED_1'), drawn('ENCOUNTER.SEED_2', 'ENCOUNTER.SEED_3'),
+                                         drawn('ENCOUNTER.SEED_4', 'ENCOUNTER.SEED_5')])
+    state = dict(deck=[], relics=[], potions=[], hp=50, max_hp=80, gold=10)
+    save = anchor.build_save(base, state, run, 1, 1, run['map_point_history'][0][0], 'bosses')
+    # The seed draws bosses for a player who has unlocked everything; the record says whom this
+    # player met, in order. An act whose record does not fill its boss nodes keeps what it has.
+    assert [(a['rooms']['boss_id'], a['rooms']['second_boss_id']) for a in save['acts']] == [
+        ('ENCOUNTER.A_BOSS', None), ('ENCOUNTER.SEED_2', 'ENCOUNTER.SEED_3'), ('ENCOUNTER.C_BOSS', 'ENCOUNTER.D_BOSS')]
+    assert base['acts'][0]['rooms']['boss_id'] == 'ENCOUNTER.SEED_1'
 
 
 def test_type_sequence_determines_a_route_only_when_one_path_spells_it():
@@ -283,10 +352,43 @@ def test_native_enchantment_amount_and_ascension_reach_the_model_input():
         assert [c['enchantment_amount'] for c in cards] == [amount]
         hero = next(e for e in frame['public']['entities'] if e.get('entity_type') == 'player')
         assert hero['ascension'] == ascension == frame['contract']['fixed_ascension']
-        assert frame['contract']['observation_schema'] == 'public-state-v3'
+        assert frame['contract']['observation_schema'] == 'public-state-v6'
         digests[ascension, amount] = observation(frame).digest
     # What the game shows differently, the model is given differently.
     assert len(set(digests.values())) == 3
+
+
+@pytest.mark.engine
+def test_native_anchor_map_names_the_recorded_boss():
+    if os.environ.get('SPIRE_CODEX_DATA_NATIVE_TESTS') != '1':
+        pytest.skip('Set SPIRE_CODEX_DATA_NATIVE_TESTS=1 with the local solver configured')
+    from combat_solver_cli.client import SolverEngine
+    from spire_codex_data.anchor import settle
+    with SolverEngine() as engine:
+        first = settle(engine, engine.send(dict(cmd='start_run', character='Ironclad', seed='anchor-boss-check',
+                                                ascension=3, decision_protocol=True)))
+        base = engine.send(dict(cmd='anchor_state'))['save']
+        pool = engine.send(dict(cmd='get_map'))['encounter_pools'][0]['bosses']
+    named = lambda frame: [e.get('encounter') for e in frame['public']['entities']
+                           if e.get('entity_type') == 'map_node' and e['content_id'] == 'Boss']
+    drawn = base['acts'][0]['rooms']['boss_id']
+    # A run names the boss its seed drew on the map from its first decision.
+    assert named(first) == [drawn]
+    met = next('ENCOUNTER.' + name for name in pool if 'ENCOUNTER.' + name != drawn)
+    player = base['players'][0]
+    nodes = [node('ancient', 'event'), node('rest_site'),
+             dict(node('boss'), rooms=[dict(room_type='boss', model_id=met, turns_taken=5)])]
+    run = dict(seed='anchor-boss-check', ascension=3, map_point_history=[nodes],
+               players=[dict(deck=player['deck'], relics=player['relics'])])
+    state = dict(deck=player['deck'], relics=player['relics'], potions=[], hp=41, max_hp=player['max_hp'], gold=77)
+    save = anchor.build_save(base, state, run, 1, 2, nodes[1], 'anchor-boss-check')
+    spot = dict(floor=2, map_point_type='rest_site', second_boss=False, route=['ancient', 'rest_site'],
+                room=dict(type='rest_site'))
+    with SolverEngine() as engine:
+        frame = anchor.enter(engine, save, spot)
+    # The anchor shows the boss this player met, which is what the export asks of a row.
+    assert named(frame) == [met]
+    assert anchor.shows_bosses(dict(observation=frame['public']), anchor.act_bosses(run))
 
 
 @pytest.mark.engine
@@ -320,6 +422,144 @@ def test_native_ancient_shows_the_recorded_offer_in_recorded_order():
     with SolverEngine() as engine:
         with pytest.raises(ValueError):
             anchor.enter(engine, save, spot)
+
+
+def test_a_used_process_that_cannot_begin_the_next_run_is_replaced(monkeypatch):
+    started = []
+
+    class Engine:
+        closed = False
+
+        def __init__(self, config):
+            started.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(anchor, 'SolverEngine', Engine)
+    outcomes = iter([1, ValueError('enter_anchor:The run in progress cannot be ended'), 3, 4,
+                     ValueError('native_frame_error'), ValueError('native_frame_error')])
+
+    def start(engine):
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+    with anchor.RunProcess('config') as shared:
+        assert shared.begin(start) == (started[0], 1)
+        # Refused on the used process: begun again on a new one, which is then used on.
+        assert shared.begin(start) == (started[1], 3) and started[0].closed
+        assert shared.begin(start) == (started[1], 4)
+        # What also fails on a new process is the anchor's own failure.
+        with pytest.raises(ValueError, match='native_frame_error'):
+            shared.begin(start)
+        assert started[1].closed and len(started) == 3
+    assert started[2].closed
+
+
+def test_a_finished_report_stands_until_the_summary_or_the_version_changes(tmp_path, monkeypatch):
+    class NoEngine:
+        def __init__(self, config):
+            raise RuntimeError('generating')
+
+    monkeypatch.setattr(anchor, 'SolverEngine', NoEngine)
+    raw = tmp_path / 'h.run.json'
+    raw.write_text(json.dumps(dict(summary([node('ancient', 'event'), node('monster')]), acts=[])))
+    digest = anchor.hashlib.sha256(raw.read_bytes()).hexdigest()
+    source = dict(run_hash='h', character='IRONCLAD', path=str(raw), sha256=digest)
+    (tmp_path / 'runs').mkdir()
+    # Whatever else a report notes of how it was made does not bind it.
+    report = dict(identity=dict(version=anchor.VERSION, source_sha256=digest, kind='map', worker_sha256='a build'),
+                  anchors=[dict(id='h-a01f01-map', kind='map', status='verified')])
+    (tmp_path / 'runs/h.map.json').write_text(json.dumps(report))
+    assert anchor.process(source, tmp_path, 'config', {'map'})['anchors'] == report['anchors']
+    report['identity']['version'] = 'another'
+    (tmp_path / 'runs/h.map.json').write_text(json.dumps(report))
+    with pytest.raises(RuntimeError, match='generating'):
+        anchor.process(source, tmp_path, 'config', {'map'})
+    # A battle is also bound to the solver budgets it was fought with.
+    fought = dict(identity=dict(anchor.BUDGETS, version=anchor.KIND_VERSIONS['battle'], source_sha256=digest,
+                               kind='battle'), anchors=[])
+    (tmp_path / 'runs/h.battle.json').write_text(json.dumps(fought))
+    assert anchor.process(source, tmp_path, 'config', {'battle'})['anchors'] == []
+    with pytest.raises(RuntimeError, match='generating'):
+        anchor.process(source, tmp_path, 'config', {'battle'}, dict(anchor.BUDGETS, boss_budget_ms=1))
+
+
+@pytest.mark.engine
+def test_native_anchors_sharing_a_process_equal_those_of_new_processes():
+    if os.environ.get('SPIRE_CODEX_DATA_NATIVE_TESTS') != '1':
+        pytest.skip('Set SPIRE_CODEX_DATA_NATIVE_TESTS=1 with the local solver configured')
+    from combat_solver_cli.client import DEFAULT_CONFIG, SolverEngine
+    from combat_solver_cli.search_support import state_key
+    from spire_codex_data.anchor import settle
+    with SolverEngine() as engine:
+        settle(engine, engine.send(dict(cmd='start_run', character='Ironclad', seed='anchor-process-check',
+                                        ascension=3, decision_protocol=True)))
+        base = engine.send(dict(cmd='anchor_state'))['save']
+    player = base['players'][0]
+    nodes = [node('ancient', 'event'), node('monster'), node('rest_site')]
+    run = dict(seed='anchor-process-check', ascension=3, map_point_history=[nodes],
+               players=[dict(deck=player['deck'], relics=player['relics'])])
+    state = dict(deck=player['deck'], relics=player['relics'], potions=[], hp=41, max_hp=player['max_hp'], gold=77)
+    offer = [dict(id='CARD.ANGER'), dict(id='CARD.HAVOC'), dict(id='CARD.CLASH')]
+    reward = (anchor.build_save(base, state, run, 1, 2, nodes[1], 'process-check-reward'),
+              dict(floor=2, map_point_type='monster', second_boss=False, route=['ancient', 'monster'],
+                   room=dict(type='card_reward', cards=offer)))
+    rest = (anchor.build_save(base, state, run, 1, 3, nodes[2], 'process-check-rest'),
+            dict(floor=3, map_point_type='rest_site', second_boss=False, route=['ancient', 'monster', 'rest_site'],
+                 room=dict(type='rest_site')))
+    spots = [reward, rest, reward]
+    alone = []
+    for save, spot in spots:
+        with SolverEngine() as engine:
+            alone.append(anchor.enter(engine, save, dict(spot)))
+    with anchor.RunProcess(DEFAULT_CONFIG) as shared:
+        engines = []
+        for (save, spot), expected in zip(spots, alone):
+            engine, frame = shared.enter(save, dict(spot))
+            engines.append(engine)
+            # The anchor before is left where it stopped, its reward menu open: the run is ended there.
+            assert state_key(frame) == state_key(expected) and frame['contract'] == expected['contract']
+            assert frame['routing']['state_version'] == expected['routing']['state_version']
+        assert engines[0] is engines[1] is engines[2]
+        # A run in combat is not ended: the process is replaced.
+        fight = (reward[0], dict(reward[1], room=dict(type='combat', encounter='TOADPOLES_WEAK')))
+        shared.enter(fight[0], dict(fight[1]))
+        engine, frame = shared.enter(*rest[:1], dict(rest[1]))
+        assert engine is not engines[0] and state_key(frame) == state_key(alone[1])
+
+
+@pytest.mark.engine
+def test_native_battles_of_a_run_share_the_solver_and_the_replay_process():
+    if os.environ.get('SPIRE_CODEX_DATA_NATIVE_TESTS') != '1':
+        pytest.skip('Set SPIRE_CODEX_DATA_NATIVE_TESTS=1 with the local solver configured')
+    from combat_solver_cli.client import DEFAULT_CONFIG, SolverEngine
+    from spire_codex_data.anchor import settle
+    with SolverEngine() as engine:
+        settle(engine, engine.send(dict(cmd='start_run', character='Ironclad', seed='anchor-battle-check',
+                                        ascension=0, decision_protocol=True)))
+        base = engine.send(dict(cmd='anchor_state'))['save']
+    player = base['players'][0]
+    nodes = [node('ancient', 'event'), node('monster')]
+    run = dict(seed='anchor-battle-check', ascension=0, map_point_history=[nodes],
+               players=[dict(deck=player['deck'], relics=player['relics'])])
+    state = dict(deck=player['deck'], relics=player['relics'], potions=[], hp=player['max_hp'],
+                 max_hp=player['max_hp'], gold=99)
+    save = anchor.build_save(base, state, run, 1, 2, nodes[1], 'battle-check')
+    spot = dict(floor=2, map_point_type='monster', second_boss=False, route=['ancient', 'monster'],
+                room_type='monster', room=dict(type='combat', encounter='TOADPOLES_WEAK'))
+    budgets = dict(budget_ms=200, elite_budget_ms=200, boss_budget_ms=200)
+    with anchor.RunProcess(DEFAULT_CONFIG) as shared, anchor.RunProcess(DEFAULT_CONFIG) as second:
+        first = anchor.play_battle(shared, second, save, dict(spot), budgets)
+        engines = shared.engine, second.engine
+        again = anchor.play_battle(shared, second, save, dict(spot), budgets)
+        # A finished fight leaves both processes free for the next one.
+        assert (shared.engine, second.engine) == engines and engines[0] is not engines[1]
+    for fight in (first, again):
+        assert fight['outcome'] == 'win' and fight['exit_hp'] > 0 and len(fight['records']) > 2
+    # The same entry state gives the same first decision, whatever the process did before.
+    assert first['records'][0]['before_hash'] == again['records'][0]['before_hash']
 
 
 def test_replay_audit_reads_old_and_new_replays_alike():

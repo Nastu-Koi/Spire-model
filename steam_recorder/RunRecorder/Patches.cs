@@ -1,5 +1,6 @@
 using System;
 using System.Reflection;
+using System.Threading.Tasks;
 using MegaCrit.Sts2.Core.GameActions;
 
 namespace RunRecorder;
@@ -24,11 +25,14 @@ internal static class Patches
 
 	internal static void End(bool __0)
 	{
+		LiveBridge.RunEnded(__0);
 		Recorder.RunEnded(__0);
 	}
 
 	internal static void Cleanup()
 	{
+		LiveBridge.Reset();
+		SelectionCapture.Reset();
 		Recorder.Safe(delegate
 		{
 			Recorder.Close("run_cleanup");
@@ -42,8 +46,14 @@ internal static class Patches
 
 	internal static void Postfix(Pending? __state, object? __result)
 	{
+		ControlTask(__result);
 		Recorder.Returned(__state, __result);
 	}
+
+    internal static void ControlTask(object? __result)
+    {
+        if (LiveBridge.Executing && __result is Task task) LiveBridge.Track(task);
+    }
 
 	internal static void VoidPostfix(Pending? __state)
 	{

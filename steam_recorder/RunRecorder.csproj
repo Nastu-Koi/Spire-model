@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <AssemblyName>RunRecorder</AssemblyName>
-    <Version>0.5.0</Version>
+    <Version>0.5.10</Version>
     <Nullable>annotations</Nullable>
     <DebugType>embedded</DebugType>
     <EmbedAllSources>true</EmbedAllSources>
@@ -11,6 +11,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="RunRecorder/**/*.cs" />
+    <Compile Include="../public_history/*.cs" Link="PublicHistory/%(Filename)%(Extension)" />
     <Reference Include="sts2"><HintPath>$(GameDataDir)/sts2.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="GodotSharp"><HintPath>$(GameDataDir)/GodotSharp.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="0Harmony"><HintPath>$(GameDataDir)/0Harmony.dll</HintPath><Private>false</Private></Reference>

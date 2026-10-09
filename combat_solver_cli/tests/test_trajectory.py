@@ -114,3 +114,35 @@ def test_fixed_rule_steps_remain_in_proof_but_not_policy_samples(tmp_path):
         result=trajectory.verify_and_export('config',prefix,tmp_path/'export')
     assert result['macros']==[] and result['automatic_steps']==1
     assert json.loads((tmp_path/'export'/'verified_trace.jsonl').read_text().splitlines()[0])['actor']=='crystal_sphere_rule'
+
+
+@pytest.mark.parametrize("phase,verbs,excluded", [
+    ("event", ["CHOOSE_EVENT_OPTION", "DISCARD_POTION"], True),
+    ("shop", ["LEAVE_ROOM", "DISCARD_POTION"], False),
+    ("combat", ["END_TURN", "DISCARD_POTION"], False),
+])
+def test_verified_export_uses_current_controls_without_relabeling_forced(tmp_path, phase, verbs, excluded):
+    class CandidateEngine(FakeEngine):
+        def _frame(self):
+            frame = super()._frame()
+            if frame["boundary"] == "decision":
+                frame["public"]["phase"] = phase
+                for candidate, slot, verb in zip(frame["legal"]["candidates"], frame["public"]["decoder_bank"], verbs):
+                    candidate["verb"] = slot["verb"] = verb
+            return frame
+
+    prefix, pinned = replay_inputs(tmp_path)
+    with CandidateEngine() as engine:
+        frame = engine.reset("Ironclad", "fixture", 0)
+    data = json.loads(prefix.read_text())
+    data["records"][0].update(before_hash=state_key(frame), action=action_semantics(frame["legal"]["candidates"][0]))
+    prefix.write_text(json.dumps(data))
+    with patch.object(trajectory, "configuration", return_value=pinned), \
+            patch.object(trajectory, "SolverEngine", side_effect=lambda _: CandidateEngine()):
+        result = trajectory.verify_and_export("config", prefix, tmp_path / "export")
+    assert len(result["macros"]) == (0 if excluded else 1)
+    assert result["automatic_steps"] == int(excluded)
+    if excluded:
+        assert result["environment_actions"][0]["forced"] is False
+        assert result["environment_actions"][0]["actor"] == "solver"
+    validate_run(result)

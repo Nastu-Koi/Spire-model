@@ -11,6 +11,7 @@ import torch
 
 from .batch import Batch, Packed, collate
 from .protocol import ProtocolError, segment_key
+from .control import is_policy_frame
 from .representation import observation
 
 
@@ -170,8 +171,9 @@ class Replay(Packed):
     first: torch.Tensor  # [macros] first decision of each macro-action
 
 
-def prepare_replay(vocabulary, list_of_steps, *, pad_to=None):
-    """Pack the branching decisions of macro-actions; forced steps carry no label."""
+def prepare_replay(vocabulary, list_of_steps, *, pad_to=None, observe=observation):
+    """Pack policy decisions; forced and controller steps carry no label.
+    `observe` parses a frame: a caller that has parsed the frames passes its results."""
     owners, observations, masks, labels, first = [], [], [], [], []
     for macro, steps in enumerate(list_of_steps):
         segment = None
@@ -186,9 +188,9 @@ def prepare_replay(vocabulary, list_of_steps, *, pad_to=None):
             refs = {candidate["candidate_ref"]: candidate for candidate in candidates}
             if step["candidate_ref"] not in refs:
                 raise ProtocolError("Recorded label is absent from the engine legal set")
-            if len(candidates) == 1:
+            if not is_policy_frame(frame):
                 continue
-            obs = observation(frame)
+            obs = observe(frame)
             legal = {candidate["decoder_slot_ref"] for candidate in candidates}
             if not legal <= set(obs.slot_refs):
                 raise ProtocolError("Unrepresented legal candidate")
@@ -199,7 +201,7 @@ def prepare_replay(vocabulary, list_of_steps, *, pad_to=None):
             masks.append([slot in legal for slot in obs.slot_refs])
             labels.append(obs.slot_refs.index(refs[step["candidate_ref"]]["decoder_slot_ref"]))
         if len(first) == macro:
-            raise ProtocolError("All-forced macros are not training samples")
+            raise ProtocolError("Macros without policy decisions are not training samples")
     width = max(map(len, masks))
     return Replay(
         collate(observations, vocabulary, pad_to),
