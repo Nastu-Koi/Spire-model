@@ -231,17 +231,20 @@ def macro_count(runs):
     return sum(1 for run in runs for _ in policy_macros(run))
 
 
-# The share of a (character, phase) group's weight that the solver's labels on the
+# The share of a character's combat group's weight that the solver's labels on the
 # policy's own fight entries (`student_battle`) take where the group also holds other
 # samples: a third at first, rising with the student macro-actions the training data
-# holds in all, linearly, to a half at SHARE_RAMP_MACROS and no further. The rule and
-# its grounds: ARCHITECTURE.md, 批次整理与数据加载.
+# holds in all, linearly, to a half at SHARE_RAMP_MACROS and no further. The share is
+# the combat phase's: the few selections a student battle holds in another phase
+# (`card_select` inside a fight) are counted with the rest of their group. The rule
+# and its grounds: ARCHITECTURE.md, 批次整理与数据加载.
 SHARE_START, SHARE_CAP, SHARE_RAMP_MACROS = 1 / 3, 1 / 2, 1_000_000
+SHARE_PHASES = ("combat",)
 
 
 def student_share(student_macros):
-    """The share of a group's weight the student samples take, from how many student
-    macro-actions the training data holds in all."""
+    """The share of a combat group's weight the student samples take, from how many
+    student macro-actions the training data holds in all."""
     if student_macros < 0:
         raise ValueError("A count of macro-actions is not negative")
     return SHARE_START + (SHARE_CAP - SHARE_START) * min(1.0, student_macros / SHARE_RAMP_MACROS)
@@ -249,10 +252,11 @@ def student_share(student_macros):
 
 def group_weights(source_counts, share=None):
     """The weight of one macro-action of each (character, phase, source), from the
-    macro-actions of each. Every (character, phase) group weighs 1/G; within a group
-    the student samples share `share` of that equally and the other sources the
-    rest, equally per macro-action; a group with one kind only gives it everything.
-    `share` defaults to `student_share` of the student macro-actions counted."""
+    macro-actions of each. Every (character, phase) group weighs 1/G and its
+    macro-actions share that equally, except in the combat phase: there the student
+    samples share `share` of the group equally and the other sources the rest, equally
+    per macro-action, where the group holds both. `share` defaults to `student_share`
+    of the student macro-actions counted."""
     groups = defaultdict(Counter)
     for (character, phase, source), n in source_counts.items():
         if n:
@@ -264,14 +268,16 @@ def group_weights(source_counts, share=None):
     weights = {}
     for group, by_source in groups.items():
         student = by_source.get(STUDENT_BATTLE, 0)
-        rest = sum(n for source, n in by_source.items() if source != STUDENT_BATTLE)
-        for source, n in by_source.items():
-            if source == STUDENT_BATTLE:
-                part = share if rest else 1.0
-                weights[group + (source,)] = part / (len(groups) * student)
+        rest = sum(by_source.values()) - student
+        shared = group[1] in SHARE_PHASES and student and rest
+        for source in by_source:
+            if not shared:
+                part, among = 1.0, student + rest
+            elif source == STUDENT_BATTLE:
+                part, among = share, student
             else:
-                part = (1 - share) if student else 1.0
-                weights[group + (source,)] = part / (len(groups) * rest)
+                part, among = 1 - share, rest
+            weights[group + (source,)] = part / (len(groups) * among)
     return weights
 
 
@@ -293,8 +299,9 @@ class RunShards:
     by phase, source, shard), so splits and sample weights need no pass over the
     data. `directory` is one data directory or a list of them, read as one data
     set: an import of demonstrations with the imports of student battles, or the
-    rounds of a buffer. Every row remembers its directory (`root`); a shard is named
-    by (root, file).
+    rounds of a buffer. A row of a directory after the first remembers which it is
+    (`root`); a shard is named by (root, file). The first directory's rows are kept
+    as they are read, so the large one goes first: every feeder holds the index.
     """
 
     def __init__(self, directory, rows=None):
@@ -304,7 +311,8 @@ class RunShards:
         if not self.directories:
             raise ValueError("A data set is at least one directory")
         if rows is None:
-            rows = [dict(row, root=root) for root, path in enumerate(self.directories) for row in read_index(path)]
+            rows = [dict(row, root=root) if root else row
+                    for root, path in enumerate(self.directories) for row in read_index(path)]
         self.rows = [row for row in rows if row["phases"]]
 
     @property
@@ -397,12 +405,15 @@ class RunShards:
         """The validated runs of these shards that belong to this part of the data.
         Lines of other runs are skipped unparsed: a held-out part is a tenth of a shard."""
         names = [self._key(name) for name in names]
-        selected = set(names)
+        # The files asked for of each directory: most of a million rows match none.
+        selected = defaultdict(set)
+        for root, name in names:
+            selected[root].add(name)
         wanted = defaultdict(dict)
         for row in self.rows:
-            key = (row.get("root", 0), row["shard"])
-            if key in selected:
-                wanted[key][row["line"]] = row
+            root = row.get("root", 0)
+            if row["shard"] in selected[root]:
+                wanted[root, row["shard"]][row["line"]] = row
         runs = []
         for key in names:
             found = 0

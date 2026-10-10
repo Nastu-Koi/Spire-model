@@ -86,7 +86,11 @@ python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-
 
 索引行记每个样本组的来源 `source`（`independent`、`rollout`、`student_battle`；旧索引没有这个字段，读作示范），学生战斗的行另记 `policy_version`、`policy_digest`、`iteration`，`reindex` 保留。`Sample.source` 相同。
 
-权重：每个角色×阶段组仍占 1/G。组里同时有学生战斗和其它来源时，学生样本合计占该组的份额 s、其余来源合计占 1−s，各自在样本间平均；只有一种来源的组整组归它。s 由整个训练部分里学生宏动作的累计数 N 决定：`s = 1/3 + (1/2 − 1/3)·min(1, N/1,000,000)`，即从三分之一起线性升到一半为止（`model/data.py` 的 `student_share`、`group_weights`，依据见 [批次整理与数据加载](../ARCHITECTURE.md#批次整理与数据加载)）。每轮记录的 `training`／`held_out` 计数带 `student_macros` 与 `student_share`。
+权重：每个角色×阶段组仍占 1/G。角色的战斗阶段组（`combat`）里同时有学生战斗和其它来源时，学生样本合计占该组的份额 s、其余来源合计占 1−s，各自在样本间平均；只有一种来源的组整组归它。其它阶段不分份额：学生战斗里战斗中的选牌（`card_select`）与本组其它样本按数量平摊。s 由整个训练部分里学生宏动作的累计数 N 决定：`s = 1/3 + (1/2 − 1/3)·min(1, N/1,000,000)`，即从三分之一起线性升到一半为止（`model/data.py` 的 `student_share`、`group_weights`，依据见 [批次整理与数据加载](../ARCHITECTURE.md#批次整理与数据加载)）。每轮记录的 `training`／`held_out` 计数带 `student_macros` 与 `student_share`。
+
+学生样本的单样本权重与它的数量成反比：一次迭代的量（每角色一两万个战斗宏动作）约为示范样本的三十倍，每角色只有几十上百个时是上千倍。不足一次迭代的学生数据只用来检查流水线，不要并入正式训练。
+
+多个目录时把最大的（示范）放在第一个：每个读取进程都持有整份索引，第一个目录的索引行原样使用，其后目录的行各多带一个目录标记。
 
 把一轮学生战斗并入示范续训（严格续训到新目录；换数据时优化器、调度进度和轮次计数都延续）：
 
@@ -97,7 +101,7 @@ python -m model --device cuda bootstrap \
   --output runs/bootstrap-20261008/trained-v9-student
 ```
 
-之后每次迭代把新一轮的学生目录追加到 `--data` 列表（旧轮照样留着，份额随累计量上升），从新目录的 `current` 继续。
+加 `--epochs N` 限定追加的轮数。之后每次迭代把新一轮的学生目录追加到 `--data` 列表（旧轮照样留着，份额随累计量上升），照换数据的惯例用新的输出目录、从上一个目录的 `current` 续训。学生目录导入时用小分片（`import-independent --shard-samples 250`），原因见[学生状态的战斗](../spire_codex_data/README.md#学生状态的战斗)。
 
 | 启动方式 | 行为 |
 | --- | --- |
