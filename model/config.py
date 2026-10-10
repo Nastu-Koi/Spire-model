@@ -3,6 +3,11 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 
+# Model settings of the training that was removed: the value head of whole-run PPO.
+# A checkpoint saved with them loads without them.
+RETIRED_MODEL_SETTINGS = frozenset({"value_mlp"})
+
+
 @dataclass
 class ModelConfig:
     architecture_version: int = 2
@@ -29,8 +34,7 @@ class ModelConfig:
     head_qk_norm: bool = False  # normalize the decision query and the action keys
     relation_bias_per_layer: bool = False  # a relation-bias table per global layer
     field_attention: bool = False  # one attention layer over an entity's fields
-    value_mlp: bool = False  # two-layer value head instead of a linear one
-    linear_bias: bool = True  # biases in Linear layers; the value output keeps its own
+    linear_bias: bool = True  # biases in Linear layers
     rms_norm: bool = False  # RMSNorm instead of LayerNorm everywhere
 
     def __post_init__(self):
@@ -63,6 +67,11 @@ class ModelConfig:
             raise ValueError("Unknown attention backend")
 
     @classmethod
+    def from_dict(cls, values):
+        """A configuration as a checkpoint saved it, without the retired settings."""
+        return cls(**{name: value for name, value in values.items() if name not in RETIRED_MODEL_SETTINGS})
+
+    @classmethod
     def tiny(cls):
         return cls(
             hidden_size=64,
@@ -89,10 +98,17 @@ class ModelConfig:
         )
 
 
-# The settings of PPO rounds that no optimizer state depends on: where training goes on
-# from a checkpoint, a profile may set them anew (`TrainConfig.with_ppo`).
-PPO_SETTINGS = ("clip_ratio", "target_kl", "ppo_epochs", "ppo_muon_lr", "value_coef",
-                "entropy_coef", "bootstrap_coef", "bootstrap_batch_size", "sampling_temperature")
+# The settings no optimizer state depends on: where training goes on from a checkpoint, a
+# profile may set them anew (`TrainConfig.with_sampling`).
+SAMPLING_SETTINGS = ("combat_temperature", "other_temperature")
+# Settings of the training that was removed (whole-run PPO, its value head and its
+# single sampling temperature). A checkpoint saved with them resumes without them: no
+# optimizer state of a behavior-cloned policy ever depended on them.
+RETIRED_SETTINGS = frozenset({
+    "value_lr", "clip_ratio", "target_kl", "ppo_epochs", "ppo_muon_lr", "value_coef",
+    "entropy_coef", "bootstrap_coef", "bootstrap_batch_size", "sampling_temperature",
+    "horizon_scale",
+})
 
 
 @dataclass
@@ -108,34 +124,19 @@ class TrainConfig:
     embedding_lr_final: float | None = None
     embedding_decay_updates: int = 0
     head_lr: float = 3e-5
-    # The value head starts from zero when PPO begins, and BC never moves it: it
-    # learns at a rate of its own, not at the one that keeps the policy heads steady.
-    value_lr: float = 1e-3
     bootstrap_warmup_updates: int = 200
     update_stats_every: int = 100
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     logical_batch_size: int = 512
     microbatch_size: int = 32
-    clip_ratio: float = 0.2
-    target_kl: float = 0.015
-    ppo_epochs: int = 2
-    # The Muon rate of PPO updates: `ppo_epochs` passes over a round at this rate
-    # move the policy by about `target_kl`. The other groups keep their BC rates,
-    # the lookup tables the one BC's decay left them at.
-    ppo_muon_lr: float = 2e-4
-    value_coef: float = 0.5
-    entropy_coef: float = 0.001
-    # PPO updates also lower the NLL of `bootstrap_batch_size` demonstrations each,
-    # their mean weighed at `bootstrap_coef` against the round's own loss, sample for
-    # sample. 0 leaves the demonstrations out.
-    bootstrap_coef: float = 0.0
-    bootstrap_batch_size: int = 256
-    # PPO rounds are sampled from the scores divided by this, and their updates score
-    # the same distribution: under 1 the policy that is sampled, and improved, plays
-    # closer to its most likely actions. Demonstrations are learned at 1 throughout.
-    sampling_temperature: float = 1.0
-    horizon_scale: float = 100.0
+    # A sampled run draws every decision from the scores divided by the temperature of
+    # its phase: fights at `combat_temperature`, everything else at `other_temperature`.
+    # The temperatures are part of what the policy is, and travel with its runs and its
+    # checkpoint. The most likely action, which evaluation takes, is the same at every
+    # temperature; demonstrations are learned at 1.
+    combat_temperature: float = 0.3
+    other_temperature: float = 0.7
     precision: str = "bf16"
     token_buckets: list[int] = field(
         default_factory=lambda: [64, 96, 128, 192, 256, 384, 512, 1024, 2048, 4096]
@@ -155,35 +156,41 @@ class TrainConfig:
 
     @classmethod
     def from_dict(cls, values):
-        return cls(**values)
+        """A configuration as a checkpoint or profile saved it, without the retired
+        settings. Any other unknown setting is an error."""
+        return cls(**{name: value for name, value in values.items() if name not in RETIRED_SETTINGS})
 
-    def with_ppo(self, profile):
-        """This configuration with the PPO settings of `profile`, which must agree with
-        it on everything else: the rest is what the optimizer state was built under."""
+    @property
+    def temperatures(self):
+        """The sampling temperature of each phase, as runs record it."""
+        return {"combat": self.combat_temperature, "other": self.other_temperature}
+
+    def with_sampling(self, profile):
+        """This configuration with the sampling settings of `profile`, which must agree
+        with it on everything else: the rest is what the optimizer state was built under."""
         differing = sorted(
             name for name, value in asdict(self).items()
-            if name not in PPO_SETTINGS and getattr(profile, name) != value)
+            if name not in SAMPLING_SETTINGS and getattr(profile, name) != value)
         if differing:
             raise ValueError(
-                "Strict resume can change PPO settings only; the profile also differs from the "
-                "checkpoint in " + ", ".join(differing) + "; use --weights-only")
-        return replace(self, **{name: getattr(profile, name) for name in PPO_SETTINGS})
+                "Strict resume can change sampling settings only; the profile also differs from "
+                "the checkpoint in " + ", ".join(differing) + "; use --weights-only")
+        return replace(self, **{name: getattr(profile, name) for name in SAMPLING_SETTINGS})
 
     def __post_init__(self):
         if self.optimizer not in {"muon_adamw", "adamw"}:
             raise ValueError("Use muon_adamw or adamw")
         if (
-            min(self.muon_lr, self.ppo_muon_lr) <= 0
+            self.muon_lr <= 0
             or not 0 <= self.muon_momentum < 1
             or type(self.muon_ns_steps) is not int
             or self.muon_ns_steps < 1
         ):
             raise ValueError("Invalid Muon learning rate, momentum or iteration count")
-        if min(self.logical_batch_size, self.microbatch_size, self.bootstrap_batch_size,
-               self.horizon_scale) <= 0:
-            raise ValueError("Batch sizes and horizon scale must be positive")
-        if not 0 < self.sampling_temperature <= 1:
-            raise ValueError("The sampling temperature must be in (0, 1]")
+        if min(self.logical_batch_size, self.microbatch_size) <= 0:
+            raise ValueError("Batch sizes must be positive")
+        if not all(0 < temperature <= 1 for temperature in self.temperatures.values()):
+            raise ValueError("The sampling temperatures must be in (0, 1]")
         if type(self.loader_workers) is not int or self.loader_workers < 0:
             raise ValueError("Loader workers must be a non-negative integer")
         if type(self.loader_feeders) is not int or self.loader_feeders < 1:
@@ -201,14 +208,11 @@ class TrainConfig:
             raise ValueError("Ascension must be an integer from 0 to 10")
         if self.precision not in {"no", "bf16"}:
             raise ValueError("Use FP32 or BF16 consistently for rollout and learning")
-        if not 0 < self.clip_ratio < 1 or self.target_kl <= 0 or self.ppo_epochs < 1:
-            raise ValueError("Invalid PPO clip/KL/epoch settings")
         if (
             min(
                 self.backbone_lr,
                 self.embedding_lr,
                 self.head_lr,
-                self.value_lr,
                 self.max_grad_norm,
                 self.token_budget,
                 self.pair_budget,
@@ -218,16 +222,8 @@ class TrainConfig:
             raise ValueError(
                 "Learning rates, gradient limit and capacity budgets must be positive"
             )
-        if (
-            min(
-                self.value_coef,
-                self.entropy_coef,
-                self.bootstrap_coef,
-                self.weight_decay,
-            )
-            < 0
-        ):
-            raise ValueError("Loss coefficients and weight decay must be nonnegative")
+        if self.weight_decay < 0:
+            raise ValueError("Weight decay must be nonnegative")
         if any(
             not bins or bins != sorted(set(bins)) or min(bins) < 1
             for bins in (self.token_buckets, self.action_buckets)

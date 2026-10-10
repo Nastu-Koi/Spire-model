@@ -2,7 +2,6 @@
 
 import copy
 from dataclasses import asdict
-import json
 import random
 from types import SimpleNamespace
 
@@ -15,11 +14,10 @@ from model.control import is_policy_frame
 from model.history import TrainingHistory
 from model.loader import batches
 from model.data import samples
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.monitor import MonitorStore
 from model.protocol import CHARACTERS
-from model.rollout import RolloutRunner
-from model.testing import SyntheticEngine, demonstration
+from model.testing import demonstration
 from model.trainer import Learner
 
 
@@ -29,13 +27,12 @@ def setup_learner():
     vocabulary = vocabulary_for(runs, config)
     training = TrainConfig(optimizer="adamw", precision="no", loader_workers=0,
                            logical_batch_size=3, microbatch_size=1,
-                           bootstrap_warmup_updates=0, update_stats_every=2,
-                           ppo_epochs=2, target_kl=100, ascension=0)
-    return Learner(PolicyValue(config), vocabulary, training), runs
+                           bootstrap_warmup_updates=0, update_stats_every=2, ascension=0)
+    return Learner(PolicyNetwork(config), vocabulary, training), runs
 
 
 def test_accuracy_counts_legal_top1_decisions_without_changing_replay_or_gradients(monkeypatch):
-    model = PolicyValue(ModelConfig.tiny())
+    model = PolicyNetwork(ModelConfig.tiny())
     width = model.config.hidden_size
     hidden = torch.zeros(4, 5, width)
     hidden[:, 0, 0] = 1
@@ -56,9 +53,10 @@ def test_accuracy_counts_legal_top1_decisions_without_changing_replay_or_gradien
     original = model.replay(prepared)
     measured = model.replay(prepared, with_accuracy=True)
     # The masked highest score in row 0 cannot win; row 2 is a forced choice.
-    assert measured[3].tolist() == [[1, 2], [0, 1]]
-    assert measured[3].dtype == torch.long and not measured[3].requires_grad
-    for actual, expected in zip(measured[:3], original):
+    assert measured[2].tolist() == [[1, 2], [0, 1]]
+    assert measured[2].dtype == torch.long and not measured[2].requires_grad
+    assert len(original) == 2 and len(measured) == 3
+    for actual, expected in zip(measured[:2], original):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     parameters = (hidden, model.query.weight, model.key.weight)
     before = torch.autograd.grad(-original[0].sum(), parameters)
@@ -81,10 +79,10 @@ def test_per_update_metrics_match_epoch_aggregate_without_changing_weights():
         assert metrics["duration_seconds"] >= 0
         records.append(metrics)
 
-    actual = learner._optimize(batches(items, learner.vocabulary, learner.config), "bootstrap",
-                               bootstrap_samples=len(items), on_update=completed)
-    expected = baseline._optimize(batches(items, baseline.vocabulary, baseline.config), "bootstrap",
-                                  bootstrap_samples=len(items))
+    actual = learner._optimize(batches(items, learner.vocabulary, learner.config),
+                               total=len(items), on_update=completed)
+    expected = baseline._optimize(batches(items, baseline.vocabulary, baseline.config),
+                                  total=len(items))
     assert [row["updates"] for row in records] == [1, 2, 3]
     assert [row["samples"] for row in records] == [3, 3, 1]
     assert [row["accuracy_decisions"] for row in records] == [
@@ -98,7 +96,7 @@ def test_per_update_metrics_match_epoch_aggregate_without_changing_weights():
     assert actual["accuracy_decisions"] == sum(row["accuracy_decisions"] for row in records)
     assert actual["accuracy"] == actual["accuracy_correct"] / actual["accuracy_decisions"]
     assert actual["accuracy"] == expected["accuracy"]
-    for name in ("loss", "entropy", "value_mse", "kl", "clip_fraction"):
+    for name in ("loss", "entropy"):
         weighted = sum(row[name] * row["weight"] for row in records) / sum(row["weight"] for row in records)
         assert actual[name] == pytest.approx(weighted)
         assert actual[name] == pytest.approx(expected[name])
@@ -127,34 +125,6 @@ def test_bootstrap_writes_visible_updates_before_epoch_completion(tmp_path):
         assert row["status"]["updates"] == 1
         assert row["latest"]["metrics"]["accuracy_decisions"] > 0
         assert 0 <= row["latest"]["metrics"]["accuracy"] <= 1
-    finally:
-        writer.close()
-
-
-@pytest.mark.parametrize("mode", ["ppo", "value"])
-def test_ppo_and_value_warmup_emit_one_record_per_optimizer_step(mode, tmp_path):
-    learner, _ = setup_learner()
-    runner = RolloutRunner(learner.model, learner.vocabulary, version=learner.policy_version,
-                           precision="no", ascension=learner.config.ascension)
-    runs = [runner.run(SyntheticEngine(4, 2), character, "telemetry-rollout") for character in CHARACTERS]
-    writer = TrainingHistory(tmp_path, "ppo", asdict(learner.config))
-    records = []
-
-    def completed(metrics, *, epoch, stage):
-        assert stage == mode
-        records.append((epoch, metrics))
-        writer.append_update(metrics, round=1, stage=stage, optimization_epoch=epoch)
-
-    try:
-        summaries = learner.ppo(runs, on_update=completed) if mode == "ppo" else learner.value_warmup(runs, epochs=2, on_update=completed)
-        assert len(records) == learner.updates and len(records) > 2
-        assert [item[1]["updates"] for item in records] == list(range(1, learner.updates + 1))
-        assert {epoch for epoch, _ in records} == {1, 2}
-        assert all("value_rmse" in metrics and "old_replay_max_error" in metrics for _, metrics in records)
-        assert all("accuracy" not in metrics for _, metrics in records)
-        assert summaries[-1]["updates"] == learner.updates
-        rows = [json.loads(line) for line in (tmp_path / "updates.jsonl").read_text().splitlines()]
-        assert len(rows) == learner.updates and all(row["stage"] == mode for row in rows)
     finally:
         writer.close()
 

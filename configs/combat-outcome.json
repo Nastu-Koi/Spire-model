@@ -14,7 +14,14 @@
         "backend": "sdpa",
         "encoder_precision": "inherit",
         "checkpoint_layers": false,
-        "compile_blocks": false
+        "compile_blocks": false,
+        "qk_norm": false,
+        "scaled_residual_init": false,
+        "head_qk_norm": false,
+        "relation_bias_per_layer": false,
+        "field_attention": false,
+        "linear_bias": true,
+        "rms_norm": false
     },
     "training": {
         "epochs": 30,

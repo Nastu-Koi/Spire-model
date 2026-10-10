@@ -14,9 +14,9 @@ import torch
 
 from . import rules
 from .config import ModelConfig, TrainConfig
-from .model import PolicyValue
+from .model import PolicyNetwork
 from .representation import ENCODING_VERSION, Vocabulary
-from .optim import TRAINING_VERSION, with_value_groups
+from .optim import TRAINING_VERSION, without_value_head
 from .rewards import REWARD_VERSION
 from .public_history import HISTORY_VERSION, require_history_version
 
@@ -130,15 +130,17 @@ def load_model(path, device="cpu", *, allow_legacy_encoding=False):
         raise ValueError("Checkpoint was trained with different rule text")
     if "ascension" not in manifest.get("training", {}):
         raise ValueError("Checkpoint has no declared ascension; do not infer a new default")
-    config = ModelConfig(**manifest["model"])
+    config = ModelConfig.from_dict(manifest["model"])
     # Allocate once on the destination without a second full CPU model.
     with torch.device("meta"):
-        model = PolicyValue(config)
+        model = PolicyNetwork(config)
     model.to_empty(device=device)
     expected = set(model.state_dict())
     loaded = set()
     for name in manifest["weights"]:
         shard = torch.load(path / name, map_location=device, weights_only=True)
+        # The value head of the removed PPO stays behind.
+        shard = {key: tensor for key, tensor in shard.items() if not key.startswith("value.")}
         if loaded & shard.keys() or not shard.keys() <= expected:
             raise ValueError("Duplicate or unexpected checkpoint tensors")
         model.load_state_dict(shard, strict=False)
@@ -166,22 +168,29 @@ def restore_training(path, optimizer, scheduler=None):
     restored = torch.load(path / manifest["optimizer"], map_location="cpu", weights_only=True)
     current = optimizer.param_groups
     hybrid = set(restored) == {"adamw", "muon"}
-    with_value_groups(restored["adamw"] if hybrid else restored,
-                      [group for group in current if group.get("name") != "muon"])
+    adamw = restored["adamw"] if hybrid else restored
+    # A checkpoint saved with the value head resumes without it; the schedule's
+    # saved rates are listed group by group in the optimizer's order.
+    kept = without_value_head(adamw, [group for group in current if group.get("name") != "muon"])
+    muon = restored["muon"]["param_groups"] if hybrid else []
+    groups = adamw["param_groups"] + muon
+    kept += [True] * len(muon)
     # A strict resume restores its original groups. It must never swallow requested settings.
-    groups = (restored["adamw"]["param_groups"] + restored["muon"]["param_groups"]
-              if hybrid else restored["param_groups"])
     keys = ("name", "initial_lr", "weight_decay", "betas", "eps", "momentum", "ns_steps")
     if len(groups) != len(current) or any(
         len(old["params"]) != len(new["params"]) or any(old.get(k) != new.get(k) for k in keys)
         for old, new in zip(groups, current)
     ):
         raise ValueError("Optimizer configuration differs from checkpoint; use --weights-only")
+    schedule = None
     if scheduler:
         # Validate the schedule before changing any optimizer or RNG state.
         if runtime["scheduler"] is None:
             raise ValueError("Checkpoint has no schedule state; use --weights-only")
-        scheduler.check(runtime["scheduler"])
+        schedule = dict(runtime["scheduler"])
+        if "base_lrs" in schedule:
+            schedule["base_lrs"] = [lr for lr, keep in zip(schedule["base_lrs"], kept) if keep]
+        scheduler.check(schedule)
     # Delegate dtype/device restoration to the actual optimizer, including Muon.
     optimizer.load_state_dict(restored)
     torch.set_rng_state(runtime["torch"])
@@ -189,5 +198,5 @@ def restore_training(path, optimizer, scheduler=None):
     if runtime["cuda"] and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(runtime["cuda"])
     if scheduler:
-        scheduler.load_state_dict(runtime["scheduler"])
+        scheduler.load_state_dict(schedule)
     return manifest["progress"]

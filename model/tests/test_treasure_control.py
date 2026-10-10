@@ -12,7 +12,7 @@ from model.data import RunShards, load_runs, samples as training_samples, valida
 from model.dataset_index import HEADER, index_row
 from model.independent import convert_group
 from model.loader import stream
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.protocol import ProtocolError, action_semantics
 from model.representation import Vocabulary
 from model.rollout import RolloutRunner
@@ -59,12 +59,12 @@ def test_rollout_chest_steps_have_no_policy_probability_but_keep_downstream_retu
     config = ModelConfig.tiny()
     vocabulary = Vocabulary.from_frames(frames, config)
     policy = Policy()
-    trace = RolloutRunner(PolicyValue(config), vocabulary).run(
+    trace = RolloutRunner(PolicyNetwork(config), vocabulary).run(
         engine, "Ironclad", "control", _policy=policy)
     assert trace["status"] == "complete", trace.get("error")
     assert policy.phases == ["map", "card_select"]
     assert [m["phase"] for m in trace["macros"]] == policy.phases
-    assert [m["return"] for m in trace["macros"]] == [1, 1]
+    assert [m["reward"] for m in trace["macros"]] == [0, 1]
     assert [m["old_log_prob"] for m in trace["macros"]] == [-0.7, -0.7]
     assert trace["automatic_steps"] == 3
     actions = trace["environment_actions"]

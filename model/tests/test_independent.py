@@ -10,7 +10,7 @@ from model.config import ModelConfig, TrainConfig
 from model.data import RunShards, load_runs, samples as data_samples, validate_run
 from model.independent import convert_group, import_samples
 from model import loader
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.protocol import ProtocolError, action_semantics, execution_command
 from model.representation import Vocabulary
 from model.testing import SyntheticEngine, demonstration
@@ -81,7 +81,7 @@ def test_the_run_keeps_how_far_its_source_and_states_are_known():
 def learner_for(runs):
     config = ModelConfig.tiny()
     frames = (s["frame"] for r in runs for m in r["macros"] for s in m["steps"])
-    return Learner(PolicyValue(config), Vocabulary.from_frames(frames, config),
+    return Learner(PolicyNetwork(config), Vocabulary.from_frames(frames, config),
                    TrainConfig(precision="no", logical_batch_size=4, token_buckets=[32, 64], action_buckets=[8, 16]))
 
 
