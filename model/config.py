@@ -130,8 +130,9 @@ class TrainConfig:
     max_grad_norm: float = 1.0
     logical_batch_size: int = 512
     microbatch_size: int = 32
-    # A sampled run draws every decision from the scores divided by the temperature of
-    # its phase: fights at `combat_temperature`, everything else at `other_temperature`.
+    # A sampled run draws every decision from the scores divided by a temperature:
+    # inside a fight (what the engine's encounter events bound, a selection made in one
+    # included) at `combat_temperature`, everything else at `other_temperature`.
     # The temperatures are part of what the policy is, and travel with its runs and its
     # checkpoint. The most likely action, which evaluation takes, is the same at every
     # temperature; demonstrations are learned at 1.

@@ -40,6 +40,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -179,6 +180,29 @@ class Command:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(self.process.pid, signal.SIGTERM)
             self.process.wait()
+
+
+def _stop(*_):
+    raise KeyboardInterrupt
+
+
+# How many compiled variants of one function the driver's process may hold.
+COMPILED_VARIANTS = 64
+
+
+def allow_compiled_variants(limit=COMPILED_VARIANTS):
+    """Let the compiler keep more variants of a function than its default of eight.
+
+    The global layers of the policy and of the critic are one compiled function. A
+    process that only trains, or only samples, runs it in one or two ways; this one
+    samples, trains the critic, scores with it and trains the policy in turn, each
+    with its own gradient mode, precision and module, and past the limit the compiler
+    leaves whatever comes next uncompiled for as long as the process lives."""
+    import torch._dynamo
+
+    for name in ("recompile_limit", "cache_size_limit"):
+        if isinstance(getattr(torch._dynamo.config, name, None), int):
+            setattr(torch._dynamo.config, name, max(getattr(torch._dynamo.config, name), limit))
 
 
 def write_json(path, value):
@@ -587,7 +611,12 @@ class Driver:
         if iterations < 1:
             raise ValueError("At least one iteration")
         self.history = TrainingHistory(self.output, "iterate", asdict(self.settings))
+        # A request to stop ends the step under way as an interruption does: the
+        # engines, the loaders and the solver's command go with it.
+        handled = threading.current_thread() is threading.main_thread()
+        previous = signal.signal(signal.SIGTERM, _stop) if handled else None
         try:
+            allow_compiled_variants()
             self.learner = self.load()
             self.history.status("running", updates=self.learner.updates)
             for iteration in range(iterations):
@@ -605,4 +634,6 @@ class Driver:
             if self.background:
                 self.background[1].stop()
             self.history.close()
+            if handled:
+                signal.signal(signal.SIGTERM, previous)
         return self.state
