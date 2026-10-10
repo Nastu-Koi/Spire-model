@@ -42,11 +42,14 @@ python3 -m spire_codex_data.sources --existing data/spire-codex --output data/sp
 | 类型 | 起点 | 标签 | 怎样核对 |
 | --- | --- | --- | --- |
 | `battle` | 节点之前的状态，进入记录的遭遇 | CombatSolver 另行求解的动作 | 另一进程逐步重放（`native_replay`）；只导出获胜的战斗 |
+| `potion` | 与 `battle` 相同；每两场战斗抽一场，开场药水栏里随机若干瓶（至少一瓶）指定为必须使用 | CombatSolver 在“这几瓶必须用、其余不用”的约束下求解的动作 | 同 `battle`；导出时取代同一场战斗的 `battle` 动作 |
 | `rest` | 节点之前的状态，进入营火 | 记录的营火选项，锻造再加记录的升级目标 | 执行后的 HP、最大 HP、金币、卡组必须等于摘要的节点末状态（`recorded_outcome`） |
 | `reward` | 节点末状态去掉所选的牌，按记录发放候选牌 | 记录的选牌，或都没选时的跳过 | 同上 |
 | `map` | 节点末状态，位于该节点 | 记录路线上的下一个节点 | 标签必须是当前合法的移动；不执行移动（`legal_label`） |
 | `ancient` | 节点之前的状态，进入远古之民事件，按记录给出选项 | 记录选中的选项 | 界面上的选项必须与记录一致；不执行选择（`legal_label`） |
 | `event` | 节点之前的状态，进入记录的普通事件，由游戏按这一局的 seed 再生成 | 记录的每一步选项，以及选项引出的选牌（按记录的删除、附魔、升级、变化目标） | 每一步必须是界面上的选项；事件结束时的变量必须等于摘要所记；执行后的 HP、最大 HP、金币、卡组、遗物、药水必须等于节点末状态（`recorded_outcome`） |
+| `claim` | 节点末状态去掉记录为已领取的遗物、金币、药水和所选的牌；奖励界面上放着记录的全部遗物、金币、药水和选牌候选 | 按“遗物、金币、药水”的固定顺序逐个领取 | 界面上的奖励必须与记录一致；领完后的 HP、最大 HP、金币、卡组、遗物、药水必须等于选牌锚点的起始状态（`recorded_outcome`） |
+| `pick` | 节点末状态去掉所选的牌和记录为已领取的药水；奖励界面上放着选牌候选、记录的药水（领了的和没领的）和记录为“未选”的遗物 | 记录的选牌，然后领取记录为已领取的药水 | 界面上的奖励必须与记录一致；执行后的 HP、最大 HP、金币、卡组、遗物、药水必须等于节点末状态（`recorded_outcome`） |
 | `unclaimed` | 节点末状态，战后奖励界面上放着记录为“未选”的药水和遗物，没拿牌时再加上记录的选牌候选 | 离开奖励界面 | 界面上的奖励必须与记录一致；不执行离开（`legal_label`） |
 | `treasure` | 节点之前的状态，进入宝箱房；候选取摘要记录的单件遗物 | 开箱、领取／明确记录的跳过，以及有记录的后续选牌 | 原生发放开箱金币和取得效果；核对节点末状态；另一进程逐步重放 |
 | `shop` | 节点之前的状态，进入商店；库存由这一局自己的商店随机流重新抽出 | 记录的购买、删牌、用药和丢药，按一种游戏接受的顺序执行，最后是离开 | 抽出的库存必须逐格等于记录；执行后的 HP、最大 HP、金币、卡组、遗物、药水必须等于摘要的节点末状态（`recorded_outcome`） |
@@ -55,9 +58,11 @@ python3 -m spire_codex_data.sources --existing data/spire-codex --output data/sp
 
 ```bash
 python3 -m spire_codex_data.anchor run --manifest data/spire-codex/sources/manifest.json \
-  --output data/anchors --kinds rest reward map ancient shop event unclaimed treasure
+  --output data/anchors --kinds rest reward map ancient shop event unclaimed treasure claim pick
 python3 -m spire_codex_data.anchor run --manifest data/spire-codex/sources/manifest.json \
   --output data/anchors --kinds battle
+python3 -m spire_codex_data.anchor run --manifest data/spire-codex/sources/manifest.json \
+  --output data/anchors --kinds potion
 python3 -m spire_codex_data.anchor export --manifest data/spire-codex/sources/manifest.json --output data/anchors      # independent-training.jsonl.gz、combat-outcomes.jsonl.gz
 python3 -m model import-independent data/anchors/independent-training.jsonl.gz --output data/bootstrap
 python3 -m model --device cuda init --config configs/rtxpro6000.json --output runs/init
@@ -86,6 +91,16 @@ BC 使用全部可训练样本，不再接受 `--holdout`，默认持续到手�
 
 本次宝箱固定流程及单选事件排除只改变训练过滤，现有完整候选足以判定，**不要求重新生成这些锚点**。`export` 跳过完全由控制器或单一合法动作构成的样本组；组内有真正后续选择时，连同环境操作证据保留。`import-independent` v6 再将控制器步骤移入环境证据，旧导入分片使用 `reindex` 更新计数。商店离开＋丢药、战斗结束回合＋丢药继续保留，详见 [策略与控制器](../model/README.md#策略与控制器)。
 
+## 必须用药的战斗
+
+求解器按自己的 `Smart` 策略几乎不用药水：同样的战斗、同样的药水栏，玩家在约两成的普通战、五成的精英战、三分之二的 Boss 战里用了药水，求解器是 1%、5%、9%。照它学出来的策略带着满栏药水打到死。`potion` 锚点给出用药的示范：
+
+- 每场战斗按锚点 id 抽签，一半入选；入选且开场药水栏不空的，从栏里随机取 1 到全部瓶数，指定为必须使用（`forced`）。自动触发的瓶中精灵不指定。抽签只取决于 id，重跑得到同样的指定。
+- 求解时这几瓶必须出现在整场战斗的路线里，其余药水禁用；每一步搜索都按栏里还欠的那几瓶重新下指令。何时用、对谁用由求解器决定。打完时有指定的药水没用上（离开了药水栏，或战斗先结束）的不通过。
+- 与 `battle` 一样在另一进程逐步重放。导出时，打赢的 `potion` 战斗取代同一场 `battle` 的动作（两者起点相同、标签不同）；打输的不取代。战斗结果标签仍只来自 `battle`。
+
+用不用药、用几瓶是随机指定的，不是玩家的记录。记录里的用药（`potion_used`）没有采用：它只说这个节点用了哪几瓶，而求解器在指定之下几乎总是开场就用，时机上并不比随机指定多出信息。生成版本为 `summary-potion-v1`，求解进程须支持 `potion_directives`。
+
 ## 商店
 
 摘要记录了一家商店卖什么（买走的，和离开时剩下的），没有价格，也没有购买顺序。
@@ -108,13 +123,35 @@ BC 使用全部可训练样本，不再接受 `--holdout`，默认持续到手�
 - 最后核对节点末状态。事件从别的来源取随机结果时对不上，隔离：例如给随机遗物的事件（遗物袋和奖励随机流）、给随机牌的事件、按牌组内部顺序挑牌的事件。
 - 事件里发生战斗的节点有多个房间，没有独立的边界，隔离。没有 `event_choices` 的事件（假商人、未做选择的事件）不产生样本。
 
+## 领取战后奖励
+
+摘要记下了一个节点上哪些遗物和药水被领取（`was_picked`）、金币增加了多少，但没有领取的先后。`claim` 锚点把这些领取补成样本：奖励界面按记录摆出全部奖励（金币、遗物、药水、选牌候选都在），按“遗物、金币、药水”的固定顺序领取，每一步一行，标签来源是 `reconstructed_order`，不声称是历史顺序。领完之后界面上剩下的正是 `reward` 锚点的起点（选牌）或 `unclaimed` 锚点的界面（留下的东西）。
+
+记录只说节点上得到了什么，不说从哪里得到，所以只有能归到奖励界面的才用：
+
+- **金币**：与 `unclaimed` 相同，节点只有一个金币来源且增量为正；界面上显示的金币就是记录的增量。
+- **药水**：节点至多记录一瓶药水，并且没有别的途径得到药水（卡组里有炼制药水的牌、持有每场战斗给药水的遗物、或本节点领到的遗物取得时附带药水，都隔离，`reward_potion_source_unknown`）。本节点丢弃过药水时时点不明，隔离（`reward_potion_timing_unknown`）；用掉的药水视为在战斗中用掉。
+- **遗物**：只在精英战后、且只记录一件时使用（`reward_relic_source_unknown`）。
+- 领完后的状态必须等于记录：取得时再次改变 HP、金币或卡组的遗物对不上，隔离；药水栏已满而记录为领取的，界面上拿不了，隔离（`recorded_reward_not_legal`）。
+
+生成版本为 `summary-claim-v1`，引擎的 `rewards` 房间类型需要支持 `gold`。
+
+### 界面上还有药水或遗物时的选牌
+
+`reward` 锚点的界面上只有选牌候选，`claim` 锚点把药水放在选牌之前领。于是“选牌候选和药水同时在界面上”的状态只出现在两种样本里：接着领药水（`claim`），或什么都不拿就离开（`unclaimed`，玩家既没拿牌也没拿药水）。`pick` 锚点补上“这时拿牌”：
+
+- **留下的药水或遗物**：游戏只在奖励被留下时把它记为“未选”，所以拿牌的那一刻它一定在界面上。这一步是历史状态上的历史选择（`historical_choice`），常见于药水栏已满、药水拿不了的时候。
+- **领取了的药水**：记录没有先后。`pick` 先拿牌、再领药水，两步都标为 `reconstructed_order`；`claim` 是另一种顺序。遗物和金币仍按 `claim` 的顺序先领，不在 `pick` 的界面上。
+
+只有拿了牌、且界面上有药水或留下的遗物时才有 `pick` 锚点；奖励能否归到奖励界面沿用 `claim` 的条件，拿牌触发遗物时的处理沿用 `reward`。生成版本为 `summary-pick-v1`。
+
 ## 留在奖励界面上的奖励
 
-战后奖励的领取顺序摘要里没有，所以不导出“先拿哪个”。能确定的是最后一步：游戏只在奖励被留下时把它记为“未选”，因此离开奖励界面那一刻界面上还有什么是已知的。`unclaimed` 锚点在节点末状态上放出这些药水和遗物；记录里没有拿牌时，选牌候选也还在界面上。标签是离开。药水栏满时，合法动作里有丢弃和可用的药水，不能直接拿。界面上的东西都拿不了、只能离开时（例如带着 Sozu 留下的药水）没有可学的选择，锚点记为 `single_action`，不出样本。
+战后奖励的领取顺序摘要里没有。不依赖顺序就能确定的是最后一步：游戏只在奖励被留下时把它记为“未选”，因此离开奖励界面那一刻界面上还有什么是已知的。`unclaimed` 锚点在节点末状态上放出这些药水和遗物；记录里没有拿牌时，选牌候选也还在界面上。标签是离开。药水栏满时，合法动作里有丢弃和可用的药水，不能直接拿。界面上的东西都拿不了、只能离开时（例如带着 Sozu 留下的药水）没有可学的选择，锚点记为 `single_action`，不出样本。
 
 - 金币留在界面上不会被记录：节点的金币增量为零时隔离（`gold_reward_unsettled`）。有其它金币来源也不能由正增量证明金币全领完：额外金币奖励、入场／加牌给钱的遗物、取得即给钱的遗物、战斗中给钱的牌、失窃金币返还等隔离（`gold_reward_multiple_sources`）。
 - 候选牌多于四张（多组奖励）、没拿牌而界面上有替代选项、同一个奖励被记了两次时隔离。
-- 没拿牌且还有未领药水／遗物时，只保留完整的 `unclaimed` 组；旧 `reward` 的不完整跳过帧以 `covered_by_unclaimed_reward_group` 隔离，即使本次只请求生成 `reward`。其它已有 `reward` 锚点仍假设其它奖励已在选牌之前领取。
+- 没拿牌且还有未领药水／遗物时，只保留完整的 `unclaimed` 组；旧 `reward` 的不完整跳过帧以 `covered_by_unclaimed_reward_group` 隔离，即使本次只请求生成 `reward`。其它已有 `reward` 锚点仍假设其它奖励已在选牌之前领取；界面上还有药水或留下的遗物时的选牌由 `pick` 给出。
 
 ## 宝箱
 
@@ -148,7 +185,7 @@ python3 -m spire_codex_data.map_ambiguity data/spire-codex --output data/anchors
 - **营火**：一个节点有多个选项、或选项的后续选择摘要里没有记录（如烹饪）时隔离。结果核对不比较遗物，挖掘这类给随机遗物的选项只保证标签正确。
 - **远古之民**只导出选哪个选项这一步；遗物随后要求的选牌等摘要里没有。
 - **事件选项里引用的整段描述不进观察**。选项显示的数值和内容名（代价、数量、哪张牌、哪瓶药水）随帧导出；选项文本里嵌入的另一段描述（如茶艺大师选项里遗物的效果说明）和对不上唯一内容的名字没有。
-- **多项战后奖励的领取顺序没有恢复**。可证明的子集为离开奖励界面、事件内的单项奖励和原生固定顺序的宝箱；旧选牌锚点仍假设其它奖励已先领取。
+- **多项战后奖励的领取顺序没有恢复**。离开奖励界面、事件内的单项奖励和原生固定顺序的宝箱不依赖顺序；`claim` 的领取步骤按固定顺序重建，`pick` 再给出“先拿牌、后领药水”的另一种顺序；`reward` 选牌锚点仍假设其它奖励已先领取。
 
 ## 测试
 

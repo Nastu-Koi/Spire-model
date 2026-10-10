@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <AssemblyName>RunRecorder</AssemblyName>
-    <Version>0.5.10</Version>
+    <Version>0.5.11</Version>
     <Nullable>annotations</Nullable>
     <DebugType>embedded</DebugType>
     <EmbedAllSources>true</EmbedAllSources>

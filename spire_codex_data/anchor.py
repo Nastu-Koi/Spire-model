@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import time
 
 from combat_outcome.data import SCHEMA as OUTCOME_SCHEMA
@@ -37,9 +38,13 @@ from .state_rules import COMBAT, complete, props_values
 
 SCHEMA = 'spire-independent-decisions-v1'
 VERSION = 'summary-anchor-samples-v3'
-KIND_VERSIONS = {'battle': 'summary-battle-refresh-v1'}
+KIND_VERSIONS = {'battle': 'summary-battle-refresh-v1', 'claim': 'summary-claim-v1', 'pick': 'summary-pick-v1',
+                 'potion': 'summary-potion-v1'}
 INITIALIZATION = 'summary-anchor-v1'
-KINDS = ('battle', 'rest', 'reward', 'map', 'ancient', 'shop', 'event', 'unclaimed', 'treasure')
+KINDS = ('battle', 'rest', 'reward', 'map', 'ancient', 'shop', 'event', 'unclaimed', 'treasure', 'claim', 'pick',
+         'potion')
+# Kinds the solver fights.
+FIGHTS = ('battle', 'potion')
 # A recorded offer may carry fields written by recorder mods; only these describe the card.
 CARD_KEYS = ('id', 'current_upgrade_level', 'enchantment', 'props')
 POTION_SLOTS = {'RELIC.POTION_BELT': 2, 'RELIC.ALCHEMICAL_COFFER': 4, 'RELIC.PHIAL_HOLSTER': 1}
@@ -216,6 +221,36 @@ def offered(choice):
     return {k: deepcopy(choice['card'][k]) for k in CARD_KEYS if k in choice['card']}
 
 
+# A potion the game uses by itself cannot be asked for.
+AUTOMATIC_POTIONS = {'POTION.FAIRY_IN_A_BOTTLE'}
+
+
+def forced_potions(fight, state):
+    """The potions the solver must use when a fight is fought again as a potion anchor.
+
+    The solver hardly ever finds a potion worth using, so its fights show none used. One
+    fight in two, drawn by the fight's id, is fought again with a random number of the
+    potions in the belt at its start, at least one, each of which the solver must use."""
+    draw = random.Random(fight)
+    belt = sorted(p for p in (state or {}).get('potions', []) if p not in AUTOMATIC_POTIONS)
+    if draw.random() < 0.5 or not belt:
+        return []
+    return sorted(draw.sample(belt, draw.randint(1, len(belt))))
+
+
+def before_pick(state, picked, stats):
+    """Take the picked card back out of a node-end state; how many cards that removes.
+
+    A relic can add a second copy of the picked card: the summary lists both as gained,
+    and neither was in the deck before the pick."""
+    size = len(state['deck'])
+    for card in picked:
+        copies = sum(c['id'] == card['id'] for c in stats.get('cards_gained', []))
+        for _ in range(max(1, copies)):
+            state['deck'].remove(find_card(state['deck'], card))
+    return size - len(state['deck'])
+
+
 def plan(run, key, states, info, kinds):
     """Every anchor of a run with the ledger state it starts from, or why it has none."""
     suspect = set(info['suspect_card_ids'])
@@ -235,6 +270,9 @@ def plan(run, key, states, info, kinds):
                     before=global_floor, room=dict(type='combat', encounter=room['model_id'].split('.')[-1]),
                     encounter=room['model_id'], room_type=room['room_type'],
                     source_damage=stats.get('damage_taken'), source_turns=room.get('turns_taken')))
+                forced = forced_potions(found[-1]['id'], s['start']) if len(rooms) == 1 else []
+                if forced:
+                    found.append(dict(found[-1], kind='potion', id=found[-1]['id'] + '-potion', forced=forced))
         single = len(rooms) == 1
         if rooms[0]['room_type'] == 'rest_site' and stats.get('rest_site_choices'):
             found.append(dict(base, kind='rest', id=f'{key}-a{act:02d}f{floor:02d}-rest', state='start',
@@ -256,6 +294,19 @@ def plan(run, key, states, info, kinds):
                 before=global_floor + 1, offer_size=len(choices), gold_gained=stats.get('gold_gained', 0),
                 room=dict(type='rewards', **left, cards=[] if any(c.get('was_picked') for c in choices)
                           else [offered(c) for c in choices])))
+        if any(r['room_type'] in COMBAT for r in rooms):
+            # Taking the relic, the gold and the potion of a fight's reward screen, before
+            # the card choice the reward anchor starts from.
+            found.append(dict(base, kind='claim', id=f'{key}-a{act:02d}f{floor:02d}-claim', state='end',
+                before=global_floor + 1, offer_size=len(stats.get('card_choices', []))))
+        if any(r['room_type'] in COMBAT for r in rooms) and (stats.get('potion_choices') or left['relics']) \
+                and any(c.get('was_picked') for c in stats.get('card_choices', [])):
+            # The card choice once more, with the fight's potion or a relic that was left
+            # still on the screen: the reward anchor shows the card offer alone.
+            choices = stats['card_choices']
+            found.append(dict(base, kind='pick', id=f'{key}-a{act:02d}f{floor:02d}-pick', state='end',
+                before=global_floor + 1, picked=[offered(c) for c in choices if c.get('was_picked')],
+                offer_size=len(choices)))
         offer = stats.get('ancient_choice') or []
         if node['map_point_type'] == 'ancient' and offer and str(rooms[0].get('model_id', '')).startswith('EVENT.'):
             # An ancient is the act's start point whatever route follows it.
@@ -333,6 +384,30 @@ def plan(run, key, states, info, kinds):
                     anchor['upgraded_enchantments'] = [
                         (json.loads(x)['enchantment'] or {}).get('id') for x in after
                         if anchor['upgraded'] and json.loads(x)['id'] == anchor['upgraded'][0]]
+                if anchor['kind'] == 'claim':
+                    choices = stats.get('card_choices', [])
+                    picked = [offered(c) for c in choices if c.get('was_picked')]
+                    if anchor['offer_size'] not in (0, 3, 4) or len(picked) > 1:
+                        raise ValueError('multiple_card_rewards')
+                    anchor['claims'], shown = rewards.claimed(node, s['start'], state)
+                    anchor['room'] = dict(type='rewards', gold=anchor['claims']['gold'], **shown,
+                                          cards=[offered(c) for c in choices])
+                    # The screen is entered before anything on it is taken, the card included.
+                    anchor['pending'] = before_pick(state, picked, stats)
+                    # What the reward anchor starts from: every free reward taken, no card yet.
+                    anchor['expected'] = recorded.expected_end(state)
+                    for relic in anchor['claims']['relics']:
+                        owned = [r for r in state['relics'] if r['id'] == relic]
+                        if len(owned) != 1:
+                            raise ValueError('claimed_reward_not_held:' + relic)
+                        state['relics'].remove(owned[0])
+                    for potion in anchor['claims']['potions']:
+                        if potion not in state['potions']:
+                            raise ValueError('claimed_reward_not_held:' + potion)
+                        state['potions'].remove(potion)
+                    state['gold'] -= anchor['claims']['gold']
+                    if state['gold'] < 0:
+                        raise ValueError('claimed_reward_not_held:gold')
                 if anchor['kind'] == 'reward':
                     # One native offer holds three cards, four with an extra-choice relic;
                     # a longer list is several offers that the summary does not separate.
@@ -343,13 +418,22 @@ def plan(run, key, states, info, kinds):
                         # Do not teach it again with the other visible rewards erased.
                         raise ValueError('covered_by_unclaimed_reward_group')
                     anchor['expected'] = expected_end(state, None)
-                    for card in anchor['picked']:
-                        # A relic can add a second copy of the picked card: the summary
-                        # lists both as gained, and neither was in the deck before the pick.
-                        copies = sum(c['id'] == card['id'] for c in stats.get('cards_gained', []))
-                        for _ in range(max(1, copies)):
-                            state['deck'].remove(find_card(state['deck'], card))
-                    anchor['pending'] = len(s[anchor['state']]['deck']) - len(state['deck'])
+                    anchor['pending'] = before_pick(state, anchor['picked'], stats)
+                if anchor['kind'] == 'pick':
+                    if anchor['offer_size'] not in (3, 4) or len(anchor['picked']) > 1:
+                        raise ValueError('multiple_card_rewards')
+                    claims, shown = rewards.claimed(node, s['start'], state)
+                    # The relic and the gold are taken before the card, as the claim anchor
+                    # takes them. The potion follows the card here and precedes it there.
+                    anchor['later'] = claims['potions']
+                    anchor['room'] = dict(type='rewards', potions=shown['potions'], relics=left['relics'],
+                                          cards=[offered(c) for c in stats['card_choices']])
+                    anchor['expected'] = recorded.expected_end(state)
+                    anchor['pending'] = before_pick(state, anchor['picked'], stats)
+                    for potion in anchor['later']:
+                        if potion not in state['potions']:
+                            raise ValueError('claimed_reward_not_held:' + potion)
+                        state['potions'].remove(potion)
                 if any(c['id'] in suspect for c in state['deck']):
                     raise ValueError('unresolved_final_card_validation:' + ','.join(sorted(suspect)))
                 anchor['ledger'] = state
@@ -504,17 +588,30 @@ WORKERS = dict(battle=16, choice=16)
 
 
 def play_battle(shared, second, save, anchor, budgets):
-    """The solver fights the battle on one process of the run; the other repeats it."""
+    """The solver fights the battle on one process of the run; the other repeats it.
+
+    A potion anchor names potions of the belt: the solver must use each of them at some
+    point of the fight and uses no other. When and on whom is its own choice."""
     records = []
     budget_ms = budgets['elite_budget_ms' if anchor['room_type'] == 'elite' else 'budget_ms']
     engine, frame = shared.enter(save, anchor)
     contract, entry_hp = deepcopy(frame['contract']), player(frame)['hp']
+    forced = Counter(anchor.get('forced', []))
     while in_combat(engine, frame):
         if len(records) >= 1000:
             raise TimeoutError('solver_step_limit')
         before = frame
-        reply = engine.step(frame, budget_ms=budget_ms, boss_budget_ms=budgets['boss_budget_ms'], potions=True,
-                            reuse_turn_plan=True)
+        potions = dict(potions=True)
+        if 'forced' in anchor:
+            # Every search is told again which of the potions still in the belt it owes.
+            owed, slots = Counter(forced), []
+            for e in frame['public']['entities']:
+                if e.get('entity_type') == 'potion' and owed[e['content_id']] > 0:
+                    owed[e['content_id']] -= 1
+                    slots.append(dict(slot=e['slot'], potion=e['content_id'].split('.', 1)[1], directive='Force'))
+            potions = dict(potion_policy='Disabled', potion_directives=slots)
+        reply = engine.step(frame, budget_ms=budget_ms, boss_budget_ms=budgets['boss_budget_ms'],
+                            reuse_turn_plan=True, **potions)
         if reply.get('type') == 'solver_step':
             chosen = next(c for c in before['legal']['candidates'] if c['candidate_ref'] == reply['candidate_ref'])
             frame, actor = settle(engine, reply['frame']), 'combat_solver'
@@ -525,6 +622,9 @@ def play_battle(shared, second, save, anchor, budgets):
         else:
             raise ValueError('solver_failed:' + str(reply.get('message') or reply.get('type')))
         records.append(row(before, chosen, actor))
+        if chosen['verb'] == 'USE_POTION':
+            used = {e['ref']: e['content_id'] for e in before['public']['entities'] if e.get('entity_type') == 'potion'}
+            forced[used.get(chosen['source_refs'][0])] -= 1
     error = shared.native_error()
     if error:
         raise ValueError(error)
@@ -535,6 +635,9 @@ def play_battle(shared, second, save, anchor, budgets):
     else:
         # Winning the last fight ends the run: no frame follows, the run state still holds the HP.
         exit_hp = None if lost else installed_state(engine)['current_hp']
+    if not lost and +forced:
+        # The fight ended, or the potion left the belt, before it was used.
+        raise ValueError('forced_potion_not_used:' + ','.join(sorted((+forced).elements())))
     replay(second, save, anchor, records, final)
     return dict(records=records, contract=contract, outcome='loss' if lost else 'win', entry_hp=entry_hp,
                 exit_hp=exit_hp)
@@ -586,16 +689,33 @@ def rest_choice(anchor):
     return choose
 
 
+def take(frame, content):
+    """The candidate that takes the named reward off the reward screen."""
+    refs = {e['ref'] for e in frame['public']['entities']
+            if e.get('entity_type') == 'reward' and e['content_id'] == content}
+    takes = [c for c in frame['legal']['candidates'] if c['verb'] == 'TAKE_REWARD' and c['source_refs'][0] in refs]
+    if not takes:
+        raise ValueError('recorded_reward_not_legal:' + content)
+    return takes[0]
+
+
 def reward_choice(anchor):
-    done = [False]
+    """The recorded card, or leaving when none was taken; then what a pick anchor takes
+    after its card."""
+    room, later, done = anchor['room'], list(anchor.get('later', [])), [False]
 
     def choose(frame):
-        if done[0] or frame['public']['phase'] != 'rewards':
+        if frame['public']['phase'] != 'rewards':
             return None
+        if done[0]:
+            return take(frame, later.pop(0)) if later else None
         candidates = frame['legal']['candidates']
         takes = [c for c in candidates if c['verb'] == 'TAKE_CARD_REWARD']
         shown = Counter(card_key(entity(frame, c)) for c in takes)
-        if shown != Counter(summary_key(c) for c in anchor['room']['cards']):
+        others = Counter(e['content_id'] for e in frame['public']['entities']
+                         if e.get('entity_type') == 'reward' and e['content_id'] != 'CardReward')
+        if shown != Counter(summary_key(c) for c in room['cards']) \
+                or others != Counter(room.get('potions', []) + room.get('relics', [])):
             raise ValueError('native_offer_differs_from_record')
         done[0] = True
         if anchor['picked']:
@@ -855,6 +975,47 @@ def play_unclaimed(shared, save, anchor):
                 state_sources=['recorded_unclaimed_group', 'single_gold_source'])
 
 
+def play_claim(shared, save, anchor):
+    """Taking what the record shows was taken from a fight's reward screen: the relic,
+    then the gold, then the potion, with everything the screen held still on it.
+
+    The order is this module's, not history's: the record keeps none. The state the
+    claims end in must be the one the card choice of the node starts from, so a relic
+    whose pickup changes the state again, or gold the game pays differently from what
+    the screen shows, does not pass.
+    """
+    room, claims = anchor['room'], anchor['claims']
+    engine, frame = shared.enter(save, anchor)
+    if frame['public']['phase'] != 'rewards':
+        raise ValueError('reward_screen_not_shown')
+    contract, records = deepcopy(frame['contract']), []
+    offer = lambda: [e for e in frame['public']['entities'] if e.get('entity_type') == 'reward']
+    shown = Counter(e['content_id'] for e in offer() if e['content_id'] != 'CardReward')
+    cards = Counter(card_key(entity(frame, c)) for c in frame['legal']['candidates'] if c['verb'] == 'TAKE_CARD_REWARD')
+    if shown != Counter(room['potions'] + room['relics'] + ['GoldReward']) \
+            or cards != Counter(summary_key(c) for c in room['cards']):
+        raise ValueError('native_offer_differs_from_record')
+    for content in claims['relics'] + ['GoldReward'] + claims['potions']:
+        if frame is None or frame['boundary'] != 'decision' or frame['public']['phase'] != 'rewards':
+            raise ValueError('claim_opens_another_choice')
+        chosen = take(frame, content)
+        records.append(dict(row(frame, chosen, 'historical_noncombat'), coverage=dict(
+            state='summary_anchor', options='complete_native', label='reconstructed_order')))
+        frame = advance(engine, frame, chosen)
+    if frame is not None and frame['boundary'] == 'decision' and frame['public']['phase'] not in ('rewards', 'map'):
+        raise ValueError('claim_opens_another_choice')
+    actual = recorded.end_state(installed_state(engine))
+    wrong = sorted(k for k in anchor['expected'] if actual[k] != anchor['expected'][k])
+    if wrong:
+        raise ValueError('outcome_differs_from_record:' + ','.join(wrong))
+    error = shared.native_error()
+    if error:
+        raise ValueError(error)
+    return dict(records=records, contract=contract, outcome='matched_record',
+                state_sources=['recorded_reward_claims', 'single_gold_source'],
+                recovery=dict(order='relic_gold_potion', claims=deepcopy(claims)))
+
+
 def play_event(shared, save, anchor):
     """The recorded choices of an event the game generates again for this run.
 
@@ -932,7 +1093,15 @@ def play_event(shared, save, anchor):
 
 
 def play_choice(shared, save, anchor):
+    """The recorded choice of a campfire or of a fight's card offer.
+
+    A pick anchor is the card offer with the fight's potion, or a relic that was left,
+    still on the screen. A reward that was left was there whenever the card was taken. A
+    potion that was taken is taken after the card: the record keeps no order, the claim
+    anchor shows the other one, and both are marked as reconstructed.
+    """
     choose = (rest_choice if anchor['kind'] == 'rest' else reward_choice)(anchor)
+    label = 'reconstructed_order' if anchor.get('later') else 'historical_choice'
     records = []
     engine, frame = shared.enter(save, anchor)
     contract = deepcopy(frame['contract'])
@@ -943,16 +1112,14 @@ def play_choice(shared, save, anchor):
         if len(records) >= 20:
             raise TimeoutError('choice_step_limit')
         records.append(dict(row(frame, chosen, 'historical_noncombat'),
-            coverage=dict(state='summary_anchor', options='complete_native', label='historical_choice')))
+            coverage=dict(state='summary_anchor', options='complete_native', label=label)))
         frame = advance(engine, frame, chosen)
     if not any(len(r['options']) > 1 for r in records):
         raise ValueError('no_branching_decision')
     # The recorded node result checks the label against history, not only its legality.
-    after, expected = installed_state(engine), anchor['expected']
-    actual = dict(hp=after['current_hp'], max_hp=after['max_hp'], gold=after['gold'],
-                  deck=sorted(signature(c) for c in after['deck']))
+    actual, expected = recorded.end_state(installed_state(engine)), anchor['expected']
     wrong = sorted(k for k in expected if actual[k] != expected[k])
-    if wrong == ['gold'] and anchor['kind'] == 'reward' and 'gold_from_pick' not in anchor:
+    if wrong == ['gold'] and anchor['kind'] in ('reward', 'pick') and 'gold_from_pick' not in anchor:
         # Taking the card paid gold (a relic that pays for every card added). The
         # node-end gold already holds that payment, so the gold before the pick is
         # lower by exactly what the engine just paid; try once from there.
@@ -967,13 +1134,17 @@ def play_choice(shared, save, anchor):
     result = dict(records=records, contract=contract, outcome='matched_record')
     if anchor.get('gold_from_pick'):
         result['gold_from_pick'] = anchor['gold_from_pick']
+    if anchor['kind'] == 'pick':
+        result.update(state_sources=['recorded_reward_claims', 'single_gold_source'],
+                      recovery=dict(order='card_potion', claims=dict(potions=list(anchor['later']))))
     return result
 
 
 # How a sample was checked, by anchor kind.
-VERIFIED_BY = dict(battle='native_replay', rest='recorded_outcome', reward='recorded_outcome',
+VERIFIED_BY = dict(battle='native_replay', potion='native_replay', rest='recorded_outcome', reward='recorded_outcome',
                    map='legal_label', ancient='legal_label', shop='recorded_outcome', event='recorded_outcome',
-                   unclaimed='legal_label', treasure='recorded_outcome')
+                   unclaimed='legal_label', treasure='recorded_outcome', claim='recorded_outcome',
+                   pick='recorded_outcome')
 
 
 def work(task):
@@ -1013,7 +1184,7 @@ def process_kind(source, directory, shared, second, kind, budgets=BUDGETS, reuse
         raise ValueError('source_checksum_changed')
     # Budgets only shape solver battles; the other kinds never search.
     identity = dict(version=KIND_VERSIONS.get(kind, VERSION), source_sha256=digest, kind=kind,
-                    **shared.build_identity, **(budgets if kind == 'battle' else {}))
+                    **shared.build_identity, **(budgets if kind in FIGHTS else {}))
     target = directory / 'runs' / f'{key}.{kind}.json'
     if target.exists():
         done = read(target)
@@ -1038,7 +1209,7 @@ def process_kind(source, directory, shared, second, kind, budgets=BUDGETS, reuse
             started = time.monotonic()
             report = {k: v for k, v in anchor.items()
                       if k not in ('ledger', 'room', 'expected', 'route', 'upgraded_enchantments', 'stock',
-                                   'choices', 'changes', 'reward_record')}
+                                   'choices', 'changes', 'reward_record', 'claims')}
             ledger = anchor.pop('ledger', None)
             known = exits.get(anchor['act'])
             if ledger is not None and kind == 'map' and known and known[anchor['floor'] - 1] < 2:
@@ -1046,7 +1217,7 @@ def process_kind(source, directory, shared, second, kind, budgets=BUDGETS, reuse
                 report.update(status='verified', outcome='single_move', rows=0, map_position='recorded_route')
             elif ledger is not None:
                 try:
-                    state, evidence = complete(ledger, run, anchor['before'], anchor['id'], combat=kind == 'battle',
+                    state, evidence = complete(ledger, run, anchor['before'], anchor['id'], combat=kind in FIGHTS,
                                                travel=kind == 'map', pending=anchor.get('pending', 0))
                     save = build_save(base['save'], state, run, anchor['act'], anchor['floor'], node, anchor['id'])
                     if anchor['kind'] == 'shop':
@@ -1067,6 +1238,8 @@ def process_kind(source, directory, shared, second, kind, budgets=BUDGETS, reuse
                         else:
                             result = play_battle(shared, second, save, anchor, budgets)
                             result['recovery'] = dict(mode='solver_missing_previous_battle')
+                    elif anchor['kind'] == 'potion':
+                        result = play_battle(shared, second, save, anchor, budgets)
                     elif anchor['kind'] == 'map':
                         result = play_map(shared, save, anchor)
                     elif anchor['kind'] == 'ancient':
@@ -1079,6 +1252,8 @@ def process_kind(source, directory, shared, second, kind, budgets=BUDGETS, reuse
                         result = play_unclaimed(shared, save, anchor)
                     elif anchor['kind'] == 'treasure':
                         result = play_treasure(shared, second, save, anchor)
+                    elif anchor['kind'] == 'claim':
+                        result = play_claim(shared, save, anchor)
                     else:
                         result = play_choice(shared, save, anchor)
                     records = result.pop('records')
@@ -1093,7 +1268,7 @@ def process_kind(source, directory, shared, second, kind, budgets=BUDGETS, reuse
                         item = {k: record[k] for k in ('schema', 'observation', 'options', 'label', 'coverage', 'actor')}
                         item['metadata'] = dict(run_hash=key, character=character, ascension=run['ascension'],
                             game_version='v0.111.0', independent=True, bc_only=True,
-                            native_replay_verified=kind in ('battle', 'treasure', 'shop'), verified_by=VERIFIED_BY[kind],
+                            native_replay_verified=kind in FIGHTS + ('treasure', 'shop'), verified_by=VERIFIED_BY[kind],
                             teacher_visibility='privileged' if solver else 'recorded_public',
                             label_source='combat_solver' if solver else record['coverage']['label'],
                             routing=record['routing'], contract=contract, sample_group=anchor['id'],
@@ -1209,6 +1384,11 @@ def export_report(task):
     verified = {a['id']: a for a in report['anchors'] if a['status'] == 'verified'}
     bosses = act_bosses(read(source))
     battles, kept, unnamed = {}, [], Counter()
+    # A fight won again as a potion anchor starts from the same state with other labels:
+    # its actions stand for those of the fight it repeats, whose outcome is still kept.
+    again = path.with_name(path.name.replace('.battle.json', '.potion.json'))
+    repeated = {a['id'][:-len('-potion')] for a in read(again)['anchors']
+                if a['status'] == 'verified' and a['outcome'] != 'loss'} if report['kind'] == 'battle' and again.exists() else set()
     with gzip.open(samples, 'rt', encoding='utf-8') as rows:
         for line in rows:
             item = json.loads(line)
@@ -1219,7 +1399,7 @@ def export_report(task):
                 continue
             if report['kind'] == 'battle':
                 battles.setdefault(anchor['id'], []).append(item)
-            if anchor['outcome'] != 'loss':
+            if anchor['outcome'] != 'loss' and anchor['id'] not in repeated:
                 if not shows_bosses(item, bosses):
                     unnamed[item['metadata']['anchor_kind']] += 1
                     continue
