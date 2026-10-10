@@ -12,10 +12,12 @@ halves: sampled decisions from the run buffer, weighted by advantage, and superv
 samples (demonstrations with the solver's labels) with the weights their index gives
 them. Both halves carry half of the update's loss whatever their sizes are.
 
-- **Weights.** In a half-batch of n sampled decisions with index weights g_i (every
-  character and phase group of the buffer weighs the same, `data.group_weights`), the
-  weight of decision i is g_i · exp(A_i/β) · Σg / Σ(g·exp(A/β)): the multipliers are
-  normalized within the batch, so the half's total weight does not depend on β.
+- **Weights.** In a half-batch of n sampled decisions with share weights g_i (every
+  character and phase group of the buffer weighs the same, as the groups of
+  demonstrations do, up to a cap on what one decision of a small group may weigh:
+  `buffer_weights`), the weight of decision i is g_i · exp(A_i/β) · Σg / Σ(g·exp(A/β)):
+  the multipliers are normalized within the batch, so the half's total weight does
+  not depend on β.
 - **β.** Chosen for each batch as the smallest β in [`low`, `high`] at which the
   effective sample size of the multipliers, (Σw)²/Σw² with w = exp(A/β), is at least
   `share` of n. The effective size grows with β, so a bisection on log β finds it. The
@@ -32,7 +34,7 @@ import math
 from dataclasses import dataclass, replace
 
 from . import advantage
-from .data import RunShards, extent, split_held_out
+from .data import RunShards, extent, group_weights, split_held_out
 from .loader import stream
 from .protocol import ProtocolError
 
@@ -45,6 +47,38 @@ ESS_SHARE = 0.3
 # within a factor of about 1.5. At 100 the largest possible advantage moves a weight
 # by a few percent: the weights are those of behavior cloning.
 BETA_MIN, BETA_MAX = 0.1, 100.0
+# What one sampled decision may weigh before its advantage, in even shares of the
+# buffer (1 / its decisions). Demonstrations have tens of thousands of macro-actions in
+# their smallest group; a round has phases that occur a few times in a thousand runs,
+# and an equal share for such a group would hand a single decision the weight of
+# several batches.
+WEIGHT_CAP = 10.0
+
+
+def buffer_weights(source_counts, cap=WEIGHT_CAP):
+    """The share weight of a sampled decision of every (character, phase, source) of
+    the buffer. Every group weighs the same, as `data.group_weights` has it, unless
+    its decisions would then weigh more than `cap` even shares each: so small a group
+    keeps `cap` even shares per decision, and the rest of its share goes to the other
+    groups, which may bring the next smallest over the cap in turn. Without a cap,
+    the plain rule."""
+    weights = group_weights(source_counts)
+    if not cap:
+        return weights
+    if cap < 1:
+        raise ValueError("The cap is in even shares of the buffer: at least one")
+    counts = {key: count for key, count in source_counts.items() if count}
+    limit = cap / sum(counts.values())
+    capped = set()
+    while True:
+        over = {key for key, weight in weights.items() if key not in capped and weight > limit * (1 + 1e-9)}
+        if not over:
+            return weights
+        capped |= over
+        rest = {key: count for key, count in counts.items() if key not in capped}
+        left = 1.0 - limit * sum(counts[key] for key in capped)
+        weights = {key: limit for key in capped}
+        weights.update({key: left / (len(rest) * count) for key, count in rest.items()})
 
 
 def multipliers(advantages, beta):
@@ -223,7 +257,8 @@ def supervised_loss(sources):
     return sum(entry["loss"] * entry["weight"] for entry in rest) / weight if weight else None
 
 
-def update(learner, rounds, supervised, *, temperature=None, updates=None, window_shards=8, on_update=None):
+def update(learner, rounds, supervised, *, temperature=None, updates=None, window_shards=8, on_update=None,
+           weight_cap=WEIGHT_CAP):
     """One advantage-weighted pass of `learner`: half of every update the sampled
     decisions of `rounds` (the buffer's round directories, each with its advantages),
     half the supervised data of the `supervised` directories (demonstrations first,
@@ -246,11 +281,16 @@ def update(learner, rounds, supervised, *, temperature=None, updates=None, windo
     total, scale = theirs.macros, ours.macros / theirs.macros
     halves = replace(config, logical_batch_size=half, loader_feeders=max(1, config.loader_feeders // 2))
 
-    def batches(shards):
-        return lambda: stream(shards, learner.vocabulary, halves, window_shards=window_shards, shuffle=True,
-                              weights=shards.weights)
+    shares = buffer_weights(ours.source_counts, weight_cap)
+    capped = sorted("/".join(key[:2]) for key, weight in group_weights(ours.source_counts).items()
+                    if shares[key] < weight)
 
-    mixed = Mixed(batches(ours), batches(theirs), lambda batch: reweigh(batch, table, temperature, scale), updates)
+    def batches(shards, weights):
+        return lambda: stream(shards, learner.vocabulary, halves, window_shards=window_shards, shuffle=True,
+                              weights=weights)
+
+    mixed = Mixed(batches(ours, shares), batches(theirs, theirs.weights),
+                  lambda batch: reweigh(batch, table, temperature, scale), updates)
 
     def told(metrics):
         done = mixed.last
@@ -264,5 +304,5 @@ def update(learner, rounds, supervised, *, temperature=None, updates=None, windo
     metrics["awr"] = dict(
         mixed.summary(), awr_loss=metrics["sources"].get(SAMPLED, {}).get("loss"),
         supervised_loss=supervised_loss(metrics["sources"]), sampled=extent(ours), supervised=extent(theirs),
-        temperature=temperature.describe())
+        temperature=temperature.describe(), weight_cap=weight_cap or None, capped_groups=capped)
     return metrics

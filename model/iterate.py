@@ -101,6 +101,7 @@ class Settings:
     beta_min: float = awr.BETA_MIN
     beta_max: float = awr.BETA_MAX
     updates: str = "round"  # `round`, `buffer`, or a number of updates per iteration
+    weight_cap: float = awr.WEIGHT_CAP  # what a decision of a small group may weigh, in even shares; 0 for no cap
     window_shards: int = 8
     evaluate_every: int = 5
     eval_seeds: str | None = None  # the seed file of the evaluations; without it none is made
@@ -114,6 +115,8 @@ class Settings:
             raise ValueError("The advantage comes from the critic or from the return alone")
         if self.updates not in ("round", "buffer") and not (str(self.updates).isdigit() and int(self.updates) > 0):
             raise ValueError("Updates per iteration: `round`, `buffer` or a positive number")
+        if self.weight_cap and self.weight_cap < 1:
+            raise ValueError("The cap on a sampled decision's weight is in even shares: at least one, or 0 for none")
         if not 0 <= self.label_fraction <= 1:
             raise ValueError("The labelled share of a round's runs is between 0 and 1")
         self.temperature()
@@ -496,7 +499,7 @@ class Driver:
         started = time.monotonic()
         metrics = awr.update(
             learner, rounds, supervised, temperature=settings.temperature(), updates=updates,
-            window_shards=settings.window_shards,
+            window_shards=settings.window_shards, weight_cap=settings.weight_cap,
             on_update=lambda update: self.history.append_update(
                 update, round=iteration, stage="awr", policy_version=learner.policy_version))
         self.release()
@@ -508,6 +511,7 @@ class Driver:
             awr_loss=done["awr_loss"], supervised_loss=done["supervised_loss"], beta=done["beta"],
             beta_min=done["beta_min"], beta_max=done["beta_max"], effective_share=done["effective_share"],
             effective_share_min=done["effective_share_min"], temperature=done["temperature"],
+            capped_groups=done["capped_groups"],
             sampled=done["sampled"], labelled=done["supervised"], sources=metrics["sources"],
             grad_norm=metrics.get("grad_norm"), seconds=round(time.monotonic() - started, 1))
         critic = self.entry(iteration).get("critic")

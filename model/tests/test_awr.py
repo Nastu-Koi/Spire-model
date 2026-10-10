@@ -10,7 +10,7 @@ import pytest
 
 from model import advantage, awr
 from model.advantage import FILE, from_values, gae
-from model.data import RunShards, Sample, samples, split_held_out
+from model.data import RunShards, Sample, group_weights, samples, split_held_out
 from model.protocol import ProtocolError
 from model.tests import journeys
 
@@ -145,6 +145,38 @@ def item(run, index, weight, source="rollout"):
     return Sample(None, "Ironclad", run, weight, "map", 1, 0, source, index)
 
 
+def test_a_decision_of_a_small_group_of_the_buffer_weighs_no_more_than_the_cap():
+    def group(character, phase):
+        return character, phase, "rollout"
+
+    # A phase met twice in a round would give each of its decisions a sixth of the buffer's weight.
+    counts = {group("Ironclad", "map"): 1000, group("Ironclad", "shop"): 500, group("Silent", "bundle_select"): 2}
+    plain = awr.buffer_weights(counts, cap=0)
+    assert plain == group_weights(counts) and plain[group("Silent", "bundle_select")] == pytest.approx(1 / 6)
+    even = 1 / 1502
+    weights = awr.buffer_weights(counts)
+    assert weights[group("Silent", "bundle_select")] == pytest.approx(awr.WEIGHT_CAP * even)
+    # What it leaves of its share is the other groups', equally.
+    left = 1 - 2 * awr.WEIGHT_CAP * even
+    assert weights[group("Ironclad", "map")] == pytest.approx(left / 2 / 1000)
+    assert weights[group("Ironclad", "shop")] == pytest.approx(left / 2 / 500)
+    assert sum(weights[key] * count for key, count in counts.items()) == pytest.approx(1.0)
+    # Groups that can carry their share at the cap keep the plain rule.
+    even_groups = {group("Ironclad", "map"): 300, group("Silent", "map"): 100, group("Defect", "shop"): 50}
+    assert awr.buffer_weights(even_groups) == group_weights(even_groups)
+    # The share a capped group gives up may bring the next smallest over the cap in turn.
+    counts = {group("Ironclad", "map"): 1000, group("Ironclad", "event"): 40, group("Silent", "bundle_select"): 2}
+    limit = awr.WEIGHT_CAP / 1042
+    assert group_weights(counts)[group("Ironclad", "event")] < limit
+    weights = awr.buffer_weights(counts)
+    assert weights[group("Ironclad", "event")] == weights[group("Silent", "bundle_select")] == pytest.approx(limit)
+    assert weights[group("Ironclad", "map")] == pytest.approx((1 - 42 * limit) / 1000) and weights[group("Ironclad", "map")] < limit
+    assert sum(weights[key] * count for key, count in counts.items()) == pytest.approx(1.0)
+    assert awr.buffer_weights(counts, cap=1.0) == {key: pytest.approx(1 / 1042) for key in counts}
+    with pytest.raises(ValueError):
+        awr.buffer_weights(counts, cap=0.5)
+
+
 def test_a_samples_weight_is_its_share_weight_times_its_normalized_advantage_factor():
     # Two groups of the buffer with different share weights; advantages by (run, macro).
     items = [item("a", 1, 0.02), item("a", 3, 0.02), item("b", 1, 0.05), item("b", 5, 0.05)]
@@ -268,6 +300,8 @@ def test_an_update_is_half_weighted_decisions_of_the_buffer_and_half_supervised_
     assert done["supervised_loss"] == pytest.approx(metrics["sources"]["demonstration"]["loss"])
     assert (done["sampled"]["macros"], done["supervised"]["macros"]) == (ours.macros, theirs.macros)
     assert done["temperature"] == dict(rule="tuned", share=0.3, low=0.1, high=100.0)
+    # No group of this buffer is small enough to be held to the cap on a decision's share weight.
+    assert (done["weight_cap"], done["capped_groups"]) == (awr.WEIGHT_CAP, [])
     assert told[0]["awr_loss"] is not None and told[0]["supervised_loss"] is not None and told[0]["beta"] is not None
     json.dumps(told, allow_nan=False)
 
