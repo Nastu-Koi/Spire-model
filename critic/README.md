@@ -34,6 +34,7 @@ python -m critic.train runs/buffer --pretrained runs/critic/v1 --save runs/criti
 
 - `--checkpoint`：策略检查点，提供词表和（默认）主体初始权重；结构须与配置的 `model` 节一致（`backend`、`compile_blocks` 等运行时项除外）。
 - `--pretrained`：从已保存的 critic 继续，沿用其词表与配置，版本号加一；与 `--checkpoint` 二选一。
+- 训练范围：默认训练整个主体和头；`--train-blocks N` 只训练顶部 N 个全局层、最终 norm 和头，`--freeze-body` 只训练头（策略表示的线性探针）。不训练的参数不进优化器、不算梯度。
 - 批：按策略的桶与预算打包（`model.batch.collate`、`model.data.microbatches`），一个逻辑批 `logical_batch_size` 个决策，超出预算时拆成几份、梯度累加后更新一次；打包在 `loader_workers` 个 fork 出的进程里做。
 - 优化器照策略分组：Transformer 的 Attention／FFN 矩阵用 Muon，四张查找表（符号、字段名、两张关系偏置表）、头和其余张量用 AdamW，各有自己的学习率；线性预热 `warmup_updates` 次更新，之后线性衰减到最后一次更新为 0。
 - 损失：通关与过幕两个二元交叉熵之和，后者乘 `act_weight`。
@@ -46,7 +47,8 @@ python -m critic.train runs/buffer --pretrained runs/critic/v1 --save runs/criti
 | --- | --- |
 | `epochs`、`logical_batch_size`、`warmup_updates` | 轮数、每次更新的决策数、预热更新数 |
 | `init` | `checkpoint`／`random` |
-| `muon_lr`、`backbone_lr`、`embedding_lr`、`head_lr`、`weight_decay`、`max_grad_norm` | 各参数组学习率、权重衰减、梯度裁剪 |
+| `train_body`、`train_blocks` | 是否训练主体；只训练顶部几个全局层 |
+| `muon_lr`、`backbone_lr`、`embedding_lr`、`head_lr`、`weight_decay`、`max_grad_norm` | 各参数组学习率（`embedding_lr` 为 0 时冻结四张查找表）、权重衰减、梯度裁剪 |
 | `act_weight` | 过幕损失的权重 |
 | `token_buckets`、`action_buckets`、`token_budget`、`pair_budget`、`microbatch_size` | 打包的桶与预算 |
 | `precision`、`holdout`、`seed`、`loader_workers` | BF16／FP32、留出 seed 份额、随机种子、打包进程数 |

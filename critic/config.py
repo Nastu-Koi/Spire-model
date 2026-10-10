@@ -42,8 +42,9 @@ class TrainingConfig(Budgets):
     # "checkpoint": the encoder and global layers start from the policy checkpoint
     # that also supplies the vocabulary; "random": only the vocabulary is taken.
     init: str = "checkpoint"
-    # Muon for the Transformer matrices; AdamW for the lookup tables (`embedding_lr`),
-    # the two-logit head (`head_lr`) and the rest (`backbone_lr`), as for the policy.
+    # Muon for the Transformer matrices; AdamW for the lookup tables (`embedding_lr`,
+    # zero keeps them frozen), the two-logit head (`head_lr`) and the rest
+    # (`backbone_lr`), as for the policy.
     muon_lr: float = 2e-4
     muon_momentum: float = 0.95
     muon_ns_steps: int = 5
@@ -70,7 +71,7 @@ class TrainingConfig(Budgets):
             raise ValueError("Initialize from the checkpoint or at random")
         if min(self.epochs, self.logical_batch_size) < 1 or self.warmup_updates < 0:
             raise ValueError("Epochs and batch size must be positive, warmup nonnegative")
-        if (min(self.muon_lr, self.backbone_lr, self.embedding_lr, self.head_lr, self.max_grad_norm) <= 0
+        if (min(self.muon_lr, self.backbone_lr, self.head_lr, self.max_grad_norm) <= 0 or self.embedding_lr < 0
                 or not 0 <= self.muon_momentum < 1 or type(self.muon_ns_steps) is not int
                 or self.muon_ns_steps < 1):
             raise ValueError("Learning rates, gradient limit and Muon settings must be positive")

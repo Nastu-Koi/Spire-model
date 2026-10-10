@@ -80,20 +80,27 @@ def batches(rows, vocabulary, config):
         yield parts
 
 
+def tables_of(net):
+    return {id(module.weight) for module in net.body.modules() if isinstance(module, nn.Embedding)}
+
+
 def trainable(net, training):
     """(name, parameter) of what the settings let train: the head, and of the body all of
-    it, its top `train_blocks` global layers with the final norm, or nothing."""
-    layers = len(net.body.blocks)
+    it, its top `train_blocks` global layers with the final norm, or nothing; the lookup
+    tables stay frozen at `embedding_lr` zero."""
+    layers, tables = len(net.body.blocks), tables_of(net)
 
-    def wanted(name):
-        if name.startswith("head.") or (training.train_body and training.train_blocks is None):
+    def wanted(name, parameter):
+        if name.startswith("head."):
             return True
-        if not training.train_body:
+        if not training.train_body or (id(parameter) in tables and not training.embedding_lr):
             return False
+        if training.train_blocks is None:
+            return True
         return name.startswith("body.final_norm.") or (
             name.startswith("body.blocks.") and int(name.split(".")[2]) >= layers - training.train_blocks)
 
-    return [(name, parameter) for name, parameter in net.trainable() if wanted(name)]
+    return [(name, parameter) for name, parameter in net.trainable() if wanted(name, parameter)]
 
 
 def build_optimizer(net, training):
@@ -105,7 +112,7 @@ def build_optimizer(net, training):
         if isinstance(module, nn.Linear) and (".attention." in name or ".ffn." in name)
         and name.startswith(("blocks.", "encoder.local_blocks.", "encoder.field_block."))
     }
-    tables = {id(module.weight) for module in net.body.modules() if isinstance(module, nn.Embedding)}
+    tables = tables_of(net)
     matrices, groups = [], {}
     for name, parameter in trainable(net, training):
         if id(parameter) in muon_ids:
