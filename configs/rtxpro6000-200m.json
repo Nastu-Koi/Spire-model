@@ -12,7 +12,7 @@
         "field_size": 1024,
         "relation_size": 128,
         "backend": "sdpa",
-        "checkpoint_layers": false,
+        "checkpoint_layers": true,
         "compile_blocks": true,
         "qk_norm": true,
         "scaled_residual_init": true,
@@ -63,9 +63,9 @@
             512,
             1024
         ],
-        "token_budget": 65536,
+        "token_budget": 49152,
         "pair_budget": 16777216,
-        "loader_workers": 6,
-        "loader_feeders": 4
+        "loader_workers": 2,
+        "loader_feeders": 2
     }
 }
