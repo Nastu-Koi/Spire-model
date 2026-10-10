@@ -6,29 +6,19 @@ const state = {
   kind: "all", tab: "rounds", scope: "all", metric: "", metricOptions: "", expanded: new Set(),
   timer: null, controller: null, request: 0, listText: "", root: "", clock: 0, drawn: "",
 };
-const STATES = { starting: "正在启动", collecting: "采样中", updating: "训练更新中", running: "运行中", completed: "已完成", failed: "训练失败", interrupted: "已中断" };
-const ACTIVE = new Set(["starting", "collecting", "updating", "running"]);
+const STATES = { starting: "正在启动", updating: "训练更新中", running: "运行中", completed: "已完成", failed: "训练失败", interrupted: "已中断" };
+const ACTIVE = new Set(["starting", "updating", "running"]);
 const METRICS = {
-  loss: "训练损失", accuracy: "动作正确率", entropy: "策略熵", kl: "新旧策略 KL", kl_recent: "最近 8 批 KL 均值（停止判据）", demonstration_nll: "示范 NLL（PPO 更新所带的一批）", ppo_step: "PPO 步长系数", clip_fraction: "裁剪比例",
-  last_grad_norm: "梯度范数（裁剪前）", gradient_clip_fraction: "梯度裁剪比例", value_mse: "价值 MSE", value_rmse: "价值 RMSE",
-  value_explained_variance: "价值解释方差", old_replay_max_error: "旧策略重放最大误差",
-  old_replay_median_error: "旧策略重放误差中位数", old_replay_p99_error: "旧策略重放误差 99% 分位",
-  old_value_replay_p99_error: "旧价值重放误差 99% 分位", old_value_replay_max_error: "旧价值重放最大误差",
-  return_std: "回报标准差", value_std: "价值标准差", samples: "每次更新的宏动作数", weight: "逻辑批权重", loss_scale: "损失缩放",
-  validation_nll: "混合验证 NLL / 分支", a0_validation_nll: "A0 验证 NLL / 分支",
-  equal_character_win_rate: "五角色平均通关率", worst_character_win_rate: "最弱角色通关率",
-  equal_character_completion_rate: "五角色平均完成率", equal_character_mean_floor: "五角色平均到达楼层",
-  equal_character_mean_score: "五角色平均奖励", duration_seconds: "耗时（秒）",
+  loss: "训练损失", accuracy: "动作正确率", entropy: "策略熵",
+  last_grad_norm: "梯度范数（裁剪前）", gradient_clip_fraction: "梯度裁剪比例",
+  samples: "每次更新的宏动作数", weight: "逻辑批权重", loss_scale: "损失缩放",
+  validation_nll: "混合验证 NLL / 分支", a0_validation_nll: "A0 验证 NLL / 分支", duration_seconds: "耗时（秒）",
 };
 // Offered first, in this order; any other metric a log carries follows them.
-const CHOICES = {
-  bootstrap: ["entropy", "last_grad_norm", "gradient_clip_fraction"],
-  ppo: ["kl_recent", "demonstration_nll", "clip_fraction", "entropy", "value_mse", "value_rmse", "value_explained_variance", "last_grad_norm", "old_replay_median_error", "old_replay_p99_error", "old_replay_max_error", "return_std", "value_std"],
-};
-const CHARTED = { bootstrap: ["loss", "accuracy", "duration_seconds"], ppo: ["loss", "kl", "duration_seconds"] };
-const COUNTERS = new Set(["updates", "accuracy_correct", "accuracy_decisions", "early_stop"]);
+const CHOICES = ["entropy", "last_grad_norm", "gradient_clip_fraction"];
+const CHARTED = ["loss", "accuracy", "duration_seconds"];
+const COUNTERS = new Set(["updates", "accuracy_correct", "accuracy_decisions"]);
 const SMOOTH_STEPS = [1000, 500, 200, 100, 50, 20, 10];
-const ACT_NAMES = ["第一幕", "第二幕", "第三幕"];
 const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const count = (value) => isNumber(value) ? value : 0;
@@ -80,8 +70,7 @@ function remember(id) {
   try { localStorage.setItem("spire-monitor:" + id, $(id).value); } catch { /* a private window keeps nothing */ }
 }
 function recall() {
-  $("window").value = "20";
-  for (const id of ["range", "smooth", "scale", "window"]) {
+  for (const id of ["range", "smooth", "scale"]) {
     try {
       const value = localStorage.getItem("spire-monitor:" + id);
       if (value !== null && Array.from($(id).options).some((option) => option.value === value)) $(id).value = value;
@@ -98,7 +87,7 @@ function renderRuns() {
   const runs = filteredRuns();
   const signature = JSON.stringify([runs.map((run) => [run.id, run.kind, run.status.state, run.status.updates, run.status.round]), state.selected]);
   $("count-all").textContent = state.runs.length;
-  for (const kind of ["bootstrap", "ppo"]) $("count-" + kind).textContent = state.runs.filter((run) => run.kind === kind).length;
+  $("count-bootstrap").textContent = state.runs.filter((run) => run.kind === "bootstrap").length;
   if (signature === state.listText) return;
   state.listText = signature;
   $("run-list").replaceChildren();
@@ -111,7 +100,7 @@ function renderRuns() {
     const title = el("strong");
     title.append(el("i", "run-dot " + (run.status.state === "failed" ? "failed" : ACTIVE.has(run.status.state) ? "active" : "idle")), runLabel(run));
     const meta = el("span", "run-meta");
-    meta.append(el("span", "", run.kind === "bootstrap" ? "Bootstrap" : "PPO"), el("span", "", STATES[run.status.state] || "状态未知"));
+    meta.append(el("span", "", "Bootstrap"), el("span", "", STATES[run.status.state] || "状态未知"));
     if (isNumber(run.status.updates)) meta.append(el("span", "", "Update " + fmt(run.status.updates, 0)));
     button.append(title, ...(run.id === "." || run.id === run.name ? [] : [el("small", "", run.id)]), meta);
     button.addEventListener("click", () => {
@@ -188,15 +177,9 @@ function currentView() {
   state.view = { key, rows, plot, segments, x: plot.map((i) => update[i]), end, span };
   return state.view;
 }
-function visibleSummaries() {
-  const view = currentView();
-  return state.data.summaries.filter((record) => isNumber(record.update) && (!view.span || (view.end !== null && record.update > view.end - view.span && record.update <= view.end)));
-}
-function smoothing(points, rounds = false) {
+function smoothing(points) {
   const choice = $("smooth").value;
   if (choice !== "auto") return Number(choice);
-  // A round is twenty-odd games: its rates need averaging long before an update curve does.
-  if (rounds) return points >= 1000 ? 50 : points >= 200 ? 20 : points >= 30 ? 10 : 0;
   return SMOOTH_STEPS.find((step) => step <= points / 150) || 0;
 }
 // The newest points of the stretch still being written, for "recent average" figures.
@@ -341,8 +324,6 @@ function lineChart(id, spec) {
     if (average) { keep.push(...average.range); if (!traced) for (const value of average.values) if (value !== null) raw.push(value); }
     return { ...line, smoothed: average?.values || null };
   });
-  const targets = spec.target ? spec.target.values.filter(isNumber) : [];
-  if (targets.length) keep.push(Math.min(...targets), Math.max(...targets));
   const range = yDomain(raw, keep, spec);
   let first = Infinity, last = -Infinity;
   for (const value of spec.x) { if (value < first) first = value; if (value > last) last = value; }
@@ -373,7 +354,6 @@ function lineChart(id, spec) {
   }
   const plot = svgEl("g", { "clip-path": `url(#clip-${id})` });
   svg.append(plot);
-  if (spec.target) plot.append(svgEl("path", { d: tracePath(spec.segments, xs, project(spec.target.values)), class: "target-line" }));
   for (const line of lines) {
     line.ys = project(line.values);
     // Behind an average, many points per pixel merge into a band: keep it a wash.
@@ -424,7 +404,6 @@ function lineChart(id, spec) {
       dots[index].setAttribute("visibility", Number.isNaN(shown) ? "hidden" : "visible");
       if (!Number.isNaN(shown)) { dots[index].setAttribute("cx", xs[active]); dots[index].setAttribute("cy", Math.max(top, Math.min(top + height, shown))); }
     });
-    if (spec.target) tooltip.append(tooltipRow("target", fmt(spec.target.values[active]), spec.target.label));
     for (const note of spec.detail ? spec.detail(active) : []) tooltip.append(el("div", "tip-note", note));
     placeTooltip(host, tooltip, xs[active] / W * host.clientWidth);
     focus.setAttribute("x1", xs[active]);
@@ -458,32 +437,20 @@ function renderStatus(run) {
   const parts = [];
   const updates = isNumber(status.updates) ? status.updates : latest?.update ?? null;
   if (updates !== null) parts.push(`Update ${fmt(updates, 0)}`);
-  if (isNumber(status.round)) parts.push(run.kind === "ppo" ? `采样轮 ${status.round}` : `第 ${status.round} 轮`);
-  if (isNumber(status.games_completed) && isNumber(status.games_total)) parts.push(`对局 ${status.games_completed} / ${status.games_total}`);
-  if (status.character) parts.push(String(status.character));
+  if (isNumber(status.round)) parts.push(`第 ${status.round} 轮`);
   const written = age(run.updated_at);
   // An estimate only while the trainer is still writing.
-  const pace = run.kind === "bootstrap" && ACTIVE.has(status.state) && written !== null && written <= 900 ? roundPace(updates) : null;
+  const pace = ACTIVE.has(status.state) && written !== null && written <= 900 ? roundPace(updates) : null;
   if (pace) parts.push(`本轮约 ${pct(pace.done, 0)}${pace.remaining !== null ? "，预计还需 " + duration(pace.remaining) : ""}（按上一轮 ${fmt(pace.length, 0)} 次更新估算）`);
   $("status-detail").textContent = parts.join(" · ");
   $("updated").textContent = run.updated_at ? `状态写入 ${ago(written)} · ${date(run.updated_at)}` : "未记录状态时间";
-  $("collection-progress").hidden = !(status.state === "collecting" && isNumber(status.games_completed) && isNumber(status.games_total) && status.games_total > 0);
-  if (!$("collection-progress").hidden) {
-    $("collection-progress").max = status.games_total;
-    $("collection-progress").value = status.games_completed;
-    $("collection-progress").setAttribute("aria-label", "本轮采样进度");
-  }
   const warnings = [...run.warnings];
   if (status.error) warnings.push("训练错误：" + String(status.error));
   if (ACTIVE.has(status.state) && written !== null && written > 900) warnings.push(`状态已 ${ago(written).replace("前", "")}没有更新。状态文件只反映最后一次写入，训练进程可能已经停止。`);
-  if (latest?.early_stop) warnings.push("最近记录触发 KL 提前停止，请结合 KL 曲线与目标值查看。");
-  if ((run.summary || latest)?.evaluation.comparable === false) warnings.push("最近一轮包含未完成对局，通关率不能直接用于模型比较；未完成对局仍计入尝试次数。");
-  if (latest?.stage === "value") warnings.push("最近一轮是价值头预热（value warmup），损失含义与 PPO 策略更新不同。");
   if (run.total_records > run.retained_records) warnings.push(`当前保留最近 ${run.retained_records} / ${run.total_records} 条记录；用 --limit 0 重启监测服务可读取全部历史。`);
   if (!latest) warnings.push("等待首次优化器更新的指标；旧训练进程需在下次启动时加载逐更新记录功能。");
   else if (run.source !== "updates") warnings.push("旧日志只有汇总指标，已按真实累计更新次数定位；未记录的中间更新无法补回。");
-  if (run.kind === "bootstrap" && latest && !isNumber(latest.metrics.accuracy)) warnings.push("该记录未包含动作正确率。训练进程加载新代码后才会写入，旧记录无法由损失反推。");
-  if (run.kind === "ppo" && run.summary && !floorsOf(run.summary)) warnings.push("最近一轮汇总没有楼层记录。训练进程加载新代码后才会写入前进楼层，旧轮次无法补回。");
+  if (latest && !isNumber(latest.metrics.accuracy)) warnings.push("该记录未包含动作正确率。训练进程加载新代码后才会写入，旧记录无法由损失反推。");
   if (latest?.session && status.session && latest.session !== status.session) warnings.push("最近指标来自上一次训练会话，正在等待本次会话的更新记录。");
   $("warnings").replaceChildren(...warnings.map((message) => el("div", "notice", message)));
   $("record-count").textContent = `${fmt(run.total_records, 0)} 条${run.source === "updates" ? "更新" : "汇总"}记录 · ${fmt(data.summaries.length, 0)} 轮汇总`;
@@ -504,13 +471,12 @@ function roundPace(updates) {
 }
 function renderSummary(run) {
   const data = state.data, last = run.latest, m = last?.metrics || {}, live = run.source === "updates";
-  const report = run.summary?.metrics || (live ? {} : m), reported = run.summary || (live ? null : last);
   const recent = tail(200), span = recent.length;
-  const updates = ["累计更新", fmt(last?.update, 0), `${isNumber(last?.round) ? (run.kind === "ppo" ? "采样轮 " : "第 ") + last.round + (run.kind === "ppo" ? "" : " 轮") + " · " : ""}策略版本 ${fmt(last?.policy_version, 0)}${live ? " · 每次 " + fmt(m.samples, 0) + " 个宏动作" : ""}`];
+  const updates = ["累计更新", fmt(last?.update, 0), `${isNumber(last?.round) ? "第 " + last.round + " 轮 · " : ""}策略版本 ${fmt(last?.policy_version, 0)}${live ? " · 每次 " + fmt(m.samples, 0) + " 个宏动作" : ""}`];
   const pace = live ? wallPace() : null;
   const speed = ["更新速度", pace === null ? "—" : `${fmt(pace, 2)} 秒/次`, pace === null ? "需要同一会话内的连续更新" : `近 ${span} 次墙钟均值 · 约 ${fmt(3600 / pace, 0)} 次/小时`];
   let cards;
-  if (run.kind === "bootstrap" && live) {
+  if (live) {
     const hits = recent.reduce((sum, i) => sum + count(data.metrics.accuracy_correct?.[i]), 0), decisions = recent.reduce((sum, i) => sum + count(data.metrics.accuracy_decisions?.[i]), 0);
     cards = [
       ["训练损失", fmt(average("loss", recent)), `近 ${span} 次更新均值 · 本次 ${fmt(m.loss)}`],
@@ -518,22 +484,11 @@ function renderSummary(run) {
       ["梯度范数", fmt(average("last_grad_norm", recent), 3), `裁剪前 · 近 ${span} 次均值 · 本次 ${fmt(m.last_grad_norm, 3)}`],
       speed, updates,
     ];
-  } else if (run.kind === "bootstrap") {
+  } else {
     cards = [
       ["训练损失", fmt(m.loss), "旧日志汇总值 · 加权宏动作 NLL"],
       ["动作正确率", pct(m.accuracy), isNumber(m.accuracy) ? `训练 Top-1 · 命中 ${fmt(m.accuracy_correct, 0)} / ${fmt(m.accuracy_decisions, 0)}` : "该记录未统计正确率"],
       ["A0 验证 NLL", fmt(m.a0_validation_nll), "仅 A0 留出样本 · 每分支"],
-      updates,
-    ];
-  } else {
-    const where = reported ? `最近完成轮 · Update ${fmt(reported.update, 0)}` : "等待采样轮汇总";
-    const acts = reported?.evaluation.equal_character_act_pass_rates;
-    cards = [
-      ["五角色平均通关率", pct(report.equal_character_win_rate), `${where} · 最弱角色 ${pct(report.worst_character_win_rate)}`],
-      ["平均到达楼层", fmt(report.equal_character_mean_floor, 1), Array.isArray(acts) ? `过第一幕 ${pct(acts[0], 0)} · 过第二幕 ${pct(acts[1], 0)}` : "训练采样 · 非独立评估"],
-      ["平均奖励", fmt(report.equal_character_mean_score, 2), "已完成对局的基础奖励均值（通关 +1，否则 −1）"],
-      [last?.stage === "value" ? "价值预热损失" : "训练损失", fmt(live ? average("loss", recent) : m.loss), live ? `近 ${span} 次更新均值 · 本次 ${fmt(m.loss)}` : "旧日志最后一个优化 epoch 的汇总值"],
-      ["新旧策略 KL", metricText("kl", m.kl), `目标 ${fmt(last?.config.target_kl)} · ${live ? "本次更新" : "旧日志汇总值"}`],
       updates,
     ];
   }
@@ -544,235 +499,15 @@ function renderSummary(run) {
   }));
 }
 
-// ---- PPO: how far the sampled runs climbed ----
-const floorsOf = (record) => {
-  const characters = record?.evaluation?.characters;
-  return isObject(characters) && Object.values(characters).some((item) => isObject(item) && Array.isArray(item.death_floors)) ? characters : null;
-};
-// Acts are as long as any round saw them; a run's floor counts across the acts before it.
-function tower(summaries) {
-  const acts = [];
-  for (const record of summaries) for (const [index, length] of (Array.isArray(record.evaluation?.act_floors) ? record.evaluation.act_floors : []).entries()) if (isNumber(length)) acts[index] = Math.max(acts[index] || 0, length);
-  const ends = [];
-  for (let index = 0, total = 0; index < acts.length && acts[index]; index++) ends.push(total += acts[index]);
-  return ends;
-}
-function gather(rounds, character) {
-  const deaths = new Map(), passed = [0, 0, 0];
-  let wins = 0, lost = 0, attempts = 0;
-  for (const record of rounds) for (const [name, item] of Object.entries(floorsOf(record))) {
-    if ((character !== "all" && name !== character) || !isObject(item) || !Array.isArray(item.death_floors)) continue;
-    for (const [floor, runs] of item.death_floors.filter((pair) => Array.isArray(pair) && isNumber(pair[0]) && isNumber(pair[1]))) {
-      deaths.set(floor, (deaths.get(floor) || 0) + runs);
-      lost += runs;
-    }
-    wins += count(item.wins);
-    attempts += count(item.attempts);
-    (Array.isArray(item.acts_passed) ? item.acts_passed : []).slice(0, 3).forEach((runs, act) => { passed[act] += count(runs); });
-  }
-  return { deaths, wins, runs: lost + wins, attempts, passed, rounds: rounds.length };
-}
-function climbStats(group, top) {
-  let sum = group.wins * top, seen = 0, median = null;
-  for (const floor of [...group.deaths.keys()].sort((a, b) => a - b)) {
-    sum += floor * group.deaths.get(floor);
-    seen += group.deaths.get(floor);
-    if (median === null && seen >= group.runs / 2) median = floor;
-  }
-  return { mean: group.runs ? sum / group.runs : null, median: group.runs ? median ?? top : null };
-}
-function floorChart(id, model) {
-  const host = $(id), { group, before, ends, top } = model;
-  host.replaceChildren();
-  if (!group.runs || !top) { host.append(el("div", "chart-empty", "所选范围内没有带楼层记录的完成对局")); return; }
-  const W = Math.max(260, host.clientWidth), H = Math.max(190, host.clientHeight);
-  const left = 44, right = 12, topPad = 22, bottom = 44, width = W - left - right, height = H - topPad - bottom;
-  const band = width / top, bar = Math.max(1, Math.min(24, band >= 5 ? band - 2 : band));
-  const share = (source, floor) => (source.deaths.get(floor) || 0) / source.runs;
-  const winShare = (source) => source.wins / source.runs;
-  let peak = 0;
-  for (let floor = 1; floor <= top; floor++) {
-    peak = Math.max(peak, share(group, floor) + (floor === top ? winShare(group) : 0));
-    if (before?.runs) peak = Math.max(peak, share(before, floor) + (floor === top ? winShare(before) : 0));
-  }
-  const yTicks = ticks(0, peak * 1.08, Math.max(2, Math.round(height / 44)));
-  const high = Math.max(peak * 1.08, yTicks.values.at(-1));
-  const x = (floor) => left + (floor - 0.5) * band, y = (value) => topPad + (1 - value / high) * height;
-  const actOf = (floor) => { const index = ends.findIndex((end) => floor <= end); return index < 0 ? ends.length : index; };
-  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", tabindex: "0", "aria-label": `前进楼层分布；${group.runs} 局完成对局，${top} 层，方向键逐层查看` });
-  svg.append(svgEl("title", {}, "前进楼层分布"));
-  for (const value of yTicks.values) {
-    svg.append(svgEl("line", { x1: left, y1: y(value), x2: W - right, y2: y(value), class: value === 0 ? "baseline" : "gridline" }));
-    svg.append(svgEl("text", { x: left - 8, y: y(value) + 4, "text-anchor": "end" }, tickText(value, yTicks.step, true)));
-  }
-  // Acts: a rule after each last floor, the name under the floors it spans.
-  ends.forEach((end, index) => {
-    const start = index ? ends[index - 1] : 0;
-    if (index < ends.length - 1 || end < top) svg.append(svgEl("line", { x1: left + end * band, x2: left + end * band, y1: topPad, y2: topPad + height + 30, class: "boundary" }));
-    const name = band * (end - start) >= 110 ? `${ACT_NAMES[index] || "第 " + (index + 1) + " 幕"} · ${start + 1}–${end} 层` : ACT_NAMES[index] || String(index + 1);
-    svg.append(svgEl("text", { x: left + (start + end) / 2 * band, y: H - 8, "text-anchor": "middle", class: "act-label" }, name));
-  });
-  const every = [1, 2, 5, 10, 20].find((step) => step * band >= 26) || 50;
-  const last = new Set(ends);
-  for (let floor = 1; floor <= top; floor++) {
-    const boss = last.has(floor);
-    if (!boss && (floor % every !== 0 && floor !== 1 || [...last].some((end) => Math.abs(end - floor) * band < 24))) continue;
-    svg.append(svgEl("text", { x: x(floor), y: topPad + height + 15, "text-anchor": "middle", class: boss ? "boss-tick" : "" }, boss ? `${floor} Boss` : floor));
-  }
-  const bars = [];
-  for (let floor = 1; floor <= top; floor++) {
-    const lost = share(group, floor), won = floor === top ? winShare(group) : 0, parts = [];
-    const rect = (from, to, cls) => {
-      const h = Math.max(1.5, y(from) - y(to)), round = Math.min(3, bar / 2, h);
-      // Rounded at the data end only, square where it stands on the baseline or the segment below.
-      const node = svgEl("path", { d: `M${x(floor) - bar / 2},${y(from)}v${-(h - round)}q0,${-round} ${round},${-round}h${bar - 2 * round}q${round},0 ${round},${round}v${h - round}z`, class: "bar " + cls });
-      svg.append(node);
-      parts.push(node);
-    };
-    if (lost > 0) rect(0, lost, "act-" + Math.min(3, actOf(floor) + 1));
-    if (won > 0) rect(lost + (lost > 0 ? 2 / height * high : 0), lost + won, "win");
-    bars.push(parts);
-  }
-  if (before?.runs) {
-    let path = "";
-    for (let floor = 1; floor <= top; floor++) {
-      const level = y(share(before, floor) + (floor === top ? winShare(before) : 0));
-      path += `${floor === 1 ? "M" : "L"}${(left + (floor - 1) * band).toFixed(1)},${level.toFixed(1)}L${(left + floor * band).toFixed(1)},${level.toFixed(1)}`;
-    }
-    svg.append(svgEl("path", { d: path, class: "reference-line" }));
-  }
-  const stats = climbStats(group, top);
-  const at = stats.mean === null ? W : left + stats.mean * band - band / 2;
-  if (stats.mean !== null) {
-    svg.append(svgEl("line", { x1: at, x2: at, y1: topPad - 4, y2: topPad + height, class: "mean-line" }));
-    svg.append(svgEl("text", { x: at + (at > W - 90 ? -5 : 5), y: topPad - 8, "text-anchor": at > W - 90 ? "end" : "start", class: "mean-label" }, `平均 ${fmt(stats.mean, 1)} 层`));
-  }
-  // The unit of the bars, on whichever side the mean label leaves free.
-  svg.append(svgEl("text", at < left + 200 ? { x: W - right, y: topPad - 8, "text-anchor": "end" } : { x: left - 36, y: topPad - 8 }, "占完成对局的比例"));
-  const marker = svgEl("rect", { y: topPad, width: band, height, class: "band-focus", visibility: "hidden" });
-  svg.prepend(marker);
-  const tooltip = el("div", "chart-tooltip");
-  tooltip.hidden = true;
-  tooltip.setAttribute("role", "status");
-  host.append(svg, tooltip);
-  let active = Math.max(1, Math.min(top, Math.round(stats.median || 1)));
-  function inspect(floor) {
-    for (const part of bars[active - 1]) part.classList.remove("active");
-    active = Math.max(1, Math.min(top, floor));
-    for (const part of bars[active - 1]) part.classList.add("active");
-    const act = actOf(active), inside = active - (act ? ends[act - 1] : 0), lost = group.deaths.get(active) || 0;
-    let reached = group.wins;
-    for (const [at, runs] of group.deaths) if (at >= active) reached += runs;
-    tooltip.replaceChildren(el("div", "tip-title", `第 ${active} 层${act < ends.length ? ` · ${ACT_NAMES[act] || "第 " + (act + 1) + " 幕"}第 ${inside} 层${last.has(active) ? "（Boss）" : ""}` : ""}`));
-    tooltip.append(tooltipRow("act-" + Math.min(3, act + 1), `${fmt(lost, 0)} 局 · ${pct(lost / group.runs)}`, "止步于此", "box"));
-    if (active === top && group.wins) tooltip.append(tooltipRow("win", `${fmt(group.wins, 0)} 局 · ${pct(winShare(group))}`, "通关", "box"));
-    if (before?.runs) tooltip.append(tooltipRow("reference", pct(share(before, active) + (active === top ? winShare(before) : 0)), model.beforeLabel + (active === top && before.wins ? "（含通关）" : "")));
-    tooltip.append(el("div", "tip-note", `到达该层的对局 ${pct(reached / group.runs)}`));
-    marker.setAttribute("x", left + (active - 1) * band);
-    marker.setAttribute("visibility", "visible");
-    placeTooltip(host, tooltip, x(active) / W * host.clientWidth);
-  }
-  const hide = () => { tooltip.hidden = true; marker.setAttribute("visibility", "hidden"); for (const part of bars[active - 1]) part.classList.remove("active"); };
-  svg.addEventListener("pointermove", (event) => {
-    const box = svg.getBoundingClientRect();
-    inspect(Math.floor(((event.clientX - box.left) / box.width * W - left) / band) + 1);
-  });
-  svg.addEventListener("pointerleave", hide);
-  svg.addEventListener("focus", () => inspect(active));
-  svg.addEventListener("blur", hide);
-  svg.addEventListener("keydown", (event) => {
-    const move = { ArrowLeft: active - 1, ArrowRight: active + 1, Home: 1, End: top }[event.key];
-    if (move === undefined) return;
-    event.preventDefault();
-    inspect(move);
-  });
-}
-function renderProgress() {
-  const run = state.data.run, section = $("progress-section");
-  section.hidden = run.kind !== "ppo";
-  if (section.hidden) return;
-  // Every sampled round has win rates; floors only since the report carries them.
-  const sampled = visibleSummaries().filter((record) => isObject(record.evaluation?.characters)), rounds = sampled.filter(floorsOf);
-  const names = [...new Set(state.data.summaries.flatMap((record) => isObject(record.evaluation?.characters) ? Object.keys(record.evaluation.characters) : []))];
-  const options = JSON.stringify(names);
-  if ($("character").dataset.options !== options) {
-    const chosen = $("character").value;
-    $("character").dataset.options = options;
-    $("character").replaceChildren(...[["all", "五角色合计"], ...names.map((name) => [name, name])].map(([value, label]) => { const option = el("option", "", label); option.value = value; return option; }));
-    $("character").value = names.includes(chosen) ? chosen : "all";
-  }
-  const character = $("character").value, size = Number($("window").value) || rounds.length;
-  const group = gather(rounds.slice(-size), character), earlier = rounds.slice(0, -size).slice(-size);
-  const before = earlier.length ? gather(earlier, character) : null;
-  const ends = tower(state.data.summaries), deepest = Math.max(0, ...group.deaths.keys(), ...(before ? before.deaths.keys() : []));
-  const top = Math.max(ends.at(-1) || 0, deepest);
-  const stats = climbStats(group, top);
-  $("progress-note").textContent = rounds.length
-    ? `训练采样的完成对局，不是独立评估。汇总最近 ${fmt(group.rounds, 0)} 轮共 ${fmt(group.runs, 0)} 局${before ? `，灰线为此前 ${fmt(before.rounds, 0)} 轮（${fmt(before.runs, 0)} 局）` : ""}；楼层跨幕累计，通关记在最后一层。`
-    : "训练采样，不是独立评估。采样轮结束后写入各对局止步的楼层；所选范围内还没有带楼层记录的轮次。";
-  // A log from before floors were reported has nothing to draw here at all.
-  $("floor-card").hidden = !state.data.summaries.some(floorsOf);
-  $("floor-value").textContent = group.runs ? `平均 ${fmt(stats.mean, 1)} 层 · 中位 ${fmt(stats.median, 0)} 层` : "";
-  const beforeLabel = before ? `此前 ${fmt(before.rounds, 0)} 轮` : "";
-  floorChart("chart-floors", { group, before, ends, top, beforeLabel });
-  // Where the runs ended, act by act: the same counts as the bars, added up.
-  const stops = ends.map((end, index) => { let runs = 0; for (const [floor, n] of group.deaths) if (floor <= end && floor > (index ? ends[index - 1] : 0)) runs += n; return runs; });
-  if (stops.length) for (const [floor, n] of group.deaths) if (floor > ends.at(-1)) stops[stops.length - 1] += n;
-  const parts = [...stops.map((runs, index) => ({ cls: "act-" + Math.min(3, index + 1), label: `止步${ACT_NAMES[index] || "第 " + (index + 1) + " 幕"}`, runs })), { cls: "win", label: "通关", runs: group.wins }];
-  if (!stops.length) parts.unshift({ cls: "act-2", label: "未通关", runs: group.runs - group.wins });
-  const strip = el("div", "ends-bar"), labels = el("div", "ends-labels");
-  strip.setAttribute("role", "img");
-  strip.setAttribute("aria-label", parts.map((part) => `${part.label} ${pct(part.runs / group.runs)}`).join("，"));
-  for (const part of parts.filter((item) => item.runs > 0)) {
-    const segment = el("span", "ends-part " + part.cls);
-    segment.style.flexGrow = part.runs;
-    segment.title = `${part.label} ${fmt(part.runs, 0)} 局`;
-    strip.append(segment);
-  }
-  for (const part of parts) {
-    const label = el("span", "legend-item");
-    label.append(el("i", `key box ${part.cls}`), el("strong", "", pct(part.runs / group.runs)), ` ${part.label} · ${fmt(part.runs, 0)} 局`);
-    labels.append(label);
-  }
-  $("floor-ends").replaceChildren(...(group.runs ? [strip, labels] : []));
-  legend("floor-legend", group.runs && before?.runs ? [{ cls: "reference", label: `${beforeLabel}的分布` }, { cls: "mean", label: "平均到达楼层（通关按最后一层计）" }] : group.runs ? [{ cls: "mean", label: "平均到达楼层（通关按最后一层计）" }] : []);
-  // Per-round trends: one point per finished sampling round, at its update count.
-  const points = sampled, x = points.map((record) => record.update), segments = [];
-  for (let start = 0, p = 1; p <= points.length; p++) if (p === points.length || x[p] <= x[p - 1]) { segments.push([start, p]); start = p; }
-  const pick = (record, key, shared) => character === "all" ? record.evaluation[shared] : record.evaluation.characters[character]?.[key];
-  const heading = (p) => `采样轮 ${fmt(points[p].round, 0)} · Update ${fmt(x[p], 0)}`;
-  const detail = (p) => {
-    const played = Object.entries(points[p].evaluation.characters).filter(([name, item]) => isObject(item) && (character === "all" || name === character));
-    return [`${fmt(played.reduce((sum, [, item]) => sum + count(item.attempts), 0), 0)} 局对局`, date(points[p].time)];
-  };
-  const smooth = smoothing(points.length, true), averaged = smooth >= 2 ? `，${smooth} 轮滑动平均` : "";
-  const base = { x, segments, smooth, focus: $("scale").value === "focus", heading, detail };
-  const climb = points.map((record) => { const value = pick(record, "mean_floor", "equal_character_mean_floor"); return isNumber(value) ? value : null; });
-  const climbNote = lineChart("chart-climb", { ...base, title: "平均到达楼层", series: [{ label: "平均到达楼层", cls: "main", values: climb }], empty: "所选范围内没有带楼层记录的轮次" });
-  $("climb-value").textContent = climb.length ? `最近一轮 ${fmt(climb.at(-1), 1)} 层` : "";
-  legend("climb-legend", [{ cls: "main", label: `${character === "all" ? "五角色平均" : character}，每轮一个点${averaged}` }], climbNote);
-  const rates = [0, 1, 2].map((act) => points.map((record) => {
-    const value = pick(record, "act_pass_rates", "equal_character_act_pass_rates");
-    // Winning is passing the last act; older rounds recorded only the win rate.
-    const rate = Array.isArray(value) ? value[act] : act === 2 ? pick(record, "win_rate", "equal_character_win_rate") : null;
-    return isNumber(rate) ? rate : null;
-  }));
-  const passes = [{ label: "通过第一幕", cls: "pass-1", values: rates[0] }, { label: "通过第二幕", cls: "pass-2", values: rates[1] }, { label: "通关", cls: "pass-3", values: rates[2] }];
-  if (character === "all") passes.push({ label: "最弱角色通关", cls: "worst", values: points.map((record) => isNumber(record.evaluation.worst_character_win_rate) ? record.evaluation.worst_character_win_rate : null) });
-  const actsNote = lineChart("chart-acts", { ...base, title: "过幕率与通关率", percent: true, series: passes, empty: "所选范围内没有采样轮汇总" });
-  $("acts-value").textContent = points.length ? `最近一轮 ${rates.map((values) => values.at(-1)).filter(isNumber).map((value) => pct(value, 0)).join(" · ")}` : "";
-  legend("acts-legend", passes, [smooth >= 2 ? `${smooth} 轮滑动平均` : "", actsNote].filter(Boolean).join(" · "));
-}
-
 // ---- Learning curves ----
 function renderCurves() {
-  const data = state.data, run = data.run, view = currentView(), bootstrap = run.kind === "bootstrap", live = run.source === "updates";
+  const data = state.data, run = data.run, view = currentView(), live = run.source === "updates";
   const column = (name) => { const values = data.metrics[name]; return view.plot.map((i) => values ? values[i] : null); };
-  const { round, time, session, stage, target_kl: target } = data.meta;
+  const { round, time, session } = data.meta;
   const smooth = smoothing(view.plot.length);
   const marks = [];
-  if (bootstrap) for (let p = 1; p < view.plot.length; p++) if (round[view.plot[p]] !== null && round[view.plot[p]] !== round[view.plot[p - 1]] && view.x[p] > view.x[p - 1]) marks.push({ x: view.x[p], label: `第 ${round[view.plot[p]]} 轮` });
-  const heading = (p) => `Update ${fmt(view.x[p], 0)}${data.labels.stage[stage[view.plot[p]]] === "value" ? " · 价值预热" : ""}${round[view.plot[p]] !== null ? ` · ${bootstrap ? "第 " + round[view.plot[p]] + " 轮" : "采样轮 " + round[view.plot[p]]}` : ""}`;
+  for (let p = 1; p < view.plot.length; p++) if (round[view.plot[p]] !== null && round[view.plot[p]] !== round[view.plot[p - 1]] && view.x[p] > view.x[p - 1]) marks.push({ x: view.x[p], label: `第 ${round[view.plot[p]]} 轮` });
+  const heading = (p) => `Update ${fmt(view.x[p], 0)}${round[view.plot[p]] !== null ? ` · 第 ${round[view.plot[p]]} 轮` : ""}`;
   const detail = (p) => {
     const i = view.plot[p], id = data.labels.session[session[i]];
     return [time[i] !== null ? date(time[i]) : null, id ? `Session ${String(id).slice(0, 8)}` : null].filter(Boolean);
@@ -785,17 +520,15 @@ function renderCurves() {
   const recent = tail(200);
   $("primary-title").textContent = "训练损失";
   $("primary-value").textContent = fmt(live ? average("loss", recent) : run.latest?.metrics.loss);
-  legend("primary-legend", [{ cls: "main", label: bootstrap ? "加权宏动作 NLL" : live ? "每次更新的逻辑批" : "旧日志汇总值" }], chart("chart-primary", "loss", "main"));
-  const second = bootstrap ? "accuracy" : "kl";
-  $("secondary-title").textContent = metricLabel(second);
-  $("secondary-value").textContent = metricText(second, live ? average(second, recent) : run.latest?.metrics[second]);
+  legend("primary-legend", [{ cls: "main", label: "加权宏动作 NLL" }], chart("chart-primary", "loss", "main"));
+  $("secondary-title").textContent = metricLabel("accuracy");
+  $("secondary-value").textContent = metricText("accuracy", live ? average("accuracy", recent) : run.latest?.metrics.accuracy);
   const accuracy = (p) => { const i = view.plot[p], hit = data.metrics.accuracy_correct?.[i], all = data.metrics.accuracy_decisions?.[i]; return isNumber(all) ? [`命中 ${fmt(hit, 0)} / ${fmt(all, 0)} 次决策`, ...detail(p)] : detail(p); };
-  const targetLine = { label: "KL 目标", values: view.plot.map((i) => target[i]) };
-  const secondNote = bootstrap ? chart("chart-secondary", "accuracy", "main", { detail: accuracy, empty: "所选范围尚未记录动作正确率" }) : chart("chart-secondary", "kl", "main", { target: targetLine });
-  legend("secondary-legend", bootstrap ? [{ cls: "main", label: "训练 Top-1 · 不计强制动作和控制器步骤" }] : [{ cls: "main", label: "新旧策略 KL" }, { cls: "target", label: "KL 目标" }], secondNote);
-  const known = CHOICES[run.kind].filter((key) => data.metrics[key]);
-  const others = Object.keys(data.metrics).filter((key) => data.active.has(key) && !known.includes(key) && !CHARTED[run.kind].includes(key) && !COUNTERS.has(key)).sort();
-  const choices = [...known, ...others], options = run.kind + JSON.stringify(choices);
+  const secondNote = chart("chart-secondary", "accuracy", "main", { detail: accuracy, empty: "所选范围尚未记录动作正确率" });
+  legend("secondary-legend", [{ cls: "main", label: "训练 Top-1 · 不计强制动作和控制器步骤" }], secondNote);
+  const known = CHOICES.filter((key) => data.metrics[key]);
+  const others = Object.keys(data.metrics).filter((key) => data.active.has(key) && !known.includes(key) && !CHARTED.includes(key) && !COUNTERS.has(key)).sort();
+  const choices = [...known, ...others], options = JSON.stringify(choices);
   if (state.metricOptions !== options) {
     state.metricOptions = options;
     $("metric-select").replaceChildren(...choices.map((key) => { const option = el("option", "", metricLabel(key)); option.value = key; return option; }));
@@ -827,79 +560,47 @@ function noData(title, text) {
   node.append(el("div", "", title), el("p", "", text));
   return node;
 }
-function rate(value, label) {
-  const node = el("span", "number", pct(value));
-  if (isNumber(value)) { const bar = el("progress", "mini-bar"); bar.max = 1; bar.value = value; bar.setAttribute("aria-label", label); node.append(bar); }
-  return node;
-}
 function renderRounds() {
-  const run = state.data.run, panel = $("panel-rounds"), bootstrap = run.kind === "bootstrap";
+  const panel = $("panel-rounds");
   const rounds = state.data.summaries.slice(-500).reverse();
   panel.replaceChildren();
-  if (!rounds.length) { panel.append(noData(bootstrap ? "还没有完成的轮次" : "还没有完成的采样轮", "每完成一轮写入一条汇总；逐更新指标在上方曲线。")); return; }
-  if (bootstrap) {
-    panel.append(el("p", "panel-note", "每个 epoch 结束时的汇总，最新在前。损失和正确率是整轮的加权值，不是末次更新。"));
-    panel.append(table(["轮次", "Update", "平均损失", "正确率", "策略熵", "末次梯度范数", "耗时", "完成时间"], rounds.map((record) => [
-      fmt(record.round, 0), fmt(record.update, 0), fmt(record.metrics.loss), pct(record.metrics.accuracy, 2), fmt(record.metrics.entropy), fmt(record.metrics.last_grad_norm, 3), duration(record.metrics.duration_seconds), date(record.time),
-    ])).wrap);
-    return;
-  }
-  panel.append(el("p", "panel-note", "每个采样轮结束时的汇总，最新在前。通关率和过幕率以全部尝试为分母，楼层与积分只统计已完成对局；这是训练采样，不代替独立评估。"));
-  panel.append(table(["采样轮", "Update", "阶段", "对局", "通关率", "平均楼层", "平均奖励", "过第一幕", "过第二幕", "KL", "提前停止", "耗时", "完成时间"], rounds.map((record) => {
-    const report = record.evaluation, characters = isObject(report.characters) ? Object.values(report.characters).filter(isObject) : [];
-    const acts = Array.isArray(report.equal_character_act_pass_rates) ? report.equal_character_act_pass_rates : [];
-    return [
-      fmt(record.round, 0), fmt(record.update, 0), record.stage === "value" ? "价值预热" : record.stage, fmt(characters.reduce((sum, item) => sum + count(item.attempts), 0), 0),
-      rate(report.equal_character_win_rate, "通关率"), fmt(report.equal_character_mean_floor, 1), fmt(report.equal_character_mean_score, 2), pct(acts[0], 0), pct(acts[1], 0),
-      metricText("kl", record.metrics.kl), record.early_stop ? "是" : "否", duration(record.metrics.duration_seconds), date(record.time),
-    ];
-  })).wrap);
+  if (!rounds.length) { panel.append(noData("还没有完成的轮次", "每完成一轮写入一条汇总；逐更新指标在上方曲线。")); return; }
+  panel.append(el("p", "panel-note", "每个 epoch 结束时的汇总，最新在前。损失和正确率是整轮的加权值，不是末次更新。"));
+  panel.append(table(["轮次", "Update", "平均损失", "正确率", "策略熵", "末次梯度范数", "耗时", "完成时间"], rounds.map((record) => [
+    fmt(record.round, 0), fmt(record.update, 0), fmt(record.metrics.loss), pct(record.metrics.accuracy, 2), fmt(record.metrics.entropy), fmt(record.metrics.last_grad_norm, 3), duration(record.metrics.duration_seconds), date(record.time),
+  ])).wrap);
 }
 function renderGroups() {
   const run = state.data.run, latest = run.summary || (run.source !== "updates" ? run.latest : null), panel = $("panel-groups");
   const validation = Object.entries(latest?.validation || {}).filter(([, value]) => isObject(value));
   panel.replaceChildren();
-  $("tab-groups").textContent = run.kind === "bootstrap" ? "验证明细" : "角色表现";
   // BC no longer validates on its own; the tab is there only for logs that did.
-  $("tab-groups").hidden = run.kind === "bootstrap" && !validation.length;
+  $("tab-groups").hidden = !validation.length;
   if ($("tab-groups").hidden) { if (state.tab === "groups") switchTab("rounds"); return; }
-  if (run.kind === "bootstrap") {
-    const control = el("label", "scope-switch", "样本范围");
-    const select = el("select");
-    select.setAttribute("aria-label", "验证样本范围");
-    for (const [value, label] of [["all", "混合难度"], ["a0", "仅 A0"]]) { const option = el("option", "", label); option.value = value; select.append(option); }
-    select.value = state.scope;
-    select.addEventListener("change", () => { state.scope = select.value; renderGroups(); });
-    control.append(select);
-    panel.append(control, el("p", "panel-note", `最近验证记录 · Update ${fmt(latest.update, 0)}。NLL 按分支数归一；A0 是混合验证的子集，不重复计数。`));
-    const selected = validation.filter(([key]) => key.startsWith("A0/") === (state.scope === "a0")).sort(([a], [b]) => a.localeCompare(b));
-    if (!selected.length) { panel.append(noData("没有 A0 验证样本", "该更新位置未记录 A0 分组。")); return; }
-    panel.append(table(["角色", "决策阶段", "宏动作", "分支", "NLL / 分支"], selected.map(([key, value]) => {
-      const parts = key.replace(/^A0\//, "").split("/");
-      const nll = isNumber(value.nll) && value.branches > 0 ? value.nll / value.branches : value.nll_per_branch;
-      return [parts[0], parts.slice(1).join(" / "), fmt(value.macros, 0), fmt(value.branches, 0), fmt(nll)];
-    })).wrap);
-    return;
-  }
-  const evaluation = latest?.evaluation || {};
-  const groups = isObject(evaluation.characters) ? Object.entries(evaluation.characters).filter(([, value]) => isObject(value)) : [];
-  if (!groups.length) { panel.append(noData("尚无本轮采样结果", "角色通关率会在一轮采样与更新完成后写入。")); return; }
-  const ascensions = Array.isArray(evaluation.ascensions) ? evaluation.ascensions.map((value) => "A" + value).join(" / ") : "";
-  panel.append(el("p", "panel-note", `最近一轮训练采样 · Update ${fmt(latest.update, 0)}${ascensions ? " · " + ascensions : ""}。通关率和过幕以全部尝试为分母，区间为 Wilson 95%；模型效果请另用固定 seed 独立评估。`));
-  panel.append(table(["角色", "尝试", "完成", "通关", "通关率", "95% 区间", "过第一幕", "过第二幕", "平均楼层", "平均奖励", "异常 / 未完成"], groups.map(([name, item]) => {
-    const acts = Array.isArray(item.acts_passed) ? item.acts_passed : [];
-    return [name, fmt(item.attempts, 0), fmt(item.complete, 0), fmt(item.wins, 0), rate(item.win_rate, name + " 通关率"), Array.isArray(item.wilson_95) ? item.wilson_95.map((value) => pct(value)).join(" – ") : "—",
-      fmt(acts[0], 0), fmt(acts[1], 0), fmt(item.mean_floor, 1), fmt(item.mean_score, 2), fmt(item.errors_or_unresolved, 0)];
+  const control = el("label", "scope-switch", "样本范围");
+  const select = el("select");
+  select.setAttribute("aria-label", "验证样本范围");
+  for (const [value, label] of [["all", "混合难度"], ["a0", "仅 A0"]]) { const option = el("option", "", label); option.value = value; select.append(option); }
+  select.value = state.scope;
+  select.addEventListener("change", () => { state.scope = select.value; renderGroups(); });
+  control.append(select);
+  panel.append(control, el("p", "panel-note", `最近验证记录 · Update ${fmt(latest.update, 0)}。NLL 按分支数归一；A0 是混合验证的子集，不重复计数。`));
+  const selected = validation.filter(([key]) => key.startsWith("A0/") === (state.scope === "a0")).sort(([a], [b]) => a.localeCompare(b));
+  if (!selected.length) { panel.append(noData("没有 A0 验证样本", "该更新位置未记录 A0 分组。")); return; }
+  panel.append(table(["角色", "决策阶段", "宏动作", "分支", "NLL / 分支"], selected.map(([key, value]) => {
+    const parts = key.replace(/^A0\//, "").split("/");
+    const nll = isNumber(value.nll) && value.branches > 0 ? value.nll / value.branches : value.nll_per_branch;
+    return [parts[0], parts.slice(1).join(" / "), fmt(value.macros, 0), fmt(value.branches, 0), fmt(nll)];
   })).wrap);
 }
 function renderHistory() {
-  const view = currentView(), bootstrap = state.data.run.kind === "bootstrap", panel = $("panel-history");
+  const view = currentView(), panel = $("panel-history");
   const records = state.data.recent.filter((record) => !view.span || (isNumber(record.update) && view.end !== null && record.update > view.end - view.span && record.update <= view.end)).reverse();
   panel.replaceChildren();
   if (!records.length) { panel.append(noData("还没有完整训练记录", "新记录写入后会自动出现在这里。")); return; }
   panel.append(el("p", "panel-note", "按写入顺序倒序列出所选范围最近 200 条记录及其原始 JSON；曲线与 CSV 包含所选范围的全部记录。"));
-  const rows = records.map((record) => [fmt(record.update, 0), record.stage === "value" ? "价值预热" : record.stage, fmt(record.metrics.samples, 0), fmt(record.metrics.loss), ...(bootstrap ? [pct(record.metrics.accuracy)] : [metricText("kl", record.metrics.kl)]), fmt(record.metrics.entropy), duration(record.metrics.duration_seconds), date(record.time)]);
-  const result = table(["Update", "阶段", "本次宏动作", "损失", bootstrap ? "正确率" : "KL", "熵", "耗时", "写入时间", "原始数据"], rows);
+  const rows = records.map((record) => [fmt(record.update, 0), record.stage, fmt(record.metrics.samples, 0), fmt(record.metrics.loss), pct(record.metrics.accuracy), fmt(record.metrics.entropy), duration(record.metrics.duration_seconds), date(record.time)]);
+  const result = table(["Update", "阶段", "本次宏动作", "损失", "正确率", "熵", "耗时", "写入时间", "原始数据"], rows);
   Array.from(result.body.rows).forEach((row, index) => {
     const record = records[index], key = `${record.session}:${record.update}:${record.time}`;
     const cell = el("td"), button = el("button", "row-action", "展开");
@@ -939,7 +640,6 @@ function renderConfig() {
 // ---- Page ----
 function renderCharts() {
   if (!state.data) return;
-  renderProgress();
   renderCurves();
 }
 function renderDetail() {
@@ -948,7 +648,7 @@ function renderDetail() {
   $("dashboard").hidden = false;
   $("run-name").textContent = runLabel(run);
   $("run-path").textContent = run.path;
-  $("run-kind").textContent = run.kind === "bootstrap" ? "BOOTSTRAP" : "PPO";
+  $("run-kind").textContent = "BOOTSTRAP";
   $("run-kind").className = "tag " + run.kind;
   $("export").disabled = !data.n;
   renderStatus(run);
@@ -963,7 +663,7 @@ function showEmpty(loading = false) {
   $("dashboard").hidden = true;
   $("empty").hidden = false;
   $("empty-title").textContent = loading ? "正在读取训练记录…" : state.runs.length ? "没有匹配的训练" : "等待训练记录";
-  $("empty-description").textContent = loading ? "首次打开一个训练要读完它的全部日志，之后只同步新增的更新。" : state.runs.length ? "切换训练类型或调整目录搜索条件。" : "在以下目录启动 Bootstrap 或 PPO，网页会自动发现训练输出。";
+  $("empty-description").textContent = loading ? "首次打开一个训练要读完它的全部日志，之后只同步新增的更新。" : state.runs.length ? "切换训练类型或调整目录搜索条件。" : "在以下目录启动 Bootstrap，网页会自动发现训练输出。";
   $("root-path").hidden = $("empty-hint").hidden = loading || state.runs.length > 0;
   $("root-path").textContent = state.root;
 }
@@ -1052,8 +752,7 @@ $("auto-refresh").addEventListener("change", schedule);
 let searchTimer;
 $("search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(refresh, 180); });
 $("range").addEventListener("change", () => { remember("range"); renderCharts(); renderHistory(); });
-for (const id of ["smooth", "scale", "window"]) $(id).addEventListener("change", () => { remember(id); renderCharts(); });
-$("character").addEventListener("change", renderCharts);
+for (const id of ["smooth", "scale"]) $(id).addEventListener("change", () => { remember(id); renderCharts(); });
 $("metric-select").addEventListener("change", () => { state.metric = $("metric-select").value; renderCharts(); });
 document.addEventListener("visibilitychange", () => { if (document.hidden) clearTimeout(state.timer); else if ($("auto-refresh").checked) refresh(); });
 let resizeTimer;
