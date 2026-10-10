@@ -24,13 +24,40 @@ from collections import Counter
 from pathlib import Path
 
 from .control import CONTROL_VERSION
-from .dataset_index import ShardWriter, index_row
+from .dataset_index import INDEX, ShardWriter, index_row
 from .protocol import ProtocolError
 from .rewards import REWARD_VERSION
 from .rollout import OUTSIDE_FRAMES, assign
 from .evaluation import evaluate_runs
 
 ROUND_FORMAT = "rollout-round-v1"
+
+
+def round_summary(directory):
+    """The summary of a finished sampled round, or None: a directory without one (a
+    round still being played, or cut off) or without an index is not data."""
+    directory = Path(directory)
+    path = directory / "summary.json"
+    if not path.is_file() or not (directory / INDEX).is_file():
+        return None
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    return summary if summary.get("kind") == "rollout_round" else None
+
+
+def buffer_rounds(directory, iterations=None):
+    """The run buffer under `directory`: its finished rounds (`round-N/`) that hold
+    runs, oldest iteration first. With `iterations` only the rounds of the last so
+    many iterations the directory holds: the buffer keeps those, and older rounds stay
+    on disk unread."""
+    if iterations is not None and iterations < 1:
+        raise ValueError("A buffer keeps the rounds of at least one iteration")
+    found = []
+    for path in Path(directory).glob("round-*"):
+        summary = round_summary(path) if path.is_dir() else None
+        if summary and summary.get("accepted_runs") and type(summary.get("iteration")) is int:
+            found.append((summary["iteration"], path.name, path))
+    kept = sorted({iteration for iteration, _, _ in found})[-iterations:] if iterations else None
+    return [path for iteration, _, path in sorted(found) if kept is None or iteration in kept]
 
 
 class RoundWriter:
