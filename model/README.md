@@ -152,21 +152,23 @@ python -m model --device cuda heldout-nll --data runs/bootstrap-20261008/importe
 
 ## 采样与手动评估
 
-`collect` 和 `evaluate` 共用对局循环，另为每局输出 `<对局>.combats.jsonl.gz`，保存实际战斗和中途公开帧，格式见 [战斗结果数据](../combat_outcome/README.md)。
+`collect` 和 `evaluate` 共用对局循环，写出的东西不同：`evaluate` 写完整对局供分析，`collect` 写训练能直接读的一轮采样（格式见下一节）。两者都为每局输出 `<对局>.combats.jsonl.gz`，保存实际战斗和中途公开帧，格式见 [战斗结果数据](../combat_outcome/README.md)。
 
 ```bash
 # seeds.json 按五个角色各列等量种子；评估种子须与训练隔离
 python -m model --device cuda evaluate --checkpoint runs/bootstrap/current \
   --seeds seeds.json --output runs/evaluation --workers 16
 
-# 按检查点里的两个温度采样一轮，写到 runs/collect/round-N
+# 按检查点里的两个温度采样一轮，写到 runs/collect/round-N（N 自动递增）
 python -m model --device cuda collect --checkpoint runs/bootstrap/current \
-  --seeds seeds.json --output runs/collect --workers 64
+  --seeds seeds.json --output runs/collect --workers 44 --iteration 3
 ```
 
-`--workers` 是同时在跑的引擎数。引擎、帧的解析和张量打包都在采样进程里，本进程只跑网络；`--processes` 默认等于 `--workers`，每个进程带一个引擎时最快（原因见 [采样的进程分工](../ARCHITECTURE.md#采样的进程分工)）。采样进程和引擎跨轮保留，引擎在原进程里开下一局。每对“引擎 + 采样进程”占 250–300 MB 内存（64 对约 18 GB）。一轮的耗时不会短于最长一局，所以每轮对局数（每角色种子数的五倍）不宜少于引擎数，多几倍更省。每局写出对局文件、流水账和战斗记录；`evaluate` 汇总时把对局逐局读回，内存里只留一局，评估多少局都不受内存限制。
+`--workers` 是同时在跑的引擎数。引擎、帧的解析和张量打包都在采样进程里，本进程只跑网络；`--processes` 默认等于 `--workers`，每个进程带一个引擎时最快（原因见 [采样的进程分工](../ARCHITECTURE.md#采样的进程分工)）。采样进程和引擎跨轮保留，引擎在原进程里开下一局。每对“引擎 + 采样进程”占 250–300 MB 内存（64 对约 18 GB）。一轮的耗时不会短于最长一局，所以每轮对局数（每角色种子数的五倍）不宜少于引擎数，多几倍更省。
 
-对局文件记录每个宏动作的 `old_log_prob`（采样时的对数概率）、阶段、随后支付的奖励，以及整局的账本、策略版本与权重摘要、数值后端和采样温度。`collect` 按检查点的 `combat_temperature`／`other_temperature` 抽样，每个决策按自己阶段的温度；`collect --config <profile>` 可换成 profile 里的温度，其余设置必须与检查点一致。greedy 的 `evaluate` 记 `temperature: null`，概率按温度 1 记。
+`evaluate` 每局写出对局文件 `<角色>-<序号>.json`（每个宏动作的帧、完整候选、所选动作、`old_log_prob`、阶段和随后支付的奖励，以及整局的账本、每幕结果 `acts`、到达楼层 `climb`、策略版本与权重摘要、数值后端和采样温度）、流水账 `.jsonl`（每个帧与奖励）和战斗记录；汇总时把对局逐局读回，内存里只留一局，评估多少局都不受内存限制。报告除通关率外，还列出各角色通过每一幕的对局数、奖励均值（`mean_score`，即通关率的两倍减一）、平均到达楼层和各次失败止步的楼层；楼层跨幕累计，只统计已完成的对局。
+
+`collect` 按检查点的 `combat_temperature`／`other_temperature` 抽样，每个决策按自己阶段的温度；`collect --config <profile>` 可换成 profile 里的温度，其余设置必须与检查点一致。greedy 的 `evaluate` 记 `temperature: null`，概率按温度 1 记。
 
 `evaluate` 的报告除通关率外，还列出各角色通过每一幕的对局数、奖励均值（`mean_score`，即通关率的两倍减一）、平均到达楼层和各次失败止步的楼层；楼层跨幕累计，只统计已完成的对局。每角色的通关率和各幕通过率都带 Wilson 95% 区间（`wilson_95`、`act_pass_wilson_95`）；`pooled` 是五角色全部尝试合计的通关数、通关率、各幕通过数与通过率及各自的区间，每角色局数相同时合计率就是五角色平均率。
 
@@ -178,7 +180,27 @@ python -m model compare runs/eval-a runs/eval-b --head 60
 
 对每个目录给出整个目录的报告和每角色前 `--head` 个种子（默认 60，即前 300 局）的子表，格式与 `evaluate` 相同；给两个目录时按（角色，seed）配对，对通关、过第一幕、过第二幕各做精确符号检验：只数两边不一致的配对（`only_first`、`only_second`），p 值双侧；整个目录和前 `--head` 个种子各报一次，只有一方跑过的种子计入 `unpaired`、不参与检验。未完成的对局算没通关、没过幕。一个目录也可以单独汇总。
 
-奖励只在一局结束时给：通关 +1，没有通关 −1，过幕不给分。未完成或出错的对局不伪造为正常死亡；采样轮里有这样的对局时 `collect` 报错，对局仍写出供检查。
+奖励只在一局结束时给：通关 +1，没有通关 −1，过幕不给分。未完成或出错的对局不伪造为正常死亡；采样轮里有这样的对局时 `collect` 报错，轮仍写出供检查。
+
+### 采样轮的格式
+
+`collect` 的一轮写到 `<输出>/round-N/`，与 `import-independent` 相同的分片加索引，`bootstrap --data <输出>/round-N` 直接读，样本权重与控制器过滤和导入数据一致；对局缓冲就是最近几轮的这些目录。
+
+| 文件 | 内容 |
+| --- | --- |
+| `accepted/*.jsonl.gz` | 打完的对局，每局一行（一个 gzip 成员）；每个分片约 `--shard-samples`（默认 2000）个保存的决策步 |
+| `index.jsonl.gz` | 每局一行：`run_id`、`seed`、角色、各阶段可训练宏动作数、契约哈希、分片与行号，另加 `policy_version`、`policy_digest`、`iteration`、`victory`；`reindex` 保留这些字段 |
+| `summary.json` | 轮的契约：`iteration`、策略版本与权重 digest、温度、难度、控制与奖励版本、对局数与胜场、各角色×阶段的宏动作数、战斗与存档计数、分片数、引擎契约（`contracts`），以及与 `evaluate` 相同的通关率报告（`report`） |
+| `<角色>-<序号>.combats.jsonl.gz` | 战斗记录，照旧 |
+| `<角色>-<序号>.saves.jsonl.gz` | 每场战斗入场时的引擎存档，见下 |
+| `metadata/seeds.json` | 种子分配 |
+| `quarantine/<角色>-<序号>.json.gz` | 没打完的对局（超时、引擎出错），`summary.json` 的 `quarantine` 记原因 |
+
+对局（`source: "rollout"`，`iteration` 默认取轮号 N，`--iteration` 可指定）只保留**战斗之外**的决策：每个策略宏动作的帧、完整候选、所选动作、`old_log_prob`、阶段、随后支付的奖励，`fight: null`。战斗里的宏动作——`combat` 阶段和战斗中的 `card_select`（弃牌、消耗等选择）——只记 `phase`、`fight`（这一局的第几场战斗，与 `encounter_id` 的编号相同）、`branches`（有选择的决策数）、`decisions`（决策数）、`old_log_prob` 与 `reward`，不保存帧；`policy_macros`／`samples()` 读到它们时不作训练样本，战斗的训练信号来自求解器标签。战斗的边界由引擎事件给出：`encounter_started` 开始，`encounter_completed` 之后的第一个决策在战斗之外。控制器步骤照旧记在 `environment_actions`。每局另记 `status`、`victory`、`acts`（每幕 `passed`／`died`，没打完时为空）、`ledger`、`climb`、`seed`、角色、难度、策略版本与 digest、按阶段的 `temperature`、`combats` 与 `saves` 的计数。`--journals` 时另写每局的流水账 `.jsonl`（每个帧与奖励，含战斗）。
+
+入场存档：每场战斗的第一个决策（`events` 带 `encounter_started`）时，采样进程让引擎 `write_continue_save` 到临时文件再读回；在房间里时引擎存的是进房前的状态（`anchor_state` 序列化的是已进房的状态，不能用）。每行带 `run_id`、`seed`、角色、难度、`fight`、`combat_index`（`combats` 里对应行的序号）、`encounter_id`、`encounter`、`kind`（normal／elite／boss）、`act`、`floor`、`map_point_type`（normal→monster、elite→elite、boss→boss）、`second_boss`（本幕第二个 Boss）、`from_event`、`result` 和 `save`。`model.saves.anchor_commands(row)` 给出重新进入这场战斗的两条引擎命令（`enter_anchor` → `anchor_room`）：重入的战斗与原战斗的 HP、最大 HP、金币、幕、楼层、卡组（含升级）、遗物、药水和敌人种类相同，敌人的随机 HP 与开局手牌由战斗自己的随机数重抽，与摘要锚点的战斗一样是同一入场状态的另一次战斗。引擎拒绝存档时该行 `save` 为空并带 `error`，`summary.json` 计入 `saves_failed`。事件引发的战斗照存并标 `from_event`，是否可用由求解器标签一侧判断。
+
+内存：采样进程一局内只保留压缩后的帧与存档，一局结束把对局压成分片里的一行交给采集进程追加到当前分片；采集进程不持有对局，每局只留报告用的几个字段。
 
 ## 训练监测网页
 
@@ -215,6 +237,7 @@ Steam Mod 的安装和接管入口见 [steam_recorder](../steam_recorder/README.
 | `loader.py`、`trainer.py`、`optim.py`、`checkpoint.py` | 数据供给、加权 NLL 更新、学习率日程与恢复 |
 | `rollout.py`、`rewards.py`、`steam.py` | 对局、奖励账本与实机控制 |
 | `evaluation.py` | 评估报告、合计与配对符号检验、留出 NLL 的表格 |
+| `saves.py`、`buffer.py` | 战斗边界与入场存档、采样轮的分片与汇总 |
 | `sampling.py`、`wire.py`、`processes.py` | 多进程采样、打包决策的跨进程格式、随父进程结束的子进程 |
 | `monitor.py`、`monitor_web/` | 只读日志监测 |
 

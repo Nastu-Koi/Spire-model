@@ -21,7 +21,22 @@ from .control import CONTROL_VERSION, controller_for, is_policy_frame, policy_ma
 from .dataset_index import INDEX, read_index
 
 
+SOURCES = {"demonstration", "recorder_bc", "independent", "rollout", "evaluation"}
+
+
+def _finite(macro):
+    """What a sampled run records of each macro-action: the log-probability it was
+    played with and the reward paid after it."""
+    for key in ("old_log_prob", "reward"):
+        if not isinstance(macro.get(key), (float, int)) or not math.isfinite(macro[key]):
+            raise ProtocolError(f"Missing or non-finite sampled {key}")
+
+
 def validate_run(run, *, on_policy=False):
+    """Check a run as data. A sampled run (`source == "rollout"`) is held to the
+    sampled checks whether or not `on_policy` asks for one: its versions, its
+    log-probabilities, and that controller steps are not among its samples. The
+    macro-actions it played inside fights keep counts instead of frames."""
     recorder_bc = run.get("source") == "recorder_bc"
     if recorder_bc and (
         on_policy
@@ -61,19 +76,12 @@ def validate_run(run, *, on_policy=False):
         raise ProtocolError("Incomplete, erroneous or unresolved run")
     if run.get("character") not in CHARACTERS or not run.get("run_id"):
         raise ProtocolError("Missing character/run identity")
-    if run.get("source") not in {
-        "demonstration",
-        "recorder_bc",
-        "independent",
-        "on_policy",
-        "evaluation",
-    }:
+    if run.get("source") not in SOURCES:
         raise ProtocolError("Unknown trajectory source")
-    if on_policy and (
-        run.get("source") != "on_policy" or run.get("sampling") != "full_distribution"
-    ):
+    sampled = run.get("source") == "rollout"
+    if (on_policy and not sampled) or (sampled and run.get("sampling") != "full_distribution"):
         raise ProtocolError(
-            "A sampled run is an autonomous full-distribution on-policy run"
+            "A sampled run is an autonomous full-distribution rollout"
         )
     if (
         not on_policy
@@ -83,7 +91,17 @@ def validate_run(run, *, on_policy=False):
         raise ProtocolError("Teacher visibility has not been verified")
     seen = set()
     for macro in run.get("macros", []):
-        steps = macro.get("steps", [])
+        if "steps" not in macro:
+            # A fight of a sampled run: taught by the solver from its entry save, it
+            # keeps how many decisions it held and how likely its play was, no frames.
+            if not sampled or macro.get("fight") is None:
+                raise ProtocolError("Only the fights of a sampled run keep no frames")
+            branches, decisions = macro.get("branches"), macro.get("decisions")
+            if type(branches) is not int or type(decisions) is not int or not 1 <= branches <= decisions:
+                raise ProtocolError("A macro-action without frames needs its decision counts")
+            _finite(macro)
+            continue
+        steps = macro["steps"]
         if not steps:
             raise ProtocolError("Empty macro")
         segment = segment_key(steps[0]["frame"])
@@ -92,7 +110,7 @@ def validate_run(run, *, on_policy=False):
             frame = step["frame"]
             validate_frame(frame)
             phase = frame["public"]["phase"]
-            if on_policy and controller_for(phase, frame["legal"]["candidates"]) is not None:
+            if sampled and controller_for(phase, frame["legal"]["candidates"]) is not None:
                 raise ProtocolError(
                     "Controller actions are environment steps, not policy samples"
                 )
@@ -117,15 +135,9 @@ def validate_run(run, *, on_policy=False):
             branches += not forced
         if not branches:
             raise ProtocolError("Forced-only macro must not be a training sample")
-        if on_policy:
-            # What a sampled run records of each macro-action: the log-probability it
-            # was played with and the reward paid after it.
-            for key in ("old_log_prob", "reward"):
-                if not isinstance(macro.get(key), (float, int)) or not math.isfinite(
-                    macro[key]
-                ):
-                    raise ProtocolError(f"Missing or non-finite sampled {key}")
-    if on_policy:
+        if sampled:
+            _finite(macro)
+    if sampled:
         from .public_history import require_history_version
 
         require_history_version(run.get("contract", {}).get("public_history_version"))
@@ -152,7 +164,7 @@ def audit_files(paths, accepted, quarantine):
                     raise ProtocolError("Duplicate complete-run identity")
                 identities.add(identity)
                 for macro in run["macros"]:
-                    for step in macro["steps"]:
+                    for step in macro.get("steps", ()):
                         step["frame"] = clean_frame(step["frame"])
                 counts.update(run["character"] + "/" + macro["phase"] for macro in policy_macros(run))
                 good.write(json.dumps(run, allow_nan=False) + "\n")

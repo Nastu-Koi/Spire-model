@@ -165,6 +165,16 @@ class SyntheticEngine:
     def send(self, command):
         if command["cmd"] == "advance_to_boundary":
             return self.frame()
+        if command["cmd"] == "write_continue_save":
+            # The engine writes its continue save to the path it is given; a stand-in
+            # with the fields a reader looks at.
+            import json
+            from pathlib import Path
+
+            save = {"players": [{"current_hp": 70, "max_hp": 80, "gold": 99}],
+                    "seed": self.seed, "state_version": self.version, "synthetic": True}
+            Path(command["path"]).write_text(json.dumps(save))
+            return {"type": "save_result", "success": True, "path": command["path"]}
         before = self.frame()
         try:
             expected = execution_command(before, command["candidate_ref"])
