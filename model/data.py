@@ -468,6 +468,8 @@ class Sample:
     """A macro-action to learn from, with what the weighted NLL trainer and its reports
     need of it. `source` is what the weights tell apart (`sample_source`): the run's
     source, or `student_battle` for the solver's labels on the policy's own fights.
+    `index` is its place among its run's macro-actions: with `run_id` it names the
+    sample, which is how a sampled decision finds its advantage (`model/awr.py`).
     `macro` is None once a feeder has packed it: the fields after it travel on alone."""
 
     macro: dict | None
@@ -478,15 +480,16 @@ class Sample:
     branches: int  # decisions of the macro-action that had a choice
     ascension: int | None
     source: str | None = None
+    index: int | None = None
     _lengths: tuple[tuple[int, int], ...] | None = field(
         default=None, repr=False, compare=False
     )
 
 
-def _sample(run, macro, weight, source):
+def _sample(run, macro, weight, source, index):
     branches = sum(is_policy_frame(step["frame"]) for step in macro["steps"])
     return Sample(macro, run["character"], run["run_id"], weight, macro["phase"], branches,
-                  run.get("ascension"), source)
+                  run.get("ascension"), source, index)
 
 
 def samples(runs, *, weights=None):
@@ -504,8 +507,10 @@ def samples(runs, *, weights=None):
     for run in runs:
         validate_run(run)
         source = sample_source(run)
+        place = {id(macro): index for index, macro in enumerate(run["macros"])}
         for macro in policy_macros(run):
-            result.append(_sample(run, macro, weights[run["character"], macro["phase"], source], source))
+            result.append(_sample(run, macro, weights[run["character"], macro["phase"], source], source,
+                                  place[id(macro)]))
     return result
 
 

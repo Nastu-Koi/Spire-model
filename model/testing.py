@@ -11,19 +11,38 @@ class SyntheticEngine:
 
     def reset(self, character="Ironclad", seed="test", ascension=10):
         self.character, self.seed, self.ascension = character, str(seed), ascension
-        self.selected, self.version, self.stage = [], 0, "selection"
+        self.commands = []
+        self.version = 0
+        self.enter("ordinary")
+        return self.frame()
+
+    def enter(self, encounter):
+        """Begin a fight: the selection, which the engine's event names."""
+        self.encounter = encounter
+        self.selected, self.stage = [], "selection"
         self.events = [
             {
                 "type": "encounter_started",
-                "encounter_id": "ordinary",
+                "encounter_id": encounter,
                 "encounter": "ENCOUNTER.SYNTHETIC",
                 "act": 1,
                 "kind": "normal",
                 "from_event": False,
             }
         ]
-        self.commands = []
-        return self.frame()
+
+    def leave(self, candidate):
+        """The decision after the fight: it ends the run, won by playing the card."""
+        self.stage = "terminal"
+        self.won = candidate["verb"] == "PLAY_CARD"
+        self.events = [
+            {
+                "type": "run_completed",
+                "victory": self.won,
+                "act": 3,
+                "final_boss_defeated": self.won,
+            }
+        ]
 
     @property
     def contract(self):
@@ -195,7 +214,7 @@ class SyntheticEngine:
                 self.events = [
                     {
                         "type": "encounter_completed",
-                        "encounter_id": "ordinary",
+                        "encounter_id": self.encounter,
                         "act": 1,
                         "kind": "normal",
                         "result": "victory",
@@ -204,16 +223,7 @@ class SyntheticEngine:
             else:
                 self.selected.append(int(candidate["decoder_slot_ref"].split(":")[1]))
         else:
-            self.stage = "terminal"
-            self.won = candidate["verb"] == "PLAY_CARD"
-            self.events = [
-                {
-                    "type": "run_completed",
-                    "victory": self.won,
-                    "act": 3,
-                    "final_boss_defeated": self.won,
-                }
-            ]
+            self.leave(candidate)
         return self.frame()
 
     def __enter__(self):
@@ -221,6 +231,36 @@ class SyntheticEngine:
 
     def __exit__(self, *_):
         pass
+
+
+class Journey(SyntheticEngine):
+    """A run through several rooms: in each a fight (the selection, in the combat
+    phase) and after it one decision outside the fight, standing on the room's floor.
+    The decision after the last fight ends the run, won by playing the card; the
+    earlier ones lead into the next room whatever is chosen."""
+
+    def __init__(self, count=4, select=2, *, rooms=3):
+        super().__init__(count, select)
+        self.rooms = rooms
+
+    def reset(self, character="Ironclad", seed="test", ascension=10):
+        self.room = 0
+        return super().reset(character, seed, ascension)
+
+    def frame(self):
+        frame = super().frame()
+        frame["public"]["entities"][0].update(floor=self.room + 1, gold=10 * self.room)
+        if self.stage == "selection":
+            frame["public"]["phase"] = "combat"
+            # Each fight's selection is a selection of its own.
+            frame["routing"]["selection_id"] += f":{self.room}"
+        return frame
+
+    def leave(self, candidate):
+        if self.room + 1 == self.rooms:
+            return super().leave(candidate)
+        self.room += 1
+        self.enter(f"ordinary-{self.room}")
 
 
 def demonstration(character="Ironclad", seed="demo", count=10, select=5):
