@@ -465,7 +465,10 @@ function renderStatus(run) {
 }
 // Wall-clock seconds per update over the newest stretch, loading and logging included.
 function wallPace() {
-  const points = tail(200), time = state.data.meta.time;
+  let points = tail(200);
+  const time = state.data.meta.time, round = state.data.meta.round;
+  // An iteration's updates are minutes of other steps apart from the next one's: only the newest iteration's count.
+  if (state.data.run.kind === "iterate") points = points.filter((i) => round[i] === round[points.at(-1)]);
   const from = points.find((i) => time[i] !== null), to = points.findLast((i) => time[i] !== null);
   return from !== undefined && to > from && time[to] > time[from] ? (time[to] - time[from]) / (points.indexOf(to) - points.indexOf(from)) : null;
 }
@@ -482,7 +485,7 @@ function renderSummary(run) {
   const recent = tail(200), span = recent.length;
   const updates = ["累计更新", fmt(last?.update, 0), `${isNumber(last?.round) ? roundName(run.kind, last.round) + " · " : ""}策略版本 ${fmt(last?.policy_version, 0)}${live ? " · 每次 " + fmt(m.samples, 0) + " 个宏动作" : ""}`];
   const pace = live ? wallPace() : null;
-  const speed = ["更新速度", pace === null ? "—" : `${fmt(pace, 2)} 秒/次`, pace === null ? "需要同一会话内的连续更新" : `近 ${span} 次墙钟均值 · 约 ${fmt(3600 / pace, 0)} 次/小时`];
+  const speed = ["更新速度", pace === null ? "—" : `${fmt(pace, 2)} 秒/次`, pace === null ? "需要同一会话内的连续更新" : `${run.kind === "iterate" ? "最近一次迭代内的" : "近 " + span + " 次"}墙钟均值 · 约 ${fmt(3600 / pace, 0)} 次/小时`];
   let cards;
   if (live) {
     const hits = recent.reduce((sum, i) => sum + count(data.metrics.accuracy_correct?.[i]), 0), decisions = recent.reduce((sum, i) => sum + count(data.metrics.accuracy_decisions?.[i]), 0);
