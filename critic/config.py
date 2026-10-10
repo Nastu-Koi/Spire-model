@@ -53,6 +53,10 @@ class TrainingConfig(Budgets):
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     warmup_updates: int = 20  # linear warmup, then a linear decay to zero at the last update
+    # What trains beside the head: the whole body, only its top `train_blocks` global
+    # layers with the final norm, or nothing of it (`train_body` false: a linear probe).
+    train_body: bool = True
+    train_blocks: int | None = None
     act_weight: float = 1.0  # weight of the act-passed loss against the run-won loss
     logical_batch_size: int = 256  # decisions per update
     precision: str = "bf16"
@@ -70,6 +74,8 @@ class TrainingConfig(Budgets):
                 or not 0 <= self.muon_momentum < 1 or type(self.muon_ns_steps) is not int
                 or self.muon_ns_steps < 1):
             raise ValueError("Learning rates, gradient limit and Muon settings must be positive")
+        if self.train_blocks is not None and (type(self.train_blocks) is not int or self.train_blocks < 1):
+            raise ValueError("train_blocks counts global layers from the top and must be positive")
         if min(self.weight_decay, self.act_weight) < 0:
             raise ValueError("Weight decay and loss weights must be nonnegative")
         if self.precision not in {"no", "bf16"}:

@@ -12,7 +12,7 @@ from critic.config import Budgets, CriticConfig, TrainingConfig
 from critic.data import decisions
 from critic.model import Critic, Scorer, load
 from critic.tests.conftest import frames_of
-from critic.train import build_optimizer, main, set_head_bias
+from critic.train import build_optimizer, main, set_head_bias, trainable
 from model.config import ModelConfig
 from model.model import PolicyValue
 from model.representation import Vocabulary
@@ -104,6 +104,16 @@ def test_the_body_is_the_policy_weights_and_the_optimizer_groups_are_the_policy_
     assert len(muon["params"]) == len(linears) and all(p.ndim == 2 for p in muon["params"])
     tables = next(group for group in optimizer.param_groups if group["name"] == "embedding_no_decay")
     assert len(tables["params"]) == 4 and tables["lr"] == 1e-3 and tables["weight_decay"] == 0.0
+
+    # A linear probe trains the head alone, with AdamW alone; `train_blocks` adds the top layers.
+    probe = TrainingConfig(precision="no", train_body=False)
+    assert [name for name, _ in trainable(net, probe)] == ["head.weight", "head.bias"]
+    assert {group["name"] for group in build_optimizer(net, probe).param_groups} == {"head_decay", "head_no_decay"}
+    top = [name for name, _ in trainable(net, TrainingConfig(precision="no", train_blocks=1))]
+    assert all(name.startswith(("head.", "body.final_norm.", "body.blocks.1.")) for name in top)
+    assert any(name.startswith("body.blocks.1.") for name in top) and not any("blocks.0." in name for name in top)
+    with pytest.raises(ValueError):
+        TrainingConfig(train_blocks=0)
 
 
 def test_the_untrained_head_predicts_the_base_rates(runs):
