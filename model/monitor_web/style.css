@@ -222,6 +222,10 @@ select {
   background:#82c9a4;
 }
 
+.kind-dot.iterate {
+  background:#b9a7e8;
+}
+
 .search input {
   background:#1e382e;
   border:1px solid #3c5347;

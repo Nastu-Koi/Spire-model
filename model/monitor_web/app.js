@@ -13,9 +13,15 @@ const METRICS = {
   last_grad_norm: "梯度范数（裁剪前）", gradient_clip_fraction: "梯度裁剪比例",
   samples: "每次更新的宏动作数", weight: "逻辑批权重", loss_scale: "损失缩放",
   validation_nll: "混合验证 NLL / 分支", a0_validation_nll: "A0 验证 NLL / 分支", duration_seconds: "耗时（秒）",
+  awr_loss: "AWR 损失（加权局外样本）", supervised_loss: "示范与求解器标签损失", beta: "β（优势权重温度）",
+  effective_share: "有效样本占比", effective_samples: "有效样本数", sampled_samples: "每次更新的局外样本数",
 };
+// A run's kind: a behavior-cloning run, or the iterations of policy improvement.
+const KINDS = { bootstrap: "Bootstrap", iterate: "迭代" };
+const STEPS = { sample: "采样", labels: "求解器标签", critic: "胜率模型续训", update: "策略更新", evaluation: "评估" };
+const roundName = (kind, number) => kind === "iterate" ? `迭代 ${number}` : `第 ${number} 轮`;
 // Offered first, in this order; any other metric a log carries follows them.
-const CHOICES = ["entropy", "last_grad_norm", "gradient_clip_fraction"];
+const CHOICES = ["awr_loss", "supervised_loss", "beta", "effective_share", "entropy", "last_grad_norm", "gradient_clip_fraction"];
 const CHARTED = ["loss", "accuracy", "duration_seconds"];
 const COUNTERS = new Set(["updates", "accuracy_correct", "accuracy_decisions"]);
 const SMOOTH_STEPS = [1000, 500, 200, 100, 50, 20, 10];
@@ -24,7 +30,7 @@ const isObject = (value) => value !== null && typeof value === "object" && !Arra
 const count = (value) => isNumber(value) ? value : 0;
 const fmt = (value, digits = 4) => !isNumber(value) ? "—" : value.toLocaleString("zh-CN", { maximumFractionDigits: digits });
 const pct = (value, digits = 1) => !isNumber(value) ? "—" : `${fmt(value * 100, digits)}%`;
-const percentMetric = (key) => key.endsWith("rate") || key.endsWith("fraction") || key === "accuracy";
+const percentMetric = (key) => key.endsWith("rate") || key.endsWith("fraction") || key === "accuracy" || key === "effective_share";
 const metricLabel = (key) => METRICS[key] || (key.startsWith("learning_rates.") ? "学习率 · " + key.slice(15) : key.startsWith("grad_norm.") ? "梯度范数 · " + key.slice(10) : key);
 const metricText = (key, value) => percentMetric(key) ? pct(value) : !isNumber(value) ? "—" : value !== 0 && Math.abs(value) < 1e-3 ? value.toExponential(2) : fmt(value);
 const runLabel = (run) => run.id.includes("/") ? run.id.split("/").slice(-2).join(" / ") : run.name;
@@ -87,7 +93,7 @@ function renderRuns() {
   const runs = filteredRuns();
   const signature = JSON.stringify([runs.map((run) => [run.id, run.kind, run.status.state, run.status.updates, run.status.round]), state.selected]);
   $("count-all").textContent = state.runs.length;
-  $("count-bootstrap").textContent = state.runs.filter((run) => run.kind === "bootstrap").length;
+  for (const kind of Object.keys(KINDS)) $("count-" + kind).textContent = state.runs.filter((run) => run.kind === kind).length;
   if (signature === state.listText) return;
   state.listText = signature;
   $("run-list").replaceChildren();
@@ -100,7 +106,7 @@ function renderRuns() {
     const title = el("strong");
     title.append(el("i", "run-dot " + (run.status.state === "failed" ? "failed" : ACTIVE.has(run.status.state) ? "active" : "idle")), runLabel(run));
     const meta = el("span", "run-meta");
-    meta.append(el("span", "", "Bootstrap"), el("span", "", STATES[run.status.state] || "状态未知"));
+    meta.append(el("span", "", KINDS[run.kind] || run.kind), el("span", "", STATES[run.status.state] || "状态未知"));
     if (isNumber(run.status.updates)) meta.append(el("span", "", "Update " + fmt(run.status.updates, 0)));
     button.append(title, ...(run.id === "." || run.id === run.name ? [] : [el("small", "", run.id)]), meta);
     button.addEventListener("click", () => {
@@ -437,10 +443,12 @@ function renderStatus(run) {
   const parts = [];
   const updates = isNumber(status.updates) ? status.updates : latest?.update ?? null;
   if (updates !== null) parts.push(`Update ${fmt(updates, 0)}`);
-  if (isNumber(status.round)) parts.push(`第 ${status.round} 轮`);
+  if (isNumber(status.round)) parts.push(roundName(run.kind, status.round));
+  // An iteration says which of its steps is under way.
+  if (typeof status.step === "string") parts.push(STEPS[status.step] || status.step);
   const written = age(run.updated_at);
-  // An estimate only while the trainer is still writing.
-  const pace = ACTIVE.has(status.state) && written !== null && written <= 900 ? roundPace(updates) : null;
+  // An estimate only while the trainer is still writing; an iteration is not one pass of updates.
+  const pace = run.kind === "bootstrap" && ACTIVE.has(status.state) && written !== null && written <= 900 ? roundPace(updates) : null;
   if (pace) parts.push(`本轮约 ${pct(pace.done, 0)}${pace.remaining !== null ? "，预计还需 " + duration(pace.remaining) : ""}（按上一轮 ${fmt(pace.length, 0)} 次更新估算）`);
   $("status-detail").textContent = parts.join(" · ");
   $("updated").textContent = run.updated_at ? `状态写入 ${ago(written)} · ${date(run.updated_at)}` : "未记录状态时间";
@@ -453,7 +461,7 @@ function renderStatus(run) {
   if (latest && !isNumber(latest.metrics.accuracy)) warnings.push("该记录未包含动作正确率。训练进程加载新代码后才会写入，旧记录无法由损失反推。");
   if (latest?.session && status.session && latest.session !== status.session) warnings.push("最近指标来自上一次训练会话，正在等待本次会话的更新记录。");
   $("warnings").replaceChildren(...warnings.map((message) => el("div", "notice", message)));
-  $("record-count").textContent = `${fmt(run.total_records, 0)} 条${run.source === "updates" ? "更新" : "汇总"}记录 · ${fmt(data.summaries.length, 0)} 轮汇总`;
+  $("record-count").textContent = `${fmt(run.total_records, 0)} 条${run.source === "updates" ? "更新" : "汇总"}记录 · ${fmt(data.summaries.length, 0)} ${run.kind === "iterate" ? "次迭代" : "轮"}汇总`;
 }
 // Wall-clock seconds per update over the newest stretch, loading and logging included.
 function wallPace() {
@@ -472,7 +480,7 @@ function roundPace(updates) {
 function renderSummary(run) {
   const data = state.data, last = run.latest, m = last?.metrics || {}, live = run.source === "updates";
   const recent = tail(200), span = recent.length;
-  const updates = ["累计更新", fmt(last?.update, 0), `${isNumber(last?.round) ? "第 " + last.round + " 轮 · " : ""}策略版本 ${fmt(last?.policy_version, 0)}${live ? " · 每次 " + fmt(m.samples, 0) + " 个宏动作" : ""}`];
+  const updates = ["累计更新", fmt(last?.update, 0), `${isNumber(last?.round) ? roundName(run.kind, last.round) + " · " : ""}策略版本 ${fmt(last?.policy_version, 0)}${live ? " · 每次 " + fmt(m.samples, 0) + " 个宏动作" : ""}`];
   const pace = live ? wallPace() : null;
   const speed = ["更新速度", pace === null ? "—" : `${fmt(pace, 2)} 秒/次`, pace === null ? "需要同一会话内的连续更新" : `近 ${span} 次墙钟均值 · 约 ${fmt(3600 / pace, 0)} 次/小时`];
   let cards;
@@ -506,8 +514,8 @@ function renderCurves() {
   const { round, time, session } = data.meta;
   const smooth = smoothing(view.plot.length);
   const marks = [];
-  for (let p = 1; p < view.plot.length; p++) if (round[view.plot[p]] !== null && round[view.plot[p]] !== round[view.plot[p - 1]] && view.x[p] > view.x[p - 1]) marks.push({ x: view.x[p], label: `第 ${round[view.plot[p]]} 轮` });
-  const heading = (p) => `Update ${fmt(view.x[p], 0)}${round[view.plot[p]] !== null ? ` · 第 ${round[view.plot[p]]} 轮` : ""}`;
+  for (let p = 1; p < view.plot.length; p++) if (round[view.plot[p]] !== null && round[view.plot[p]] !== round[view.plot[p - 1]] && view.x[p] > view.x[p - 1]) marks.push({ x: view.x[p], label: roundName(run.kind, round[view.plot[p]]) });
+  const heading = (p) => `Update ${fmt(view.x[p], 0)}${round[view.plot[p]] !== null ? ` · ${roundName(run.kind, round[view.plot[p]])}` : ""}`;
   const detail = (p) => {
     const i = view.plot[p], id = data.labels.session[session[i]];
     return [time[i] !== null ? date(time[i]) : null, id ? `Session ${String(id).slice(0, 8)}` : null].filter(Boolean);
@@ -560,10 +568,22 @@ function noData(title, text) {
   node.append(el("div", "", title), el("p", "", text));
   return node;
 }
+// The iterations of policy improvement: what each one sampled, how its critic measured
+// on held-out runs, how its update was weighted and what it lost.
+function renderIterations(panel, rounds) {
+  if (!rounds.length) { panel.append(noData("还没有完成的迭代", "每完成一次迭代写入一条汇总；策略更新的逐更新指标在上方曲线。")); return; }
+  panel.append(el("p", "panel-note", "每次迭代结束时的汇总，最新在前。通关率与楼层来自本次采样（按温度抽样，不是评估）；EV 为胜率模型在留出对局上对 ±1 回报的解释方差；β 与有效样本占比是本次各更新批的均值；门槛未过时策略不更新。"));
+  const gate = (m) => m.policy_updated === false ? "未过，未更新" : m.critic_gate_passed === true ? "通过" : m.critic_gate_passed === false ? "未过（未启用）" : "—";
+  panel.append(table(["迭代", "Update", "采样通关率", "平均楼层", "胜率模型 EV", "门槛", "β", "有效样本占比", "AWR 损失", "示范损失", "评估通关率", "耗时", "完成时间"], rounds.map((record) => {
+    const m = record.metrics;
+    return [fmt(record.round, 0), fmt(record.update, 0), pct(m.sampled_win_rate), fmt(m.sampled_mean_floor, 1), fmt(m.critic_win_ev, 3), gate(m), fmt(m.beta, 3), pct(m.effective_share), fmt(m.awr_loss), fmt(m.supervised_loss), pct(m.eval_win_rate), duration(m.duration_seconds), date(record.time)];
+  })).wrap);
+}
 function renderRounds() {
   const panel = $("panel-rounds");
   const rounds = state.data.summaries.slice(-500).reverse();
   panel.replaceChildren();
+  if (state.data.run.kind === "iterate") { renderIterations(panel, rounds); return; }
   if (!rounds.length) { panel.append(noData("还没有完成的轮次", "每完成一轮写入一条汇总；逐更新指标在上方曲线。")); return; }
   panel.append(el("p", "panel-note", "每个 epoch 结束时的汇总，最新在前。损失和正确率是整轮的加权值，不是末次更新。"));
   panel.append(table(["轮次", "Update", "平均损失", "正确率", "策略熵", "末次梯度范数", "耗时", "完成时间"], rounds.map((record) => [
@@ -648,8 +668,9 @@ function renderDetail() {
   $("dashboard").hidden = false;
   $("run-name").textContent = runLabel(run);
   $("run-path").textContent = run.path;
-  $("run-kind").textContent = "BOOTSTRAP";
+  $("run-kind").textContent = (KINDS[run.kind] || run.kind).toUpperCase();
   $("run-kind").className = "tag " + run.kind;
+  $("tab-rounds").textContent = run.kind === "iterate" ? "迭代汇总" : "轮次汇总";
   $("export").disabled = !data.n;
   renderStatus(run);
   renderSummary(run);

@@ -1,4 +1,8 @@
-"""Read-only Bootstrap dashboard; deliberately independent of Torch."""
+"""Read-only training dashboard; deliberately independent of Torch.
+
+It reads what `history.TrainingHistory` writes: the logs of a behavior-cloning run
+(`bootstrap`) and of the iterations of policy improvement (`iterate`, whose rounds are
+iterations and whose update records are those of its advantage-weighted updates)."""
 
 import argparse
 from array import array
@@ -18,7 +22,7 @@ import uuid
 
 
 WEB = Path(__file__).with_name("monitor_web")
-KINDS = {"bootstrap"}
+KINDS = {"bootstrap", "iterate"}
 # Complete records kept per update log: the page tabulates only this many.
 RECENT = 200
 # Dictionaries of numbers that become one curve per entry.
@@ -63,7 +67,7 @@ def normalize_record(raw, *, strict=False):
     `strict` says the caller already parsed NaN and Infinity away.
     """
     if not isinstance(raw, dict) or not isinstance(raw.get("kind"), str) or raw["kind"] not in KINDS:
-        raise ValueError("Not a Bootstrap training record")
+        raise ValueError("Not a training record of a known kind")
     if not strict:
         raw = finite_json(raw)
     epochs = raw.get("metrics", {})
