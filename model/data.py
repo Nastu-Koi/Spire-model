@@ -83,11 +83,13 @@ def validate_run(run, *, on_policy=False):
         raise ProtocolError("Teacher visibility has not been verified")
     seen = set()
     for macro in run.get("macros", []):
+        # A round handed over by its sampling processes holds the packed decisions of
+        # its macro-actions instead of their frames, which were checked as they were played.
         steps = macro.get("steps", [])
-        if not steps:
+        if not steps and not macro.get("packed"):
             raise ProtocolError("Empty macro")
-        segment = segment_key(steps[0]["frame"])
-        branches = 0
+        segment = segment_key(steps[0]["frame"]) if steps else None
+        branches = len(macro.get("packed", ()))
         for step in steps:
             frame = step["frame"]
             validate_frame(frame)
@@ -323,8 +325,9 @@ class Sample:
 
 
 def _sample(run, macro, weight):
-    return Sample(macro, run["character"], run["run_id"], weight, macro["phase"],
-                  sum(is_policy_frame(step["frame"]) for step in macro["steps"]), run.get("ascension"))
+    branches = (len(macro["packed"]) if "packed" in macro
+                else sum(is_policy_frame(step["frame"]) for step in macro["steps"]))
+    return Sample(macro, run["character"], run["run_id"], weight, macro["phase"], branches, run.get("ascension"))
 
 
 def samples(runs, *, ppo=False, horizon_scale=100.0, counts=None):
@@ -368,6 +371,10 @@ def bucket_size(length, buckets):
 
 def sample_lengths(item, observe=None):
     """(tokens, action slots) of every branching decision of a sample."""
+    if "packed" in item.macro:
+        from .wire import dimensions
+
+        return tuple(map(dimensions, item.macro["packed"]))
     if observe is None:
         from .representation import observation as observe
 

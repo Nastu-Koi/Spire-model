@@ -233,8 +233,9 @@ def test_tables_fall_geometrically_over_their_decay_then_hold(tmp_path):
         scheduler.step()
     assert tables == pytest.approx([1e-2, 1e-2 * 0.1 ** .25, 1e-2 * 0.1 ** .5, 1e-2 * 0.1 ** .75, 1e-3, 1e-3])
     assert heads == [3e-5] * 6
+    # PPO does not take the tables of a trained network back to their first rate.
     scheduler.prepare("ppo")
-    assert optimizer.param_groups[0]["lr"] == 1e-2
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([1e-3, 3e-5])
     # The table decay is part of the schedule a strict resume must match.
     with pytest.raises(ValueError, match="table decay"):
         BootstrapSchedule(optimizer, 0).load_state_dict(scheduler.state_dict())
@@ -256,6 +257,87 @@ def test_tables_fall_geometrically_over_their_decay_then_hold(tmp_path):
                     progress={"updates": learner.updates, "policy_version": learner.policy_version})
     resumed, _ = _learner(saved, "cpu")
     assert resumed.scheduler.table_decay_updates == 2 and resumed.scheduler.completed_updates == learner.updates
+
+
+def test_ppo_moves_the_muon_matrices_at_a_rate_of_its_own():
+    parameters = [torch.nn.Parameter(torch.ones(1)) for _ in range(2)]
+    optimizer = torch.optim.AdamW([{"params": [parameters[0]], "lr": 1e-3, "name": "muon"},
+                                   {"params": [parameters[1]], "lr": 3e-5, "name": "head_decay"}])
+    scheduler = BootstrapSchedule(optimizer, 0, ppo_muon_ratio=0.2)
+    rates = []
+    for mode in ("bootstrap", "ppo", "value", "bootstrap"):
+        scheduler.prepare(mode)
+        rates.append([group["lr"] for group in optimizer.param_groups])
+        scheduler.step()
+    assert rates == [pytest.approx(pair) for pair in ([1e-3, 3e-5], [2e-4, 3e-5], [2e-4, 3e-5], [1e-3, 3e-5])]
+    # The rate is the configuration's, and a schedule saved before it existed resumes.
+    _, vocabulary, model, training = setup()
+    learner = Learner(model, vocabulary, replace(training, muon_lr=1e-3, ppo_muon_lr=2e-4))
+    assert learner.scheduler.ppo_muon_ratio == pytest.approx(0.2)
+    BootstrapSchedule(optimizer, 0, ppo_muon_ratio=0.2).load_state_dict(BootstrapSchedule(optimizer, 0).state_dict())
+    assert TrainConfig.from_dict({"muon_lr": 1e-3}).ppo_muon_lr == 2e-4
+    with pytest.raises(ValueError):
+        TrainConfig(ppo_muon_lr=0)
+
+
+def as_saved_before_value_groups(path):
+    """Rewrite a checkpoint's optimizer and schedule as they were saved when the value
+    head's parameters were the last of the head groups."""
+    manifest = json.loads((path / "manifest.json").read_text())
+    state = torch.load(path / manifest["optimizer"], weights_only=True)
+    groups = {group["name"]: group for group in state["param_groups"]}
+    values = [name for name in groups if name.startswith("value")]
+    for name in values:
+        groups["head" + name[len("value"):]]["params"] += groups[name]["params"]
+    state["param_groups"] = [group for group in state["param_groups"] if group["name"] not in values]
+    torch.save(state, path / manifest["optimizer"])
+    runtime = torch.load(path / "runtime.pt", weights_only=True)
+    kept = [i for i, group in enumerate(groups) if group not in values]
+    runtime["scheduler"]["base_lrs"] = [runtime["scheduler"]["base_lrs"][i] for i in kept]
+    torch.save(runtime, path / "runtime.pt")
+    return len(values)
+
+
+def test_the_value_head_learns_at_a_rate_of_its_own_and_older_checkpoints_resume(tmp_path):
+    runs, vocabulary, model, training = setup()
+    training = replace(training, head_lr=3e-5, value_lr=2e-3)
+    learner = Learner(model, vocabulary, training)
+    rates = {group["name"]: group["lr"] for group in learner.optimizer.param_groups}
+    assert rates["value_decay"] == rates["value_no_decay"] == 2e-3 and rates["head_decay"] == 3e-5
+    named = {id(parameter): name for name, parameter in model.named_parameters()}
+    members = {group["name"]: [named[id(p)] for p in group["params"]] for group in learner.optimizer.param_groups}
+    assert members["value_decay"] == ["value.weight"] and members["value_no_decay"] == ["value.bias"]
+    assert not any(name.startswith("value") for group in ("head_decay", "head_no_decay") for name in members[group])
+    with pytest.raises(ValueError):
+        TrainConfig(value_lr=0)
+    # A checkpoint from before the groups existed: BC has moved everything but the value head.
+    learner.bootstrap(runs)
+    saved = tmp_path / "older"
+    save_checkpoint(saved, model, vocabulary, learner.optimizer, learner.scheduler, training=training,
+                    progress={"updates": learner.updates, "policy_version": learner.policy_version})
+    assert as_saved_before_value_groups(saved) == 2
+    resumed, _ = _learner(saved, "cpu")
+    assert [group["name"] for group in resumed.optimizer.param_groups] \
+        == [group["name"] for group in learner.optimizer.param_groups]
+    assert {group["name"]: group["lr"] for group in resumed.optimizer.param_groups}["value_decay"] == 2e-3
+    assert resumed.scheduler.base_lrs == learner.scheduler.base_lrs
+    # The moments the policy was trained with are where they were, parameter by parameter.
+    ours = {name: parameter for name, parameter in model.named_parameters()}
+    theirs = {name: parameter for name, parameter in resumed.model.named_parameters()}
+    moved = 0
+    for name in ours:
+        before, after = learner.optimizer.state.get(ours[name]), resumed.optimizer.state.get(theirs[name])
+        assert (before is None or not before) == (after is None or not after), name
+        if before:
+            moved += 1
+            torch.testing.assert_close(before["exp_avg"], after["exp_avg"], rtol=0, atol=0)
+            torch.testing.assert_close(before["exp_avg_sq"], after["exp_avg_sq"], rtol=0, atol=0)
+    assert moved and not learner.optimizer.state.get(ours["value.weight"])
+    # And the next save resumes as it is.
+    again = tmp_path / "again"
+    save_checkpoint(again, resumed.model, vocabulary, resumed.optimizer, resumed.scheduler, training=training,
+                    progress={"updates": resumed.updates, "policy_version": resumed.policy_version})
+    assert _learner(again, "cpu")[0].scheduler.base_lrs == learner.scheduler.base_lrs
 
 
 def test_warmup_reaches_old_rates_and_does_not_scale_ppo_or_value():
@@ -401,3 +483,23 @@ def test_feeders_and_their_workers_end_when_the_trainer_is_killed(tmp_path, monk
     while time.monotonic() < deadline and any(group_alive(pid) for pid in feeders):
         time.sleep(0.2)
     assert not any(group_alive(pid) for pid in feeders)
+
+
+def test_a_profile_sets_ppo_settings_anew_and_nothing_else(tmp_path):
+    runs, vocabulary, model, training = setup()
+    learner = Learner(model, vocabulary, training)
+    learner.bootstrap(runs)
+    saved = tmp_path / "saved"
+    save_checkpoint(saved, model, vocabulary, learner.optimizer, learner.scheduler, training=training,
+                    progress={"updates": learner.updates, "policy_version": learner.policy_version})
+    profile = replace(training, bootstrap_coef=0.2, bootstrap_batch_size=64, target_kl=0.01,
+                      ppo_epochs=3, ppo_muon_lr=1e-4, entropy_coef=0.0)
+    assert training.with_ppo(profile) == profile
+    resumed, _ = _learner(saved, "cpu", training=profile)
+    assert resumed.config == profile and resumed.updates == learner.updates
+    assert resumed.scheduler.ppo_muon_ratio == pytest.approx(1e-4 / training.muon_lr)
+    # What the optimizer state was built under stays the checkpoint's.
+    with pytest.raises(ValueError, match="PPO settings only.*head_lr, logical_batch_size"):
+        _learner(saved, "cpu", training=replace(profile, head_lr=1e-4, logical_batch_size=8))
+    assert parser().parse_args(["train", "--checkpoint", "c", "--output", "o", "--config", "p.json",
+                                "--demonstrations", "d"]).config == "p.json"

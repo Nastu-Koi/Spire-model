@@ -36,7 +36,19 @@ class SessionPolicy:
         self.precision = None
         self.last_state_version = None
 
-    def choose(self, frame, *, teacher=None, sample=True, top_k=0, pad_to=None):
+    def advance(self, frame):
+        """Enter the next decision of the session; returns its legal candidates."""
+        segment = segment_key(frame)
+        if self.segment != segment:
+            self.reset()
+            self.segment = segment
+        state_version = frame["routing"]["state_version"]
+        if self.last_state_version is not None and state_version <= self.last_state_version:
+            raise ProtocolError("Decisions require a fresh state/prefix version after each action")
+        self.last_state_version = state_version
+        return frame["legal"]["candidates"]
+
+    def choose(self, frame, *, teacher=None, sample=True, top_k=0, pad_to=None, temperature=1.0):
         return choose_batch(
             [self],
             [frame],
@@ -44,6 +56,7 @@ class SessionPolicy:
             sample=sample,
             top_k=top_k,
             pad_to=pad_to,
+            temperature=temperature,
         )[0]
 
 
@@ -65,10 +78,12 @@ def _mask(model, obs, candidates):
     return legal, torch.tensor([slot in legal for slot in slots], dtype=torch.bool, device=model.device)
 
 
-def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_to=None):
+def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_to=None,
+                 temperature=1.0):
     """Choose one action for each independent session with one model batch.
 
-    Forced actions bypass both model heads.
+    Forced actions bypass both model heads. Probabilities are those of the scores
+    divided by `temperature`.
     """
     policies, frames = list(policies), list(frames)
     if len(policies) != len(frames):
@@ -88,15 +103,8 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
     pending, observations, cache_keys, metadata = [], [], [], {}
     precision = _precision(model)
     for batch_index, (policy, frame, teacher) in enumerate(zip(policies, frames, teachers)):
-        candidates = frame["legal"]["candidates"]
-        segment = segment_key(frame)
-        if policy.segment != segment:
-            policy.reset()
-            policy.segment = segment
-        state_version = frame["routing"]["state_version"]
-        if policy.last_state_version is not None and state_version <= policy.last_state_version:
-            raise ProtocolError("Decisions require a fresh state/prefix version after each action")
-        policy.last_state_version = state_version
+        candidates = policy.advance(frame)
+        segment = policy.segment
         refs = {candidate["candidate_ref"]: candidate for candidate in candidates}
         if teacher is not None and teacher not in refs:
             raise ProtocolError("Recorded label is absent from the engine legal set")
@@ -134,7 +142,7 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
         candidates, teacher = metadata[batch_index]
         slots = policy.encoded.observation.slot_refs
         refs = {candidate["candidate_ref"]: candidate for candidate in candidates}
-        distribution = output.distribution()
+        distribution = output.distribution(temperature)
         index = (
             slots.index(refs[teacher]["decoder_slot_ref"])
             if teacher is not None
@@ -158,6 +166,32 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
             ranking,
         )
     return results
+
+
+@dataclass
+class Decisions(Packed):
+    """Independent decisions packed for one sampling pass; built without the model."""
+
+    batch: Batch
+    masks: torch.Tensor  # [decisions, actions] legal slots
+
+
+def prepare_decisions(vocabulary, frames):
+    """Pack one decision of each frame; returns their observations beside the pack.
+    Every frame must offer a choice: a forced action has nothing to score."""
+    observations, masks = [], []
+    for frame in frames:
+        obs = observation(frame)
+        legal = {candidate["decoder_slot_ref"] for candidate in frame["legal"]["candidates"]}
+        if not legal <= set(obs.slot_refs):
+            raise ProtocolError("Unrepresented legal candidate")
+        observations.append(obs)
+        masks.append([slot in legal for slot in obs.slot_refs])
+    width = max(map(len, masks))
+    return observations, Decisions(
+        collate(observations, vocabulary),
+        torch.tensor([mask + [False] * (width - len(mask)) for mask in masks]),
+    )
 
 
 @dataclass

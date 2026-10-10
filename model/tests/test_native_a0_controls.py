@@ -126,7 +126,7 @@ def test_native_a0_victory_pays_eight_once():
         frame = replay(engine, "final-victory-prefix.json", ledger)
         assert frame["boundary"] == "terminal" and frame["public"]["outcome"]["victory"]
         assert ledger.bosses == {1, 2, 3}
-        assert ledger.components == {"combat": 0, "boss": 3, "victory": 5}
+        assert ledger.outcome is True and ledger.components == {"victory": 1, "defeat": 0}
         assert ledger.apply(frame.get("events", [])) == 0
         assert native_replay_error(engine) is None
 

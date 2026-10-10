@@ -3,18 +3,19 @@
 import math
 import random
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
+from dataclasses import replace
 from itertools import count
 
 import torch
 
 from .config import TrainConfig
-from .data import RunShards, batch_pad_size, samples
+from .data import RunShards, batch_pad_size, microbatches, samples
 from .loader import batches, stream
 from .optim import BootstrapSchedule, build_optimizer
-from .policy import replay_batch
 from .protocol import ProtocolError
-from .rollout import numeric_backend, precision_context
+from .rollout import climbed, numeric_backend, precision_context, stand
+from .wire import replay
 
 
 def ppo_objective(new_log_prob, old_log_prob, advantage, clip_ratio):
@@ -28,12 +29,40 @@ def ppo_objective(new_log_prob, old_log_prob, advantage, clip_ratio):
     return actor, kl, clipped
 
 
-def _adjacent_bf16_values(expected, actual):
-    """Allow one quantization step, only for exactly representable BF16 values."""
-    values = torch.tensor([expected, actual], dtype=torch.bfloat16)
-    if values.float().tolist() != [expected, actual]:
-        return False
-    return float(torch.nextafter(values[0], values[1])) == actual
+# What the replay of a round may differ by from what its sampling stored, in a decision's
+# log-probability and in a macro-action's value: (median, 99th percentile, any single one).
+#
+# In BF16 one decision scores differently from batch to batch: the FP32 entity encoder
+# differs in its last bits with the rows it is computed beside, and the rounding of the
+# layers above amplifies that. The noise has a median near 1e-3 and a heavy tail. About
+# three decisions in a thousand are over 0.02 and the largest of a round grows with the
+# round, so no bound holds for every decision; the bound on a single one only stops a
+# decision that is scored as another one. Weights a single optimizer step away already
+# move the median and the 99th percentile about ten times further than the noise does.
+REPLAY_LIMITS = {"bf16": (0.003, 0.05, 1.0), "no": (1e-4, 1e-4, 1e-4)}
+# The macro-actions of a round that are replayed for it. The check judges a
+# distribution, and what it is there to catch moves most decisions at once: a sample
+# shows that as well as the whole round, in a fraction of the time. The bound on a
+# single decision then holds for the sampled ones only.
+REPLAY_CHECKED = 2048
+# The demonstrations of a PPO update are a fraction of a logical batch: a few workers
+# pack them as fast as the updates use them. A round draws them from a window of this
+# many shards, again and again: every worker ends up with a copy of the window it
+# reads, on top of the round the trainer holds, so the window is kept small.
+ANCHOR_WORKERS, ANCHOR_SHARDS = 2, 4
+
+
+# PPO stops updating on a round once the batches it has lately seen average over the
+# KL target. One batch says little: under one policy, batches of 512 macro-actions
+# scatter from half their median to more than twice it, and stopping at the first
+# one over the target ends the round at about half the movement it allows.
+KL_WINDOW = 8
+
+
+def _spread(errors):
+    """(median, 99th percentile, largest) of a round's replay errors."""
+    ranked = sorted(errors)
+    return ranked[len(ranked) // 2], ranked[int(0.99 * (len(ranked) - 1))], ranked[-1]
 
 
 def _value_metrics(sums):
@@ -76,27 +105,56 @@ class Learner:
             table_final_ratio=(cfg.embedding_lr_final / cfg.embedding_lr
                                if cfg.embedding_lr_final is not None else 1.0),
             table_decay_updates=cfg.embedding_decay_updates,
+            ppo_muon_ratio=cfg.ppo_muon_lr / cfg.muon_lr,
         )
         self.policy_version, self.updates = policy_version, 0
 
-    def _replay(self, prepared, *, with_accuracy=False):
-        """Macro-action (log-prob, value, entropy) rows of a prepared batch."""
+    def _replay(self, prepared, *, with_accuracy=False, sampled=False):
+        """Macro-action (log-prob, value, entropy) rows of a prepared batch: of the
+        distribution rounds are sampled from when the batch is `sampled`, otherwise of
+        the one demonstrations are learned with (temperature 1)."""
         # Autocast ends here: the caller runs outside it.
         with precision_context(self.model, self.config.precision):
-            return self.model.replay(prepared.to(self.model.device), with_accuracy=with_accuracy)
+            return self.model.replay(
+                prepared.to(self.model.device), with_accuracy=with_accuracy,
+                temperature=self.config.sampling_temperature if sampled else 1.0)
 
-    def _optimize(self, logicals, mode, demonstrations=None, *, bootstrap_samples=None, on_update=None):
+    def _batches(self, items):
+        """The logical batches of `items`, each a list of (samples, Replay) parts.
+
+        Where sampling kept the packed decisions of its macro-actions, the parts are
+        joined from them here, on the device: no frame is parsed a second time and no
+        process is started. Otherwise the loader's workers pack them from their frames.
+        """
+        if not items or "packed" not in items[0].macro:
+            return batches(items, self.vocabulary, self.config)
+        size = self.config.logical_batch_size
+        return (
+            [
+                (micro, replay([(item.macro["packed"], item.macro["slots"]) for item in micro],
+                               self.model.device, pad_to=batch_pad_size(micro, self.config)))
+                for micro in microbatches(items[start:start + size], self.config)
+            ]
+            for start in range(0, len(items), size)
+        )
+
+    def _optimize(self, logicals, mode, demonstrations=None, *, bootstrap_samples=None, on_update=None,
+                  recent_kl=None):
         try:
-            return self._optimize_batches(logicals, mode, demonstrations,
-                                          bootstrap_samples=bootstrap_samples, on_update=on_update)
+            return self._optimize_batches(logicals, mode, demonstrations, bootstrap_samples=bootstrap_samples,
+                                          on_update=on_update, recent_kl=recent_kl)
         finally:
             if hasattr(logicals, "close"):
                 logicals.close()
 
-    def _optimize_batches(self, logicals, mode, demonstrations=None, *, bootstrap_samples=None, on_update=None):
+    def _optimize_batches(self, logicals, mode, demonstrations=None, *, bootstrap_samples=None, on_update=None,
+                          recent_kl=None):
         """One pass over logical batches as the loader yields them: an update for each.
-        A BC pass ends early once the schedule's decay is spent."""
+        A BC pass ends early once the schedule's decay is spent, a PPO pass once the KL
+        of the batches in `recent_kl` (the last ones of the round, this pass's added as
+        they come) averages over the target."""
         cfg = self.config
+        recent_kl = deque(maxlen=KL_WINDOW) if recent_kl is None else recent_kl
         if mode == "bootstrap" and (bootstrap_samples is None or bootstrap_samples < 1):
             raise ValueError("BC updates require the full training split's macro count")
         # The same scale applies to every microbatch, window and the final short batch.
@@ -108,6 +166,7 @@ class Learner:
         value_sums = defaultdict(float)
         accuracy_correct = accuracy_decisions = 0
         grad_norms = []
+        demonstration_nlls = []
         gradient_clipped = 0
         update_stats = defaultdict(lambda: {"samples": 0, "delta_l2_sum": 0.0,
                                             "relative_sum": 0.0, "relative_max": 0.0})
@@ -126,7 +185,7 @@ class Learner:
                     log_prob, value, entropy, accuracy = self._replay(prepared, with_accuracy=True)
                     logical_accuracy.append(accuracy.sum(0))
                 else:
-                    log_prob, value, entropy = self._replay(prepared)
+                    log_prob, value, entropy = self._replay(prepared, sampled=True)
                 with precision_context(self.model, cfg.precision):
                     column = lambda values: log_prob.new_tensor(values, dtype=torch.float32)
                     if mode == "bootstrap":
@@ -163,19 +222,22 @@ class Learner:
                 self.accelerator.backward(weighted_loss)
                 logical_rows.append(rows.detach())
                 logical_items.extend(micro)
-            if demonstrations and cfg.bootstrap_coef and mode == "ppo":
-                auxiliary = random.choices(
-                    demonstrations, weights=[x.weight for x in demonstrations], k=1
-                )[0]
-                with precision_context(self.model, cfg.precision):
-                    lp, _, _ = replay_batch(
-                        self.model,
-                        self.vocabulary,
-                        [auxiliary.macro["steps"]],
-                        pad_to=batch_pad_size([auxiliary], cfg),
-                    )[0]
-                    auxiliary_loss = -cfg.bootstrap_coef * lp
-                self.accelerator.backward(auxiliary_loss)
+            demonstration_nll = None
+            if demonstrations is not None and cfg.bootstrap_coef and mode == "ppo":
+                # The demonstrations' mean NLL, weighed against the round's own loss
+                # sample for sample: this update's samples weigh `scale` together.
+                parts = next(demonstrations)
+                scale = sum(item.weight for item in logical_items)
+                total = sum(item.weight for micro, _ in parts for item in micro)
+                demonstration_nll = 0.0
+                for micro, prepared in parts:
+                    log_prob, _, _ = self._replay(prepared)
+                    with precision_context(self.model, cfg.precision):
+                        share = log_prob.new_tensor([item.weight / total for item in micro],
+                                                    dtype=torch.float32)
+                        nll = -(share * log_prob.float()).sum()
+                    self.accelerator.backward(cfg.bootstrap_coef * scale * nll)
+                    demonstration_nll += float(nll.detach())
             norm = self.accelerator.clip_grad_norm_(
                 self.model.parameters(), cfg.max_grad_norm
             )
@@ -243,7 +305,14 @@ class Learner:
                         sums["predicted2"] += w * predicted * predicted
                         sums["error"] += w * (target - predicted)
                         sums["error2"] += w * (target - predicted) ** 2
-            early_stop = mode == "ppo" and batch_kl / max(batch_weight, 1e-12) > cfg.target_kl
+            policy_metrics, early_stop = {}, False
+            if mode == "ppo":
+                recent_kl.append(batch_kl / max(batch_weight, 1e-12))
+                policy_metrics["kl_recent"] = sum(recent_kl) / len(recent_kl)
+                early_stop = policy_metrics["kl_recent"] > cfg.target_kl
+            if demonstration_nll is not None:
+                policy_metrics["demonstration_nll"] = demonstration_nll
+                demonstration_nlls.append(demonstration_nll)
             accuracy_metrics = {}
             if mode == "bootstrap":
                 correct, decisions = torch.stack(logical_accuracy).sum(0).cpu().tolist()
@@ -258,6 +327,7 @@ class Learner:
                     **{key: value / max(batch_weight, 1e-12) for key, value in batch_metrics.items()},
                     **_value_metrics(batch_values),
                     **accuracy_metrics,
+                    **policy_metrics,
                     "updates": self.updates, "samples": len(logical_items), "weight": batch_weight,
                     "last_grad_norm": float(norm), "gradient_clip_fraction": float(float(norm) > cfg.max_grad_norm),
                     "learning_rates": last_rates, "parameter_updates": parameter_changes,
@@ -280,6 +350,8 @@ class Learner:
         total_metrics["loss_scale"] = loss_scale
         total_metrics["learning_rates"] = last_rates
         total_metrics["gradient_clip_fraction"] = gradient_clipped / max(len(grad_norms), 1)
+        if demonstration_nlls:
+            total_metrics["demonstration_nll"] = sum(demonstration_nlls) / len(demonstration_nlls)
         if grad_norms:
             norms = torch.tensor(grad_norms)
             total_metrics["grad_norm"] = {"mean": float(norms.mean()), "max": max(grad_norms),
@@ -362,62 +434,95 @@ class Learner:
                 raise ProtocolError(
                     "Rollout numeric backend differs from learner; collect fresh on-policy data"
                 )
-        largest = 0.0
-        # The FP32 entity encoder replays a decision to about 1e-3 of its sampled
-        # log-probability; a macro-action sums as many decisions as it branches.
-        tolerance = 0.02 if self.config.precision == "bf16" else 1e-4
-        for micro, prepared in (
-            part for logical in batches(items, self.vocabulary, self.config) for part in logical
-        ):
-            log_probs, values, _ = self._replay(prepared)
+            if run.get("temperature", 1.0) != self.config.sampling_temperature:
+                raise ProtocolError("Rollout sampling temperature differs from learner")
+        policy_errors, value_errors, worst = [], [], (-1.0, None)
+        checked = random.sample(items, min(len(items), REPLAY_CHECKED))
+        for micro, prepared in (part for logical in self._batches(checked) for part in logical):
+            log_probs, values, _ = self._replay(prepared, sampled=True)
             current = torch.stack((log_probs, values), dim=1).cpu().tolist()
             for item, (log_prob, value) in zip(micro, current):
-                error = abs(log_prob - item.macro["old_log_prob"])
-                value_error = abs(value - item.macro["old_value"])
-                # BF16 values are cast back to float by the value head,
-                # but still lie on its quantization grid. Different batch
-                # shapes can round to adjacent values (e.g. 5.71875/5.75).
-                # Never apply this exception to policy log probabilities.
-                finite = all(math.isfinite(x) for x in (
-                    log_prob, value, item.macro["old_log_prob"], item.macro["old_value"]))
-                value_matches = finite and (
-                    value_error <= tolerance
-                    or self.config.precision == "bf16"
-                    and _adjacent_bf16_values(item.macro["old_value"], value)
-                )
-                if not finite or error > tolerance * max(1, item.branches) or not value_matches:
+                old_log_prob, old_value = item.macro["old_log_prob"], item.macro["old_value"]
+                if not all(math.isfinite(x) for x in (log_prob, value, old_log_prob, old_value)):
                     raise ProtocolError(
                         "Stored old probabilities/values do not replay: "
-                        f"run={item.run_id} log_prob_error={error} value_error={value_error} "
-                        f"old_log_prob={item.macro['old_log_prob']} log_prob={log_prob} "
-                        f"old_value={item.macro['old_value']} value={value}"
+                        f"run={item.run_id} old_log_prob={old_log_prob} log_prob={log_prob} "
+                        f"old_value={old_value} value={value}"
                     )
-                largest = max(largest, error, value_error)
-        return largest
+                # A macro-action sums the log-probabilities of its decisions. Dividing
+                # the scores by the temperature divides their noise by it too: the
+                # bounds are on the noise of the scores.
+                policy_errors.append(abs(log_prob - old_log_prob) * self.config.sampling_temperature
+                                     / max(1, item.branches))
+                value_errors.append(abs(value - old_value))
+                worst = max(worst, (max(policy_errors[-1], value_errors[-1]), item.run_id))
+        spread = {"log_prob": _spread(policy_errors), "value": _spread(value_errors)}
+        limits = REPLAY_LIMITS[self.config.precision]
+        if any(found > limit for stats in spread.values() for found, limit in zip(stats, limits)):
+            raise ProtocolError(
+                "Stored old probabilities/values do not replay: "
+                + " ".join(
+                    f"{name}_error median={stats[0]:.6f} p99={stats[1]:.6f} max={stats[2]:.6f}"
+                    for name, stats in spread.items())
+                + f" limits={limits} worst_run={worst[1]}"
+            )
+        return {
+            "old_replay_median_error": spread["log_prob"][0],
+            "old_replay_p99_error": spread["log_prob"][1],
+            "old_replay_max_error": spread["log_prob"][2],
+            "old_value_replay_p99_error": spread["value"][1],
+            "old_value_replay_max_error": spread["value"][2],
+        }
 
-    def ppo(self, runs, demonstrations=None, window_shards=8, *, on_update=None):
-        items = samples(runs, ppo=True, horizon_scale=self.config.horizon_scale)
+    def _anchors(self, items):
+        """Batches of demonstrations for the updates of a PPO round, without end: `items`
+        in a new order each time they have all been used."""
+        config = replace(self.config, logical_batch_size=self.config.bootstrap_batch_size,
+                         loader_workers=min(self.config.loader_workers, ANCHOR_WORKERS))
+        while True:
+            random.shuffle(items)
+            yield from batches(items, self.vocabulary, config)
+
+    def ppo(self, runs, demonstrations=None, window_shards=ANCHOR_SHARDS, *, on_update=None):
+        cfg = self.config
+        items = samples(runs, ppo=True, horizon_scale=cfg.horizon_scale)
         if not items:
             raise ValueError("Round contains no stochastic decisions")
         replay_error = self.check_old_policy(runs, items)
-        if isinstance(demonstrations, RunShards):
-            # Demonstrations are drawn from, not swept: one random window of shards
-            # serves the round, weighted as in the whole set.
-            window = next(demonstrations.windows(window_shards, shuffle=True), [])
-            auxiliary = samples(window, counts=demonstrations.counts)
-        else:
-            auxiliary = samples(demonstrations) if demonstrations else None
+        auxiliary = None
+        if demonstrations and cfg.bootstrap_coef:
+            if isinstance(demonstrations, RunShards):
+                # Demonstrations are drawn from, not swept: one random window of shards
+                # serves the round, weighted as in the whole set.
+                window = next(demonstrations.windows(window_shards, shuffle=True), [])
+                auxiliary = samples(window, counts=demonstrations.counts)
+            else:
+                auxiliary = samples(demonstrations)
+        anchors = self._anchors(auxiliary) if auxiliary else None
         metrics = []
-        for epoch in range(1, self.config.ppo_epochs + 1):
-            random.shuffle(items)
-            result = self._optimize(batches(items, self.vocabulary, self.config), "ppo", auxiliary,
-                                    on_update=(lambda metrics: on_update(
-                                        dict(metrics, old_replay_max_error=replay_error), epoch=epoch, stage="ppo"))
-                                    if on_update else None)
-            result["old_replay_max_error"] = replay_error
-            metrics.append(result)
-            if result.get("early_stop"):
-                break
+        # The policy keeps moving from one pass to the next: so does what is known of it.
+        recent_kl = deque(maxlen=KL_WINDOW)
+        planned = cfg.ppo_epochs * -(-len(items) // cfg.logical_batch_size)
+        started, step = self.updates, self.scheduler.ppo_step
+        try:
+            for epoch in range(1, cfg.ppo_epochs + 1):
+                random.shuffle(items)
+                result = self._optimize(self._batches(items), "ppo", anchors,
+                                        recent_kl=recent_kl,
+                                        on_update=(lambda metrics: on_update(
+                                            dict(metrics, **replay_error), epoch=epoch, stage="ppo"))
+                                        if on_update else None)
+                result.update(replay_error, ppo_step=step)
+                metrics.append(result)
+                if result.get("early_stop"):
+                    break
+        finally:
+            if anchors:
+                anchors.close()
+        # The next round's step: this one's budget should have lasted its updates.
+        self.scheduler.pace(
+            (self.updates - started) / planned if metrics[-1].get("early_stop") else 1.0,
+            sum(recent_kl) / len(recent_kl) / cfg.target_kl)
         self.policy_version += 1
         return metrics
 
@@ -431,9 +536,9 @@ class Learner:
             for name, p in self.model.named_parameters():
                 p.requires_grad_(name.startswith("value."))
             metrics = [
-                self._optimize(batches(items, self.vocabulary, self.config), "value",
+                self._optimize(self._batches(items), "value",
                                on_update=(lambda metrics: on_update(
-                                   dict(metrics, old_replay_max_error=replay_error), epoch=epoch, stage="value"))
+                                   dict(metrics, **replay_error), epoch=epoch, stage="value"))
                                if on_update else None)
                 for epoch in range(1, epochs + 1)
             ]
@@ -480,28 +585,84 @@ def _wilson(wins, n, z=1.96):
     return [max(0.0, center - radius), min(1.0, center + radius)]
 
 
+def climb(run):
+    """Where a run stood, read from the decisions it recorded: the furthest floor of
+    each act it entered, and how many floors those acts have. Both are empty when the
+    frames do not say. A run that kept no frames brings the answer with it."""
+    if "climb" in run:
+        return run["climb"]
+    frames = [step["frame"] for macro in run.get("macros", ()) for step in macro["steps"]]
+    frames += [action["frame"] for action in run.get("environment_actions", ())]
+    return climbed(map(stand, frames))
+
+
 def evaluate_runs(runs):
     """Win rates over every attempt: a run that did not finish is not a win.
 
     The rate among finished runs is reported beside it, and `comparable` says
     whether every attempt finished; only then do the two agree and can reports
     be set against each other.
+
+    Beside the wins stands how far the finished runs got: the acts they passed,
+    the reward they were paid, and the floor each defeat stopped at, counted across
+    acts. A win is far rarer than a floor climbed, so these move before it does.
+
+    `runs` is read once and nothing of a run is kept but what it adds to the report:
+    an evaluation is more runs than memory holds, so they are passed one at a time
+    from where they were written.
     """
+    tallies = {
+        character: {"attempts": 0, "complete": 0, "wins": 0, "passed": [0, 0, 0],
+                    "scores": [], "floors": [], "deaths": {}}
+        for character in ("Ironclad", "Silent", "Defect", "Regent", "Necrobinder")
+    }
+    act_floors, ascensions, attempts, unfinished = {}, set(), 0, 0
+    for run in runs:
+        attempts += 1
+        unfinished += run["status"] != "complete"
+        if "ascension" in run:
+            ascensions.add(run["ascension"])
+        tally = tallies.get(run["character"])
+        if tally is None:
+            continue
+        tally["attempts"] += 1
+        if run["status"] != "complete":
+            continue
+        tally["complete"] += 1
+        tally["wins"] += run.get("victory", False)
+        ledger = run.get("ledger", {})
+        # The last act is passed by winning the run, whichever event confirmed it.
+        for act in set(ledger.get("bosses", ())) | ({3} if run.get("victory") else set()):
+            tally["passed"][act - 1] += 1
+        if "components" in ledger:
+            tally["scores"].append(sum(ledger["components"].values()))
+        reached, lengths = climb(run)
+        for act, length in lengths.items():
+            act_floors[act] = max(act_floors.get(act, 0), length)
+        if reached:
+            floor = sum(reached.values())
+            tally["floors"].append(floor)
+            if not run.get("victory"):
+                tally["deaths"][floor] = tally["deaths"].get(floor, 0) + 1
     report = {}
-    for character in ("Ironclad", "Silent", "Defect", "Regent", "Necrobinder"):
-        group = [r for r in runs if r["character"] == character]
-        completed = [r for r in group if r["status"] == "complete"]
-        attempts, n = len(group), len(completed)
-        wins = sum(r.get("victory", False) for r in completed)
+    for character, tally in tallies.items():
+        total, n, wins = tally["attempts"], tally["complete"], tally["wins"]
+        scores, floors, deaths = tally["scores"], tally["floors"], tally["deaths"]
         report[character] = {
-            "attempts": attempts,
+            "attempts": total,
             "complete": n,
             "wins": wins,
-            "win_rate": wins / attempts if attempts else None,
-            "wilson_95": _wilson(wins, attempts),
+            "win_rate": wins / total if total else None,
+            "wilson_95": _wilson(wins, total),
             "completed_win_rate": wins / n if n else None,
-            "completion_rate": n / attempts if attempts else None,
-            "errors_or_unresolved": attempts - n,
+            "completion_rate": n / total if total else None,
+            "errors_or_unresolved": total - n,
+            "acts_passed": tally["passed"],
+            "act_pass_rates": [count / total for count in tally["passed"]] if total else None,
+            "mean_score": sum(scores) / len(scores) if scores else None,
+            "mean_floor": sum(floors) / len(floors) if floors else None,
+            # [floor, runs] for the finished runs that were lost, floors counted across acts.
+            "death_floors": [[floor, deaths[floor]] for floor in sorted(deaths)],
         }
 
     def mean(key):
@@ -509,12 +670,20 @@ def evaluate_runs(runs):
         return sum(values) / 5 if all(v is not None for v in values) else None
 
     rates = [x["win_rate"] for x in report.values()]
+    passes = [x["act_pass_rates"] for x in report.values()]
     return {
         "characters": report,
-        "ascensions": sorted({r["ascension"] for r in runs if "ascension" in r}),
-        "comparable": bool(runs) and all(r["status"] == "complete" for r in runs),
+        "ascensions": sorted(ascensions),
+        "comparable": bool(attempts) and not unfinished,
         "equal_character_win_rate": mean("win_rate"),
         "worst_character_win_rate": min(rates) if all(r is not None for r in rates) else None,
         "equal_character_completed_win_rate": mean("completed_win_rate"),
         "equal_character_completion_rate": mean("completion_rate"),
+        "equal_character_act_pass_rates": (
+            [sum(act) / 5 for act in zip(*passes)] if all(p is not None for p in passes) else None
+        ),
+        "equal_character_mean_score": mean("mean_score"),
+        "equal_character_mean_floor": mean("mean_floor"),
+        # Floors of acts 1, 2, ... as far as any finished run entered them.
+        "act_floors": [act_floors.get(act) for act in range(1, max(act_floors, default=0) + 1)],
     }

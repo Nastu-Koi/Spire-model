@@ -16,7 +16,7 @@ from . import rules
 from .config import ModelConfig, TrainConfig
 from .model import PolicyValue
 from .representation import ENCODING_VERSION, Vocabulary
-from .optim import TRAINING_VERSION
+from .optim import TRAINING_VERSION, with_value_groups
 from .rewards import REWARD_VERSION
 from .public_history import HISTORY_VERSION, require_history_version
 
@@ -164,10 +164,13 @@ def restore_training(path, optimizer, scheduler=None):
     if runtime.get("training") != manifest["training"]:
         raise ValueError("Checkpoint training configuration conflicts with saved runtime; use --weights-only")
     restored = torch.load(path / manifest["optimizer"], map_location="cpu", weights_only=True)
+    current = optimizer.param_groups
+    hybrid = set(restored) == {"adamw", "muon"}
+    with_value_groups(restored["adamw"] if hybrid else restored,
+                      [group for group in current if group.get("name") != "muon"])
     # A strict resume restores its original groups. It must never swallow requested settings.
     groups = (restored["adamw"]["param_groups"] + restored["muon"]["param_groups"]
-              if set(restored) == {"adamw", "muon"} else restored["param_groups"])
-    current = optimizer.param_groups
+              if hybrid else restored["param_groups"])
     keys = ("name", "initial_lr", "weight_decay", "betas", "eps", "momentum", "ns_steps")
     if len(groups) != len(current) or any(
         len(old["params"]) != len(new["params"]) or any(old.get(k) != new.get(k) for k in keys)

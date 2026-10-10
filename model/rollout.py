@@ -6,6 +6,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -71,6 +72,33 @@ def final_hp(engine):
     return reply["save"]["players"][0]["current_hp"]
 
 
+def stand(frame):
+    """Where a frame stands: (act, floor, floors of the act). The map counts its rows
+    from zero and the player's floor from one, so an act is one floor longer than its
+    last row. Each is None where the frame does not say."""
+    entities = frame["public"]["entities"]
+    hero = next((e for e in entities if e.get("entity_type") == "player"), {})
+    act, floor = hero.get("act"), hero.get("floor")
+    if type(act) is not int or type(floor) is not int:
+        return None, None, None
+    rows = [e["floor"] for e in entities
+            if e.get("entity_type") == "map_node" and type(e.get("floor")) is int]
+    return act, floor, max(rows) + 1 if rows else None
+
+
+def climbed(stands):
+    """The furthest floor of each act a run entered and how many floors those acts
+    have, over where its recorded frames stood."""
+    reached, lengths = {}, {}
+    for act, floor, length in stands:
+        if act is None:
+            continue
+        reached[act] = max(reached.get(act, 0), floor)
+        if act not in lengths and length:
+            lengths[act] = length
+    return reached, lengths
+
+
 class RolloutRunner:
     def __init__(
         self,
@@ -83,9 +111,12 @@ class RolloutRunner:
         timeout=30,
         ascension=0,
         claim_rewards=False,
+        temperature=1.0,
     ):
         if max_steps < 1 or timeout <= 0:
             raise ValueError("Rollout limits must be positive")
+        if not temperature > 0:
+            raise ValueError("The sampling temperature must be positive")
         if type(ascension) is not int or not 0 <= ascension <= 10:
             raise ValueError("Ascension must be an integer from 0 to 10")
         self.model, self.vocabulary = model, vocabulary
@@ -94,6 +125,9 @@ class RolloutRunner:
         self.ascension = ascension
         # Gold, relics and potions the belt has room for are taken for the policy.
         self.claim_rewards = claim_rewards
+        # Sampled choices are drawn from the scores divided by this: under 1 the policy
+        # plays closer to its most likely actions. The most likely action is the same.
+        self.temperature = temperature
         self._digest = None
 
     @property
@@ -102,9 +136,16 @@ class RolloutRunner:
             self._digest = policy_digest(self.model)
         return self._digest
 
-    def run(self, engine, character, seed, *, sample=True, journal=None, combats=None, _policy=None):
+    def run(self, engine, character, seed, *, sample=True, journal=None, combats=None, frames=True,
+            _policy=None):
         """Play one run. `combats` is where the fights of the run are written as
-        combat-outcome labels of this policy (combat_outcome.online)."""
+        combat-outcome labels of this policy (combat_outcome.online).
+
+        Without `frames` the run keeps none of its frames, which are most of the memory
+        it takes while it is played: each recorded step says where it stood instead,
+        and the run brings its `climb`. That is all a round handed over in packed
+        decisions reads of the frames.
+        """
         if character not in CHARACTERS:
             raise ValueError("Unknown character")
         trace = {
@@ -119,6 +160,7 @@ class RolloutRunner:
             "numeric_backend": numeric_backend(self.model),
             "source": "on_policy" if sample else "evaluation",
             "sampling": "full_distribution" if sample else "argmax",
+            "temperature": self.temperature if sample else None,
             "status": "unresolved",
             "macros": [],
             "automatic_steps": 0,
@@ -132,6 +174,9 @@ class RolloutRunner:
         policy = _policy or SessionPolicy(
             self.model, self.vocabulary, version=self.version
         )
+        # A policy handed in draws its choices where the network runs, at this runner's
+        # temperature; the runner's own is told it here.
+        choose = policy.choose if _policy else partial(policy.choose, temperature=self.temperature)
         pending_steps, current_segment, active_macro = [], None, None
         waiting_since = None
         recorder = None
@@ -141,7 +186,9 @@ class RolloutRunner:
             with (
                 sink as stream,
                 torch.no_grad(),
-                precision_context(self.model, self.precision),
+                # A policy handed in runs the network elsewhere, under its own context;
+                # a sampling process must not even ask what its device supports.
+                nullcontext() if _policy else precision_context(self.model, self.precision),
             ):
                 frame = engine.reset(character, seed, self.ascension)
                 require_history_version(frame.get("contract", {}).get("public_history_version"))
@@ -158,7 +205,8 @@ class RolloutRunner:
                         policy=dict(
                             version=self.version, digest=self.digest,
                             **{k: trace[k] for k in (
-                                "vocabulary_hash", "precision", "sampling", "numeric_backend")}),
+                                "vocabulary_hash", "precision", "sampling", "temperature",
+                                "numeric_backend")}),
                     )
                 steps = 0
                 while True:
@@ -166,6 +214,12 @@ class RolloutRunner:
                     if frame["contract"] != trace["contract"]:
                         raise ProtocolError("Engine contract changed during run")
                     reward = ledger.apply(frame.get("events", []))
+                    boundary = frame["boundary"]
+                    if boundary == "terminal":
+                        victory = bool(
+                            frame.get("public", {}).get("outcome", {}).get("victory")
+                        )
+                        reward += ledger.finish(victory)
                     if trace["macros"]:
                         trace["macros"][-1]["reward"] += reward
                     else:
@@ -180,15 +234,7 @@ class RolloutRunner:
                         stream.flush()
                     if recorder:
                         recorder.events(frame.get("events", []))
-                    boundary = frame["boundary"]
                     if boundary == "terminal":
-                        victory = bool(
-                            frame.get("public", {}).get("outcome", {}).get("victory")
-                        )
-                        if victory != ledger.victory_paid:
-                            raise ProtocolError(
-                                "Terminal outcome disagrees with milestone events"
-                            )
                         if recorder:
                             recorder.terminal(victory, lambda: final_hp(engine))
                         trace.update(status="complete", victory=victory)
@@ -213,7 +259,9 @@ class RolloutRunner:
                     if automatic is not None:
                         policy.reset()
                         current_segment, pending_steps, active_macro = None, [], None
-                        trace["environment_actions"].append(dict(frame=deepcopy(frame), **automatic))
+                        trace["environment_actions"].append(
+                            dict(frame=deepcopy(frame), **automatic) if frames
+                            else dict(stood=stand(frame), **automatic))
                         trace["automatic_steps"] += 1
                         steps += 1
                         frame = engine.send(execution_command(frame, automatic["candidate_ref"]))
@@ -222,7 +270,7 @@ class RolloutRunner:
                     if key != current_segment:
                         current_segment, pending_steps, active_macro = key, [], None
                     branching = len(frame["legal"]["candidates"]) > 1
-                    choice = policy.choose(frame, sample=sample)
+                    choice = choose(frame, sample=sample)
                     if recorder:
                         recorder.step(
                             frame,
@@ -233,7 +281,7 @@ class RolloutRunner:
                             steps,
                         )
                     step = {
-                        "frame": frame,
+                        **({"frame": frame} if frames else {"stood": stand(frame)}),
                         "candidate_ref": choice.candidate_ref,
                         "forced": not branching,
                     }
@@ -260,6 +308,10 @@ class RolloutRunner:
             trace["status"] = "unresolved" if isinstance(exc, TimeoutError) else "error"
             trace["error"] = str(exc)
         trace["ledger"] = ledger.state_dict()
+        if not frames:
+            trace["climb"] = climbed(
+                [step["stood"] for macro in trace["macros"] for step in macro["steps"]]
+                + [action["stood"] for action in trace["environment_actions"]])
         if recorder:
             # The acts whose boss fell; the last act is passed by winning the run.
             passed = set(ledger.bosses) | ({3} if ledger.victory_paid else set())
@@ -279,6 +331,26 @@ def write_run(path, trace):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(trace, ensure_ascii=False, allow_nan=False))
     temporary.replace(path)
+
+
+def play(engine, runner, job, *, sample=True, policy=None, save=True):
+    """One job of a round: a run, written beside its journal and the fights it
+    recorded. Returns the run. Without `save` only the fights are written, and a run
+    that did not finish, for whoever looks into why; the run then keeps no frames."""
+    character, seed, path = job
+    trace = runner.run(
+        engine,
+        character,
+        seed,
+        sample=sample,
+        journal=path.with_suffix(".jsonl") if save else None,
+        combats=path.with_suffix(".combats.jsonl.gz"),
+        frames=save,
+        _policy=policy,
+    )
+    if save or trace["status"] != "complete":
+        write_run(path, trace)
+    return trace
 
 
 class _InferenceQueue:
@@ -334,7 +406,8 @@ class _InferenceQueue:
                 precision_context(self.runner.model, self.runner.precision),
             ):
                 choices = choose_batch(
-                    [r[0] for r in requests], [r[1] for r in requests], sample=first[2]
+                    [r[0] for r in requests], [r[1] for r in requests], sample=first[2],
+                    temperature=self.runner.temperature,
                 )
             for request, choice in zip(requests, choices):
                 request[3].set_result(choice)
@@ -355,9 +428,22 @@ class _InferenceQueue:
 
 
 def collect_round(
-    engine_factory, runner, seeds, directory, on_run=None, *, workers=1, sample=True
+    engine_factory, runner, seeds, directory, on_run=None, *, workers=1, samplers=None, sample=True,
+    save=True,
 ):
-    """Freeze the assigned queue before running it; any failure blocks the update."""
+    """Freeze the assigned queue before running it; any failure blocks the update.
+
+    `workers` engines run at a time, each run in an engine of its own. With
+    `samplers` (`sampling.Samplers`) the round is played by their processes and
+    engines instead, and this process only runs the network.
+
+    Returns where the runs were written. Without `save` they are not: a round its
+    sampling processes hand over in memory (`samplers.runs()`) is gigabytes on disk
+    that nothing reads again. Only the fights of each run are written then, and the
+    runs that did not finish.
+    """
+    if not save and not samplers:
+        raise ValueError("Only sampling processes hand a round over without writing it")
     counts = {c: len(seeds.get(c, [])) for c in CHARACTERS}
     if type(workers) is not int or workers < 1:
         raise ValueError("Rollout workers must be a positive integer")
@@ -383,24 +469,21 @@ def collect_round(
         for i, seed in enumerate(seeds[character])
     ]
     paths = [path for _, _, path in jobs]
-    broker = _InferenceQueue(runner) if workers > 1 else None
+    broker = _InferenceQueue(runner) if workers > 1 and not samplers else None
+
+    # How every run ended, in the order of the jobs.
+    statuses = {}
 
     def collect(job):
-        character, seed, path = job
         with engine_factory() as engine:
-            trace = runner.run(
-                engine,
-                character,
-                seed,
-                sample=sample,
-                journal=path.with_suffix(".jsonl"),
-                combats=path.with_suffix(".combats.jsonl.gz"),
-                _policy=broker.policy() if broker else None,
-            )
-        write_run(path, trace)
-        return character
+            run = play(engine, runner, job, sample=sample, policy=broker.policy() if broker else None)
+        statuses[job[2]] = run["status"]
+        return run["character"]
 
-    if broker is None:
+    if samplers:
+        played = samplers.collect(runner, jobs, sample=sample, on_run=on_run, save=save)
+        statuses = {path: run["status"] for path, run in zip(paths, played)}
+    elif broker is None:
         for completed, job in enumerate(jobs, 1):
             character = collect(job)
             if on_run:
@@ -426,11 +509,9 @@ def collect_round(
                 broker.close()
                 for future in pending:
                     future.cancel()
-    failures = [
-        str(p) for p in paths if json.loads(p.read_text())["status"] != "complete"
-    ]
+    failures = [str(p) for p in paths if statuses[p] != "complete"]
     if failures and sample:
         raise ProtocolError(
             f"Round incomplete; no PPO update is permitted. Inspect: {failures}"
         )
-    return paths
+    return paths if save else []

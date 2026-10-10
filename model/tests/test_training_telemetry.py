@@ -120,7 +120,8 @@ def test_bootstrap_writes_visible_updates_before_epoch_completion(tmp_path):
         with pytest.raises(KeyboardInterrupt):
             learner.bootstrap(runs, on_update=stop_after_update, on_epoch=lambda *args: epochs.append(args))
         store = MonitorStore(tmp_path)
-        row = store.list_runs()["runs"][0]
+        assert store.list_runs()["runs"][0]["status"]["updates"] == 1
+        row = store.detail(".")
         assert row["latest"]["update"] == learner.updates == 1
         assert row["summary"] is None
         assert row["status"]["updates"] == 1

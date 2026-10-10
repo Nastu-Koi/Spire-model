@@ -1,10 +1,16 @@
-"""Versioned, restorable reward accounting from confirmed engine events only."""
+"""Versioned, restorable reward accounting from confirmed engine events only.
+
+A run pays once, when it ends: +1 for a victory, -1 for a defeat. Nothing on the way
+pays. A victory is paid on the events that confirm it; a defeat on its event or, where
+the engine sends none, on the terminal state. The acts whose boss fell are still
+recorded: reports say how far a run got.
+"""
 
 from dataclasses import asdict, dataclass, field
 
 from .protocol import ProtocolError
 
-REWARD_VERSION = "act-progress-v2"
+REWARD_VERSION = "outcome-v1"
 
 
 def require_reward_version(version):
@@ -22,19 +28,45 @@ class MilestoneLedger:
     encounters: set[str] = field(default_factory=set)
     bosses: set[int] = field(default_factory=set)
     victory_paid: bool = False
+    defeat_paid: bool = False
     components: dict[str, float] = field(
-        default_factory=lambda: {"combat": 0.0, "boss": 0.0, "victory": 0.0}
+        default_factory=lambda: {"victory": 0.0, "defeat": 0.0}
     )
 
     def __post_init__(self):
         require_reward_version(self.version)
 
+    @property
+    def outcome(self):
+        """Whether the run was won, once it has ended; None until then."""
+        return True if self.victory_paid else False if self.defeat_paid else None
+
     def _victory(self):
+        if self.defeat_paid:
+            raise ProtocolError("A lost run cannot be won")
         if self.victory_paid:
             return 0.0
         self.victory_paid = True
-        self.components["victory"] += 5.0
-        return 5.0
+        self.components["victory"] += 1.0
+        return 1.0
+
+    def _defeat(self):
+        if self.victory_paid:
+            raise ProtocolError("A won run cannot be lost")
+        if self.defeat_paid:
+            return 0.0
+        self.defeat_paid = True
+        self.components["defeat"] -= 1.0
+        return -1.0
+
+    def finish(self, victory):
+        """What is still owed when the terminal state says how the run ended. The engine
+        confirms every victory with events, but ends some lost runs without one."""
+        if victory:
+            if not self.victory_paid:
+                raise ProtocolError("Terminal victory was not confirmed by the run's events")
+            return 0.0
+        return self._defeat()
 
     def apply(self, events):
         total = 0.0
@@ -47,6 +79,10 @@ class MilestoneLedger:
                             "Victory requires confirmation of the third-act boss"
                         )
                     total += self._victory()
+                elif event.get("victory") is False:
+                    total += self._defeat()
+                else:
+                    raise ProtocolError("Run completion does not say whether the run was won")
                 continue
             if kind != "encounter_completed" or event.get("result") != "victory":
                 continue
@@ -63,11 +99,8 @@ class MilestoneLedger:
                 if act in self.bosses:
                     continue
                 self.bosses.add(act)
-                if act == 3:
-                    reward = self._victory()
-                else:
-                    reward = float(act)
-                    self.components["boss"] += reward
+                # The last act's boss falling is the victory, whichever event says so first.
+                reward = self._victory() if act == 3 else 0.0
             elif encounter_kind in {"normal", "event", "elite"}:
                 reward = 0.0
             else:
