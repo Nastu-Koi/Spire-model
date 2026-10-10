@@ -2,13 +2,14 @@
 
 基于玩家公开信息，为《杀戮尖塔 2》训练覆盖整局的策略，目标是提高**五角色 A0 平均整局通关率**并接管 Steam 游戏。当前适配游戏 **0.111.0**。
 
-主策略先用摘要锚点及求解器示范做行为克隆，再自主采样。当前已有 BC、多进程采样与评估、公开历史、战斗结果记录和 Steam 桥接；学生状态的求解器战斗标签、胜率模型和优势加权回归尚未接入。设计见 [ARCHITECTURE](ARCHITECTURE.md)，术语见 [CONTEXT](CONTEXT.md)。
+主策略先用摘要锚点及求解器示范做行为克隆，再自主采样。当前已有 BC、多进程采样与评估、学生状态的求解器战斗标签、胜率模型、优势加权回归和把它们串起来的迭代驱动，以及公开历史、战斗结果记录和 Steam 桥接；迭代路线的效果尚待正式训练验证。设计见 [ARCHITECTURE](ARCHITECTURE.md)，术语见 [CONTEXT](CONTEXT.md)。
 
 ## 从这里开始
 
 | 要做的事 | 说明 |
 | --- | --- |
 | 开始／继续训练，复用现有数据 | [主策略训练与运行](model/README.md) |
+| 按迭代改进策略：采样、求解器标签、胜率模型、优势加权回归 | [迭代](model/README.md#迭代采样标签胜率模型与优势加权回归) |
 | 判断数据要不要重新生成 | [数据复用与索引](model/README.md#数据复用与索引) |
 | 下载公开对局、恢复锚点和导入示范 | [摘要数据](spire_codex_data/README.md) |
 | 配置求解器或验证原生轨迹 | [CombatSolver worker](combat_solver_cli/README.md) |
@@ -20,7 +21,8 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| [model/](model/README.md) | 公开输入、主策略、控制器、BC、采样与评估、检查点、Steam 控制端和训练监测 |
+| [model/](model/README.md) | 公开输入、主策略、控制器、BC、采样与评估、优势加权回归与迭代驱动、检查点、Steam 控制端和训练监测 |
+| [critic/](critic/README.md) | 胜率模型：局外决策的通关与过本幕概率、交给策略前的门槛、给缓冲打分算优势 |
 | [spire_codex_data/](spire_codex_data/README.md) | 公开对局下载、来源审计、摘要账本、锚点生成、刷新和导出 |
 | [combat_outcome/](combat_outcome/README.md) | 当前入场标量结果模型及学生战斗／中途帧记录 |
 | [combat_solver_cli/](combat_solver_cli/README.md) | 第三方求解器 worker、引擎客户端和独立轨迹复验 |
