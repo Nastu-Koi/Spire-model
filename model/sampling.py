@@ -36,7 +36,7 @@ from .policy import Choice, SessionPolicy, prepare_decisions
 from .processes import end, end_with, release_memory
 from .representation import forget
 from .rollout import RolloutRunner, play, precision_context
-from .trainer import climb
+from .evaluation import climb
 from .wire import pack, unpack
 
 # A sampling process says something whenever a decision or a run is ready. Silence

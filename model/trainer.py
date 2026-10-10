@@ -1,6 +1,5 @@
 """Single-device Accelerate behavior cloning: a weighted NLL over macro-actions."""
 
-import math
 import random
 import time
 from collections import defaultdict
@@ -9,10 +8,10 @@ from itertools import count
 import torch
 
 from .config import TrainConfig
-from .data import RunShards, samples
+from .data import HELDOUT_FRACTION, RunShards, extent, samples, split_held_out
 from .loader import batches, stream
 from .optim import BootstrapSchedule, build_optimizer
-from .rollout import climbed, precision_context, stand
+from .rollout import precision_context
 
 
 class Learner:
@@ -80,6 +79,7 @@ class Learner:
         total_metrics = defaultdict(float)
         weights = 0.0
         accuracy_correct = accuracy_decisions = 0
+        samples_seen = 0
         grad_norms = []
         gradient_clipped = 0
         update_stats = defaultdict(lambda: {"samples": 0, "delta_l2_sum": 0.0,
@@ -107,6 +107,7 @@ class Learner:
                 self.accelerator.backward(weighted_loss)
                 logical_rows.append(rows.detach())
                 logical_items.extend(micro)
+            samples_seen += len(logical_items)
             norm = self.accelerator.clip_grad_norm_(
                 self.model.parameters(), cfg.max_grad_norm
             )
@@ -172,6 +173,8 @@ class Learner:
         for key in ("loss", "entropy"):
             total_metrics[key] /= max(weights, 1e-12)
         total_metrics["updates"] = self.updates
+        # The macro-actions the loader delivered to this pass.
+        total_metrics["samples"] = samples_seen
         total_metrics["weight"] = weights
         total_metrics["loss_scale"] = loss_scale
         total_metrics["learning_rates"] = last_rates
@@ -195,26 +198,39 @@ class Learner:
                                       "completed": self.scheduler.decayed_updates}
         return dict(total_metrics)
 
-    def bootstrap(self, runs, epochs=1, on_epoch=None, window_shards=8, *, on_update=None):
+    def bootstrap(self, runs, epochs=1, on_epoch=None, window_shards=8, *, on_update=None,
+                  include_held_out=False):
         """Behavior cloning. `runs` is a list held in memory, or RunShards, which are
         read `window_shards` at a time: the order of shards and the samples of each
-        window are shuffled, and weights stay normalized over the whole data set.
-        A schedule with a decay stops once it is spent."""
+        window are shuffled, and weights stay normalized over the whole training part.
+
+        The held-out seeds (`data.held_out`) are left out unless `include_held_out`:
+        the loader never reads their runs. Every epoch's metrics count what was left
+        out (`held_out`), what was trained on (`training`) and the macro-actions the
+        loader delivered (`samples`), which is the training part's count. A schedule
+        with a decay stops once it is spent."""
         if epochs is not None and epochs < 1:
             raise ValueError("Bootstrap needs at least one epoch")
         if self.scheduler.exhausted:
             raise ValueError("The decay has finished; this checkpoint is final")
-        if isinstance(runs, RunShards):
-            counts = runs.counts
+        if include_held_out:
+            training = runs
+            coverage = {"held_out": {"fraction": 0.0, "groups": 0, "macros": 0, "seeds": 0}}
+        else:
+            training, held = split_held_out(runs)
+            coverage = {"held_out": {"fraction": HELDOUT_FRACTION, **extent(held)}}
+        coverage["training"] = extent(training)
+        if isinstance(training, RunShards):
+            counts = training.counts
             if not counts:
                 raise ValueError("No accepted behavior-cloning samples")
             total = sum(counts.values())
 
             def logicals():
-                return stream(runs, self.vocabulary, self.config, window_shards=window_shards,
+                return stream(training, self.vocabulary, self.config, window_shards=window_shards,
                               shuffle=True, counts=counts)
         else:
-            items = samples(runs)
+            items = samples(training)
             if not items:
                 raise ValueError("No accepted behavior-cloning samples")
             total = len(items)
@@ -225,10 +241,10 @@ class Learner:
 
         metrics = []
         for epoch in count(1):
-            metrics.append(self._optimize(
+            metrics.append(dict(self._optimize(
                 logicals(), total=total,
                 on_update=(lambda metrics: on_update(metrics, epoch=epoch, stage="bootstrap"))
-                if on_update else None))
+                if on_update else None), **coverage))
             self.policy_version += 1
             if on_epoch:
                 on_epoch(epoch, metrics[-1])
@@ -264,116 +280,3 @@ class Learner:
             key: dict(value, nll_per_branch=value["nll"] / value["branches"])
             for key, value in metrics.items()
         }
-
-
-def _wilson(wins, n, z=1.96):
-    if not n:
-        return None
-    rate = wins / n
-    center = (rate + z * z / (2 * n)) / (1 + z * z / n)
-    radius = z * math.sqrt(rate * (1 - rate) / n + z * z / (4 * n * n)) / (1 + z * z / n)
-    return [max(0.0, center - radius), min(1.0, center + radius)]
-
-
-def climb(run):
-    """Where a run stood, read from the decisions it recorded: the furthest floor of
-    each act it entered, and how many floors those acts have. Both are empty when the
-    frames do not say. A run that kept no frames brings the answer with it."""
-    if "climb" in run:
-        return run["climb"]
-    frames = [step["frame"] for macro in run.get("macros", ()) for step in macro["steps"]]
-    frames += [action["frame"] for action in run.get("environment_actions", ())]
-    return climbed(map(stand, frames))
-
-
-def evaluate_runs(runs):
-    """Win rates over every attempt: a run that did not finish is not a win.
-
-    The rate among finished runs is reported beside it, and `comparable` says
-    whether every attempt finished; only then do the two agree and can reports
-    be set against each other.
-
-    Beside the wins stands how far the finished runs got: the acts they passed,
-    the reward they were paid, and the floor each defeat stopped at, counted across
-    acts. A win is far rarer than a floor climbed, so these move before it does.
-
-    `runs` is read once and nothing of a run is kept but what it adds to the report:
-    an evaluation is more runs than memory holds, so they are passed one at a time
-    from where they were written.
-    """
-    tallies = {
-        character: {"attempts": 0, "complete": 0, "wins": 0, "passed": [0, 0, 0],
-                    "scores": [], "floors": [], "deaths": {}}
-        for character in ("Ironclad", "Silent", "Defect", "Regent", "Necrobinder")
-    }
-    act_floors, ascensions, attempts, unfinished = {}, set(), 0, 0
-    for run in runs:
-        attempts += 1
-        unfinished += run["status"] != "complete"
-        if "ascension" in run:
-            ascensions.add(run["ascension"])
-        tally = tallies.get(run["character"])
-        if tally is None:
-            continue
-        tally["attempts"] += 1
-        if run["status"] != "complete":
-            continue
-        tally["complete"] += 1
-        tally["wins"] += run.get("victory", False)
-        ledger = run.get("ledger", {})
-        # The last act is passed by winning the run, whichever event confirmed it.
-        for act in set(ledger.get("bosses", ())) | ({3} if run.get("victory") else set()):
-            tally["passed"][act - 1] += 1
-        if "components" in ledger:
-            tally["scores"].append(sum(ledger["components"].values()))
-        reached, lengths = climb(run)
-        for act, length in lengths.items():
-            act_floors[act] = max(act_floors.get(act, 0), length)
-        if reached:
-            floor = sum(reached.values())
-            tally["floors"].append(floor)
-            if not run.get("victory"):
-                tally["deaths"][floor] = tally["deaths"].get(floor, 0) + 1
-    report = {}
-    for character, tally in tallies.items():
-        total, n, wins = tally["attempts"], tally["complete"], tally["wins"]
-        scores, floors, deaths = tally["scores"], tally["floors"], tally["deaths"]
-        report[character] = {
-            "attempts": total,
-            "complete": n,
-            "wins": wins,
-            "win_rate": wins / total if total else None,
-            "wilson_95": _wilson(wins, total),
-            "completed_win_rate": wins / n if n else None,
-            "completion_rate": n / total if total else None,
-            "errors_or_unresolved": total - n,
-            "acts_passed": tally["passed"],
-            "act_pass_rates": [count / total for count in tally["passed"]] if total else None,
-            "mean_score": sum(scores) / len(scores) if scores else None,
-            "mean_floor": sum(floors) / len(floors) if floors else None,
-            # [floor, runs] for the finished runs that were lost, floors counted across acts.
-            "death_floors": [[floor, deaths[floor]] for floor in sorted(deaths)],
-        }
-
-    def mean(key):
-        values = [x[key] for x in report.values()]
-        return sum(values) / 5 if all(v is not None for v in values) else None
-
-    rates = [x["win_rate"] for x in report.values()]
-    passes = [x["act_pass_rates"] for x in report.values()]
-    return {
-        "characters": report,
-        "ascensions": sorted(ascensions),
-        "comparable": bool(attempts) and not unfinished,
-        "equal_character_win_rate": mean("win_rate"),
-        "worst_character_win_rate": min(rates) if all(r is not None for r in rates) else None,
-        "equal_character_completed_win_rate": mean("completed_win_rate"),
-        "equal_character_completion_rate": mean("completion_rate"),
-        "equal_character_act_pass_rates": (
-            [sum(act) / 5 for act in zip(*passes)] if all(p is not None for p in passes) else None
-        ),
-        "equal_character_mean_score": mean("mean_score"),
-        "equal_character_mean_floor": mean("mean_floor"),
-        # Floors of acts 1, 2, ... as far as any finished run entered them.
-        "act_floors": [act_floors.get(act) for act in range(1, max(act_floors, default=0) + 1)],
-    }

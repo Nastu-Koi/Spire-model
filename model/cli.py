@@ -12,8 +12,9 @@ import torch
 from .checkpoint import archive_checkpoint, load_model, restore_training, save_checkpoint
 from .config import ModelConfig, TrainConfig
 from .control import environment_action
-from .data import RunShards, audit_files, load_runs, policy_macros
+from .data import HELDOUT_FRACTION, RunShards, audit_files, extent, load_runs, policy_macros, split_held_out
 from .engine import CliEngine
+from .evaluation import compare_evaluations, evaluate_runs, nll_report
 from .history import TrainingHistory
 from .model import PolicyNetwork
 from .policy import SessionPolicy
@@ -30,7 +31,7 @@ from .rollout import RolloutRunner, collect_round, precision_context, write_run
 from .sampling import Samplers
 from .runtime import configure_runtime
 from .seeds import validate_evaluation_seeds
-from .trainer import Learner, evaluate_runs
+from .trainer import Learner
 
 
 def vocabulary_for(runs, config):
@@ -178,7 +179,24 @@ def parser():
                    help="Finish BC from the given current checkpoint: decay every rate linearly "
                         "to zero over this many updates, then stop")
     x.add_argument("--precision", choices=["no", "bf16"], default="bf16")
+    x.add_argument("--include-heldout", action="store_true",
+                   help="Train on the held-out seed groups as well; by default they are "
+                        "skipped and kept for NLL comparisons (heldout-nll)")
     x.add_argument("--output", required=True)
+    x = sub.add_parser("heldout-nll",
+                       help="Score a checkpoint on the held-out seed groups of a data set: "
+                            "NLL per macro-action and per decision by character and phase")
+    x.add_argument("--data", required=True)
+    x.add_argument("--checkpoint", required=True)
+    x.add_argument("--window-shards", type=int, default=8,
+                   help="Sharded data only: shards read into memory at a time")
+    x = sub.add_parser("compare",
+                       help="Report one or two evaluation directories: every character, "
+                            "the five together and the first seeds of every character; "
+                            "two are paired seed by seed with sign tests")
+    x.add_argument("directories", nargs="+", help="Output directories of `evaluate`")
+    x.add_argument("--head", type=int, default=60,
+                   help="Seeds per character of the leading subset reported beside the whole")
     for command in ("collect", "evaluate"):
         x = sub.add_parser(command)
         x.add_argument("--checkpoint", required=True)
@@ -515,7 +533,7 @@ def main(argv=None):
                 record = history.append(
                     epoch,
                     metrics,
-                    training_runs=len(runs),
+                    training_runs=metrics["training"]["groups"],
                     duration_seconds=time.monotonic() - epoch_started,
                     policy_version=learner.policy_version,
                 )
@@ -525,6 +543,7 @@ def main(argv=None):
                     {
                         **metadata,
                         "completed_bootstrap_epochs": epoch,
+                        "held_out": metrics["held_out"],
                         "last_training_record": record,
                     },
                 )
@@ -537,8 +556,25 @@ def main(argv=None):
 
             history.status("updating", round=start_epoch + 1, updates=learner.updates)
             learner.bootstrap(runs, args.epochs, on_epoch=epoch_done, window_shards=args.window_shards,
-                              on_update=update_done)
+                              on_update=update_done, include_held_out=args.include_heldout)
             history.status("completed", round=start_epoch + completed)
+        elif args.command == "heldout-nll":
+            runs = RunShards(args.data) if RunShards.is_at(args.data) else load_runs(args.data)
+            learner, _ = _learner(args.checkpoint, args.device, inference=True)
+            _, held = split_held_out(runs)
+            if not extent(held)["macros"]:
+                raise ProtocolError("The data set has no macro-actions in its held-out seed groups")
+            groups = learner.evaluate_bootstrap(held, window_shards=args.window_shards, include_a0=True)
+            emit({
+                "data": str(args.data),
+                "checkpoint": str(args.checkpoint),
+                "policy_version": learner.policy_version,
+                "updates": learner.updates,
+                "held_out": {"fraction": HELDOUT_FRACTION, **extent(held), "of": extent(runs)},
+                **nll_report(groups),
+            })
+        elif args.command == "compare":
+            emit(compare_evaluations(args.directories, head=args.head))
         elif args.command == "infer":
             model, vocabulary, manifest = load_model(args.checkpoint, args.device)
             model.eval()
