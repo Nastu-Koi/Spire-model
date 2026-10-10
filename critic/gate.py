@@ -24,8 +24,10 @@ BASELINE = "logistic_act_floor"
 
 @dataclass
 class Gate:
-    # Held-out seeds (runs) under which explained variance is split noise.
-    min_heldout_seeds: int = 200
+    # Held-out seeds (runs) under which explained variance is split noise. An
+    # iteration's round of 1,000 runs holds out 200 of them give or take 13: the
+    # floor stands clear of that, or the split alone turns away half the first critics.
+    min_heldout_seeds: int = 150
     # Explained variance of the ±1 return, of each head: an absolute floor, and a
     # margin over the act-and-floor logistic regression on the same split.
     min_explained_variance: float = 0.10

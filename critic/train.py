@@ -166,9 +166,11 @@ def constant_loss(rows, act_weight):
 
 
 def set_head_bias(net, rates):
-    """The head predicts the base rates before it is trained: the constant baseline."""
+    """The head predicts the base rates before it is trained: the constant baseline.
+    A rate is held within [0.01, 0.99]: no win among a handful of runs is not a rate of
+    zero, and a bias set that far out is not learned back from the wins that follow."""
     with torch.no_grad():
-        net.head.bias.copy_(torch.tensor([math.log(max(r, 1e-6) / max(1 - r, 1e-6)) for r in rates]))
+        net.head.bias.copy_(torch.tensor([math.log(r / (1 - r)) for r in (min(max(r, 0.01), 0.99) for r in rates)]))
 
 
 @torch.no_grad()
