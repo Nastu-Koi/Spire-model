@@ -1,6 +1,6 @@
 """The critic network, its saved form and the scorer that serves it.
 
-The network is the policy's entity encoder and global layers (`PolicyValue`, whose
+The network is the policy's entity encoder and global layers (`PolicyNetwork`, whose
 decision heads it leaves untrained and unsaved) read at the global token, with a
 two-logit head: the run is won, the act is passed. It is a ModelConfig (the `model`
 section of a profile). A saved critic is `weights.pt` plus `manifest.json`, which
@@ -24,7 +24,7 @@ from torch import nn
 
 from model import rules
 from model.config import ModelConfig
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.public_history import HISTORY_VERSION, require_history_version
 from model.representation import ENCODING_VERSION, Vocabulary
 
@@ -51,7 +51,7 @@ class Critic(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.body = PolicyValue(config)
+        self.body = PolicyNetwork(config)
         self.head = nn.Linear(config.hidden_size, 2)
         # An untrained head predicts its bias; the trainer sets that to the base rates.
         nn.init.zeros_(self.head.weight)
