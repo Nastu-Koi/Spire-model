@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 
+from .buffer import sample_round
 from .checkpoint import archive_checkpoint, load_model, restore_training, save_checkpoint
 from .config import ModelConfig, TrainConfig
 from .control import environment_action
@@ -218,6 +219,14 @@ def parser():
                 help="Native profile whose sampling temperatures replace the checkpoint's "
                      "for this round; it must agree with the checkpoint on the rest",
             )
+            x.add_argument("--iteration", type=int,
+                           help="The sampling iteration the round belongs to, recorded in every run "
+                                "and index row; default the round number")
+            x.add_argument("--journals", action="store_true",
+                           help="Also write each run's journal (every frame with its reward) beside "
+                                "its fights; sampled rounds keep only what training reads otherwise")
+            x.add_argument("--shard-samples", type=int, default=2000,
+                           help="Stored decision steps per gzip shard of the round")
         x.add_argument("--engine-root")
         x.add_argument("--output", required=True)
         x.add_argument("--max-steps", type=int, default=10000)
@@ -617,6 +626,13 @@ def main(argv=None):
                 validate_evaluation_seeds(seeds, manifest["progress"])
             directory = Path(args.output)
             directory.mkdir(parents=True, exist_ok=True)
+            # Never overwrite a round from an interrupted or previous invocation.
+            existing = [
+                int(p.name[6:])
+                for p in directory.glob("round-*")
+                if p.name[6:].isdigit()
+            ]
+            round_number = max(existing, default=-1) + 1
             runner = RolloutRunner(
                 learner.model,
                 learner.vocabulary,
@@ -626,6 +642,8 @@ def main(argv=None):
                 ascension=learner.config.ascension,
                 claim_rewards=args.command == "evaluate" and args.claim_rewards,
                 temperatures=learner.config.temperatures,
+                iteration=None if args.command == "evaluate"
+                else round_number if args.iteration is None else args.iteration,
             )
             samplers = Samplers(lambda: CliEngine(root=args.engine_root), learner.model,
                                 learner.vocabulary, engines=args.workers, processes=args.processes)
@@ -634,15 +652,9 @@ def main(argv=None):
                 # One run in memory at a time: together they are tens of gigabytes.
                 emit(evaluate_runs(json.loads(p.read_text()) for p in paths))
             else:
-                # Never overwrite a round from an interrupted or previous invocation.
-                existing = [
-                    int(p.name[6:])
-                    for p in directory.glob("round-*")
-                    if p.name[6:].isdigit()
-                ]
-                paths = collect_round(samplers, runner, seeds,
-                                      directory / f"round-{max(existing, default=-1) + 1}")
-                emit({"runs": [str(p) for p in paths]})
+                # The round as training reads it: shards and index under round-N.
+                emit(sample_round(samplers, runner, seeds, directory / f"round-{round_number}",
+                                  journals=args.journals, shard_samples=args.shard_samples))
     except KeyboardInterrupt:
         if history:
             history.status("interrupted")

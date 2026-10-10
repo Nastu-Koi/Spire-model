@@ -15,13 +15,11 @@ from pathlib import Path
 
 from .control import controller_for
 from .data import validate_run
-from .dataset_index import HEADER, INDEX
+from .dataset_index import ShardWriter, member
 from .protocol import CHARACTERS, SCHEMA, ProtocolError, clean_frame, fingerprint, segment_key, validate_frame
 
 SAMPLE_SCHEMA = "spire-independent-decisions-v1"
 IMPORT_VERSION = "independent-import-v6"
-# Level 6 packs runs within a few percent of level 9 in a third of the time.
-COMPRESSION = 6
 # Samples handed to a worker at a time, in whole groups.
 BATCH_SAMPLES = 64
 
@@ -132,9 +130,8 @@ def convert_lines(batch):
     for group, lines in batch:
         try:
             run = convert_group([json.loads(line) for line in lines])
-            text = json.dumps(run, ensure_ascii=False, allow_nan=False) + "\n"
             results.append((group, len(lines), {
-                "member": gzip.compress(text.encode("utf-8"), COMPRESSION),
+                "member": member(run),
                 "run_id": run["run_id"], "seed": run["seed"], "character": run["character"],
                 "phases": dict(Counter(m["phase"] for m in run["macros"])),
                 "contract": run["contract"], "contract_key": fingerprint(run["contract"]),
@@ -154,43 +151,6 @@ def in_order(pool, function, tasks, ahead):
             yield pending.popleft().result()
     while pending:
         yield pending.popleft().result()
-
-
-class ShardWriter:
-    """Accepted runs as gzip shards of bounded size, with one index row per run. A shard
-    is the gzip members of its runs one after another, which reads as one stream."""
-
-    def __init__(self, directory, shard_samples):
-        self.directory, self.limit = Path(directory), shard_samples
-        (self.directory / "accepted").mkdir()
-        self.index = gzip.open(self.directory / INDEX, "xt", encoding="utf-8")
-        self.index.write(json.dumps(HEADER) + "\n")
-        self.stream, self.filled, self.shards, self.contracts = None, 0, [], {}
-        self.line = 0
-
-    def write(self, run, samples):
-        if self.stream is None or self.filled >= self.limit:
-            self.close_shard()
-            self.shards.append(f"accepted/{len(self.shards):05}.jsonl.gz")
-            self.stream = (self.directory / self.shards[-1]).open("xb")
-        self.stream.write(run["member"])
-        self.filled += samples
-        self.contracts[run["contract_key"]] = run["contract"]
-        self.index.write(json.dumps({
-            "run_id": run["run_id"], "seed": run["seed"], "character": run["character"],
-            "phases": run["phases"], "contract": run["contract_key"],
-            "shard": self.shards[-1], "line": self.line}) + "\n")
-        self.line += 1
-
-    def close_shard(self):
-        if self.stream is not None:
-            self.stream.close()
-        self.stream, self.filled = None, 0
-        self.line = 0
-
-    def close(self):
-        self.close_shard()
-        self.index.close()
 
 
 def batches(groups):
@@ -242,7 +202,9 @@ def import_samples(path, output, shard_samples=2000, workers=1):
                     reason = "Duplicate sample group"
                 if reason is None:
                     identities.add(group)
-                    writer.write(run, samples)
+                    writer.write(run["member"], {
+                        "run_id": run["run_id"], "seed": run["seed"], "character": run["character"],
+                        "phases": run["phases"], "contract": run["contract_key"]}, samples, run["contract"])
                     counts["accepted_runs"] += 1
                     counts["macros"] += sum(run["phases"].values())
                     counts["automatic_steps"] += run["automatic_steps"]

@@ -28,9 +28,10 @@ def is_policy_frame(frame):
 
 
 def policy_macros(run):
-    """Keep historical evidence intact; only macros with policy choices train."""
+    """Keep historical evidence intact; only macros with policy choices train. A
+    macro-action that kept no frames (a fight of a sampled run) is not a sample."""
     return (macro for macro in run.get("macros", [])
-            if any(is_policy_frame(step["frame"]) for step in macro["steps"]))
+            if macro.get("steps") and any(is_policy_frame(step["frame"]) for step in macro["steps"]))
 
 
 def environment_action(frame):
