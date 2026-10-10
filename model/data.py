@@ -3,6 +3,7 @@
 import gzip
 import json
 import math
+import os
 import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -18,7 +19,7 @@ from .protocol import (
 )
 from .rewards import require_reward_version
 from .control import CONTROL_VERSION, controller_for, is_policy_frame, policy_macros
-from .dataset_index import INDEX, read_index
+from .dataset_index import INDEX, STUDENT_BATTLE, read_index, row_source, sample_source
 
 
 SOURCES = {"demonstration", "recorder_bc", "independent", "rollout", "evaluation"}
@@ -230,18 +231,88 @@ def macro_count(runs):
     return sum(1 for run in runs for _ in policy_macros(run))
 
 
+# The share of a (character, phase) group's weight that the solver's labels on the
+# policy's own fight entries (`student_battle`) take where the group also holds other
+# samples: a third at first, rising with the student macro-actions the training data
+# holds in all, linearly, to a half at SHARE_RAMP_MACROS and no further. The rule and
+# its grounds: ARCHITECTURE.md, 批次整理与数据加载.
+SHARE_START, SHARE_CAP, SHARE_RAMP_MACROS = 1 / 3, 1 / 2, 1_000_000
+
+
+def student_share(student_macros):
+    """The share of a group's weight the student samples take, from how many student
+    macro-actions the training data holds in all."""
+    if student_macros < 0:
+        raise ValueError("A count of macro-actions is not negative")
+    return SHARE_START + (SHARE_CAP - SHARE_START) * min(1.0, student_macros / SHARE_RAMP_MACROS)
+
+
+def group_weights(source_counts, share=None):
+    """The weight of one macro-action of each (character, phase, source), from the
+    macro-actions of each. Every (character, phase) group weighs 1/G; within a group
+    the student samples share `share` of that equally and the other sources the
+    rest, equally per macro-action; a group with one kind only gives it everything.
+    `share` defaults to `student_share` of the student macro-actions counted."""
+    groups = defaultdict(Counter)
+    for (character, phase, source), n in source_counts.items():
+        if n:
+            groups[character, phase][source] += n
+    if share is None:
+        share = student_share(sum(n for (_, _, source), n in source_counts.items() if source == STUDENT_BATTLE))
+    if not 0 < share < 1:
+        raise ValueError("The student share is a fraction of a group's weight")
+    weights = {}
+    for group, by_source in groups.items():
+        student = by_source.get(STUDENT_BATTLE, 0)
+        rest = sum(n for source, n in by_source.items() if source != STUDENT_BATTLE)
+        for source, n in by_source.items():
+            if source == STUDENT_BATTLE:
+                part = share if rest else 1.0
+                weights[group + (source,)] = part / (len(groups) * student)
+            else:
+                part = (1 - share) if student else 1.0
+                weights[group + (source,)] = part / (len(groups) * rest)
+    return weights
+
+
+def weight_totals(weights, source_counts):
+    """The total weight of every (character, phase, source): what a report shows of
+    the shares."""
+    return {key: weights[key] * n for key, n in source_counts.items() if n}
+
+
+def source_counts_of(runs):
+    """Policy macro-actions per (character, phase, source) of runs in memory."""
+    return Counter((r["character"], m["phase"], sample_source(r)) for r in runs for m in policy_macros(r))
+
+
 class RunShards:
     """Imported runs kept as gzip shards and read a few shards at a time.
 
     The index holds one small row per run (identity, seed, character, macro counts
-    by phase, shard), so splits and sample weights need no pass over the data.
+    by phase, source, shard), so splits and sample weights need no pass over the
+    data. `directory` is one data directory or a list of them, read as one data
+    set: an import of demonstrations with the imports of student battles, or the
+    rounds of a buffer. Every row remembers its directory (`root`); a shard is named
+    by (root, file).
     """
 
     def __init__(self, directory, rows=None):
-        self.directory = Path(directory)
+        if isinstance(directory, (str, os.PathLike)):
+            directory = [directory]
+        self.directories = [Path(d) for d in directory]
+        if not self.directories:
+            raise ValueError("A data set is at least one directory")
         if rows is None:
-            rows = read_index(self.directory)
+            rows = [dict(row, root=root) for root, path in enumerate(self.directories) for row in read_index(path)]
         self.rows = [row for row in rows if row["phases"]]
+
+    @property
+    def directory(self):
+        """The directory of a data set that is one directory."""
+        if len(self.directories) != 1:
+            raise ValueError("The data set spans several directories")
+        return self.directories[0]
 
     @staticmethod
     def is_at(path):
@@ -255,16 +326,36 @@ class RunShards:
         parts = [], []
         for row in self.rows:
             parts[held_out(row, fraction)].append(row)
-        return RunShards(self.directory, parts[0]), RunShards(self.directory, parts[1])
+        return RunShards(self.directories, parts[0]), RunShards(self.directories, parts[1])
 
     @property
     def counts(self):
-        """Macros per (character, phase): what the sample weights are normalized by."""
+        """Macros per (character, phase): the groups the sample weights are normalized by."""
         counts = Counter()
         for row in self.rows:
             for phase, macros in row["phases"].items():
                 counts[row["character"], phase] += macros
         return counts
+
+    @property
+    def source_counts(self):
+        """Macros per (character, phase, source): what the shares within a group are
+        computed from."""
+        counts = Counter()
+        for row in self.rows:
+            source = row_source(row)
+            for phase, macros in row["phases"].items():
+                counts[row["character"], phase, source] += macros
+        return counts
+
+    @property
+    def student_macros(self):
+        return sum(n for (_, _, source), n in self.source_counts.items() if source == STUDENT_BATTLE)
+
+    @property
+    def weights(self):
+        """The weight of a macro-action of every (character, phase, source) of this data."""
+        return group_weights(self.source_counts)
 
     @property
     def macros(self):
@@ -281,45 +372,56 @@ class RunShards:
     def metadata(self):
         from .protocol import fingerprint
 
-        known = json.loads((self.directory / "summary.json").read_text())["contracts"]
+        known = {}
+        for directory in self.directories:
+            known.update(json.loads((directory / "summary.json").read_text())["contracts"])
         return {
             "training_engine_contracts": [known[key] for key in sorted({r["contract"] for r in self.rows})],
             "training_seeds": sorted(self.seeds),
             "training_seed_pool_hash": fingerprint(sorted((r["character"], str(r["seed"])) for r in self.rows)),
         }
 
+    @staticmethod
+    def _key(name):
+        """A shard's key, (root, file); a bare file name is one of the first directory."""
+        return (0, name) if isinstance(name, str) else tuple(name)
+
     def window_names(self, shards=8, shuffle=False):
-        """The shard files of every window, `shards` to a window."""
-        names = sorted({row["shard"] for row in self.rows})
+        """The shards of every window, `shards` to a window, each as (root, file)."""
+        names = sorted({(row.get("root", 0), row["shard"]) for row in self.rows})
         if shuffle:
             random.shuffle(names)
         return [names[start : start + shards] for start in range(0, len(names), shards)]
 
     def read(self, names):
-        """The validated runs of these shard files that belong to this part of the data.
+        """The validated runs of these shards that belong to this part of the data.
         Lines of other runs are skipped unparsed: a held-out part is a tenth of a shard."""
-        names = list(names)
+        names = [self._key(name) for name in names]
         selected = set(names)
         wanted = defaultdict(dict)
         for row in self.rows:
-            if row["shard"] in selected:
-                wanted[row["shard"]][row["line"]] = row
+            key = (row.get("root", 0), row["shard"])
+            if key in selected:
+                wanted[key][row["line"]] = row
         runs = []
-        for name in names:
+        for key in names:
             found = 0
-            with gzip.open(self.directory / name, "rt", encoding="utf-8") as stream:
+            root, name = key
+            with gzip.open(self.directories[root] / name, "rt", encoding="utf-8") as stream:
                 for number, line in enumerate(stream):
-                    if number in wanted[name]:
+                    if number in wanted[key]:
                         run = json.loads(line)
-                        row = wanted[name][number]
+                        row = wanted[key][number]
                         if run["run_id"] != row["run_id"]:
                             raise ProtocolError("Shard does not hold its runs in the order of the index")
                         validate_run(run)
                         if Counter(m["phase"] for m in policy_macros(run)) != row["phases"]:
                             raise ProtocolError("Policy index counts disagree with the shard; rebuild the index")
+                        if sample_source(run) != row_source(row):
+                            raise ProtocolError("Policy index source disagrees with the shard; rebuild the index")
                         runs.append(run)
                         found += 1
-            if found != len(wanted[name]):
+            if found != len(wanted[key]):
                 raise ProtocolError("Shard is missing indexed runs; rebuild the index")
         return runs
 
@@ -338,19 +440,24 @@ def split_held_out(runs, fraction=HELDOUT_FRACTION):
 
 
 def extent(runs):
-    """How much data `runs` is: its sample groups, policy macro-actions and seeds."""
+    """How much data `runs` is: its sample groups, policy macro-actions and seeds, and
+    of the macro-actions how many are student battles and the share they get."""
     if isinstance(runs, RunShards):
-        return {"groups": len(runs), "macros": runs.macros, "seeds": len(runs.seeds)}
-    return {"groups": len(runs), "macros": macro_count(runs),
-            "seeds": len({str(run["seed"]) for run in runs})}
+        student = runs.student_macros
+        result = {"groups": len(runs), "macros": runs.macros, "seeds": len(runs.seeds)}
+    else:
+        student = sum(n for (_, _, source), n in source_counts_of(runs).items() if source == STUDENT_BATTLE)
+        result = {"groups": len(runs), "macros": macro_count(runs),
+                  "seeds": len({str(run["seed"]) for run in runs})}
+    return dict(result, student_macros=student, student_share=student_share(student) if student else None)
 
 
 @dataclass
 class Sample:
     """A macro-action to learn from, with what the weighted NLL trainer and its reports
-    need of it. `source` is the run's: demonstrations, solver labels and sampled runs are
-    the sources the trainer weighs. `macro` is None once a feeder has packed it: the
-    fields after it travel on alone."""
+    need of it. `source` is what the weights tell apart (`sample_source`): the run's
+    source, or `student_battle` for the solver's labels on the policy's own fights.
+    `macro` is None once a feeder has packed it: the fields after it travel on alone."""
 
     macro: dict | None
     character: str
@@ -365,29 +472,29 @@ class Sample:
     )
 
 
-def _sample(run, macro, weight):
+def _sample(run, macro, weight, source):
     branches = sum(is_policy_frame(step["frame"]) for step in macro["steps"])
     return Sample(macro, run["character"], run["run_id"], weight, macro["phase"], branches,
-                  run.get("ascension"), run.get("source"))
+                  run.get("ascension"), source)
 
 
-def samples(runs, *, counts=None):
+def samples(runs, *, weights=None):
     """Weighted samples of the policy macro-actions of `runs`: every (character, phase)
-    group weighs the same, and its macro-actions share that weight equally.
+    group weighs the same; within a group the student battles take their share and the
+    rest is shared equally (`group_weights`).
 
-    `counts` gives the policy macros per (character, phase) of the whole data set, from
-    its index, when `runs` is only a window of it; the weights follow the whole set.
-    Shares between the sources of a group are the index's to give through `counts`.
+    `weights` is the weight of a macro-action of every (character, phase, source) of
+    the whole data set (`RunShards.weights`), when `runs` is only a window of it; the
+    weights follow the whole set, not the window.
     """
-    if counts is None:
-        counts = Counter(
-            (r["character"], m["phase"]) for r in runs for m in policy_macros(r)
-        )
+    if weights is None:
+        weights = group_weights(source_counts_of(runs))
     result = []
     for run in runs:
         validate_run(run)
+        source = sample_source(run)
         for macro in policy_macros(run):
-            result.append(_sample(run, macro, 1 / (len(counts) * counts[run["character"], macro["phase"]])))
+            result.append(_sample(run, macro, weights[run["character"], macro["phase"], source], source))
     return result
 
 

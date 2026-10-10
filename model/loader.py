@@ -156,7 +156,7 @@ def _send(connection, message):
         pass
 
 
-def _feed(connection, shards, windows, counts, vocabulary, config, shuffle, seed):
+def _feed(connection, shards, windows, weights, vocabulary, config, shuffle, seed):
     """Feeder process: the packed logical batches of its windows, then its number,
     written to its own pipe. It holds no thread when it forks its workers; what it
     sent stays mapped for the trainer by the shared files' own reference counts."""
@@ -173,7 +173,7 @@ def _feed(connection, shards, windows, counts, vocabulary, config, shuffle, seed
         random.seed(seed)
         carry = []
         for names in windows:
-            items = carry + samples(shards.read(names), counts=counts)
+            items = carry + samples(shards.read(names), weights=weights)
             if shuffle:
                 random.shuffle(items)
             boundary = len(items) // config.logical_batch_size * config.logical_batch_size
@@ -196,19 +196,19 @@ def _feed(connection, shards, windows, counts, vocabulary, config, shuffle, seed
         connection.close()
 
 
-def stream(shards, vocabulary, config, *, window_shards, shuffle, counts=None):
+def stream(shards, vocabulary, config, *, window_shards, shuffle, weights=None):
     """The logical batches of sharded runs, as `batches` yields them, with samples that
     carry no frames. `window_shards` shards are in memory at a time. With workers
     they are split between `loader_feeders` feeders: the samples of a feeder's shards
     are shuffled together when `shuffle`, and the batches of the feeders interleave.
-    Sample weights follow the whole data set's `counts`, not the window's."""
+    Sample weights are the whole data set's (`RunShards.weights`), not the window's."""
     if type(window_shards) is not int or window_shards < 1:
         raise ValueError("Window shard count must be positive")
-    counts = shards.counts if counts is None else counts
+    weights = shards.weights if weights is None else weights
     if not config.loader_workers:
         carry = []
         for names in shards.window_names(window_shards, shuffle):
-            items = carry + samples(shards.read(names), counts=counts)
+            items = carry + samples(shards.read(names), weights=weights)
             if shuffle:
                 random.shuffle(items)
             boundary = len(items) // config.logical_batch_size * config.logical_batch_size
@@ -228,7 +228,7 @@ def stream(shards, vocabulary, config, *, window_shards, shuffle, counts=None):
             # what is in flight to the workers' prefetch behind each feeder.
             receiver, sender = context.Pipe(duplex=False)
             process = context.Process(target=_feed, args=(
-                sender, shards, (index, windows[index::count]), counts, vocabulary, config,
+                sender, shards, (index, windows[index::count]), weights, vocabulary, config,
                 shuffle, random.getrandbits(64)))
             process.start()
             sender.close()

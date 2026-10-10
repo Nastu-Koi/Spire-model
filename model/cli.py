@@ -163,7 +163,10 @@ def parser():
     x.add_argument("--data", required=True)
     x.add_argument("--workers", type=int, default=4)
     x = sub.add_parser("bootstrap")
-    x.add_argument("--data", required=True)
+    x.add_argument("--data", required=True, nargs="+",
+                   help="Data directories read together as one data set (an import of "
+                        "demonstrations and imports of student battles, or rounds); a "
+                        "single path may also be a small run file or directory")
     x.add_argument("--epochs", type=int,
                    help="Optional explicit epoch budget; otherwise continue until interrupted")
     x.add_argument("--window-shards", type=int, default=8,
@@ -187,7 +190,8 @@ def parser():
     x = sub.add_parser("heldout-nll",
                        help="Score a checkpoint on the held-out seed groups of a data set: "
                             "NLL per macro-action and per decision by character and phase")
-    x.add_argument("--data", required=True)
+    x.add_argument("--data", required=True, nargs="+",
+                   help="Data directories read together, as for bootstrap")
     x.add_argument("--checkpoint", required=True)
     x.add_argument("--window-shards", type=int, default=8,
                    help="Sharded data only: shards read into memory at a time")
@@ -356,6 +360,17 @@ def _profile(path):
     return TrainConfig.from_dict(json.loads(Path(path).read_text())["training"]) if path else None
 
 
+def _dataset(paths):
+    """The runs `--data` names: sharded directories are read together as one data set
+    (RunShards); one path that is not sharded is a small run file or directory read
+    into memory. Returns (runs, whether they are sharded)."""
+    if all(RunShards.is_at(path) for path in paths):
+        return RunShards(paths), True
+    if len(paths) == 1:
+        return load_runs(paths[0]), False
+    raise ProtocolError("Several --data paths must all be sharded data directories (with an index)")
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
     random.seed(args.seed)
@@ -475,15 +490,14 @@ def main(argv=None):
                 if (args.weights_only or not args.checkpoint
                         or Path(args.checkpoint).resolve() != (output / "current").resolve()):
                     raise ValueError("Existing BC output requires resume from its current checkpoint; use a new output directory")
-            streamed = RunShards.is_at(args.data)
-            runs = RunShards(args.data) if streamed else load_runs(args.data)
+            runs, streamed = _dataset(args.data)
             if streamed and not args.checkpoint:
                 raise ProtocolError(
                     "Sharded data is read as a stream and cannot rebuild a vocabulary: "
                     "create a checkpoint with `init` and pass --checkpoint"
                 )
             if not runs:
-                report = Path(args.data).parent / "summary.json"
+                report = Path(args.data[0]).parent / "summary.json"
                 detail = f" See import report: {report}" if report.exists() else ""
                 raise ProtocolError(
                     f"No accepted behavior-cloning samples: {args.data} contains zero runs."
@@ -568,14 +582,14 @@ def main(argv=None):
                               on_update=update_done, include_held_out=args.include_heldout)
             history.status("completed", round=start_epoch + completed)
         elif args.command == "heldout-nll":
-            runs = RunShards(args.data) if RunShards.is_at(args.data) else load_runs(args.data)
+            runs, _ = _dataset(args.data)
             learner, _ = _learner(args.checkpoint, args.device, inference=True)
             _, held = split_held_out(runs)
             if not extent(held)["macros"]:
                 raise ProtocolError("The data set has no macro-actions in its held-out seed groups")
             groups = learner.evaluate_bootstrap(held, window_shards=args.window_shards, include_a0=True)
             emit({
-                "data": str(args.data),
+                "data": [str(path) for path in args.data],
                 "checkpoint": str(args.checkpoint),
                 "policy_version": learner.policy_version,
                 "updates": learner.updates,

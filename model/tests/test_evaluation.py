@@ -254,7 +254,8 @@ def test_held_out_nll_is_reported_by_character_and_phase(tmp_path, capsys):
     assert main(["heldout-nll", "--data", str(data), "--checkpoint", str(tmp_path / "bc" / "current")]) == 0
     report = json.loads(capsys.readouterr().out)
     held = [demonstration(c, held_out_seed("held"), 4, 2) for c in CHARACTERS]
-    assert report["held_out"] == {"fraction": HELDOUT_FRACTION, **extent(held), "of": {"groups": 10, "macros": 2 * extent(held)["macros"], "seeds": 2}}
+    assert report["held_out"] == {"fraction": HELDOUT_FRACTION, **extent(held), "of": {
+        "groups": 10, "macros": 2 * extent(held)["macros"], "seeds": 2, "student_macros": 0, "student_share": None}}
     assert report["all"]["macros"] == extent(held)["macros"] and set(report["characters"]) == set(CHARACTERS)
     for name, group in report["groups"].items():
         assert name.split("/")[0] in CHARACTERS and group["nll_per_branch"] == pytest.approx(group["nll"] / group["branches"])

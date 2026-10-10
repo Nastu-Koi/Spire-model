@@ -176,7 +176,7 @@ def test_reindex_removes_only_event_advances_and_preserves_lines_weights_and_bat
     window = dataset.read(["accepted/00000.jsonl.gz"])
     assert window == [mixed]
     expected = training_samples([only, mixed])
-    actual = training_samples(window, counts=dataset.counts)
+    actual = training_samples(window, weights=dataset.weights)
     assert [s.phase for s in actual] == ["event", "shop", "combat"]
     assert [s.weight for s in actual] == [s.weight for s in expected] == [1 / 3] * 3
     config = ModelConfig.tiny()

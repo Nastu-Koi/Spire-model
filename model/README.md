@@ -80,6 +80,25 @@ python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-
 
 已有训练目录须通过其 `current` 续训，不能用新初始化覆盖。
 
+### 多个数据目录与学生战斗的份额
+
+`--data` 可以给多个分片数据目录，读成一个数据集（`RunShards`）：示范导入加若干学生战斗导入（[学生状态的战斗](../spire_codex_data/README.md#学生状态的战斗)），或若干采样轮。每个目录各有自己的索引和 `summary.json`，不合并文件；留出规则、权重归一和检查点的契约、种子集合都按合起来的整体算。单个路径仍可以是小的对局文件或目录。
+
+索引行记每个样本组的来源 `source`（`independent`、`rollout`、`student_battle`；旧索引没有这个字段，读作示范），学生战斗的行另记 `policy_version`、`policy_digest`、`iteration`，`reindex` 保留。`Sample.source` 相同。
+
+权重：每个角色×阶段组仍占 1/G。组里同时有学生战斗和其它来源时，学生样本合计占该组的份额 s、其余来源合计占 1−s，各自在样本间平均；只有一种来源的组整组归它。s 由整个训练部分里学生宏动作的累计数 N 决定：`s = 1/3 + (1/2 − 1/3)·min(1, N/1,000,000)`，即从三分之一起线性升到一半为止（`model/data.py` 的 `student_share`、`group_weights`，依据见 [批次整理与数据加载](../ARCHITECTURE.md#批次整理与数据加载)）。每轮记录的 `training`／`held_out` 计数带 `student_macros` 与 `student_share`。
+
+把一轮学生战斗并入示范续训（严格续训到新目录；换数据时优化器、调度进度和轮次计数都延续）：
+
+```bash
+python -m model --device cuda bootstrap \
+  --data runs/bootstrap-20261008/imported-potions-1in8 data/student-import/round-3 \
+  --checkpoint runs/bootstrap-20261008/trained-v8-potions/current \
+  --output runs/bootstrap-20261008/trained-v9-student
+```
+
+之后每次迭代把新一轮的学生目录追加到 `--data` 列表（旧轮照样留着，份额随累计量上升），从新目录的 `current` 继续。
+
 | 启动方式 | 行为 |
 | --- | --- |
 | `--checkpoint ... --weights-only` | 复用兼容权重，使用当前配置与全新优化器、随机状态和预热计数；使用新输出目录 |
@@ -111,7 +130,7 @@ python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-
 
 ## 固定留出集
 
-训练数据按 seed 分组固定留出约 2%，永不训练，只用来比较 NLL。规则是 `model/data.py` 的 `held_out`：取索引行的 `seed`（独立监督样本的 seed 是来源对局 seed 的 `split_group` 哈希，采样对局的是游戏 seed），其 `fingerprint` 的前 32 位作为 [0, 1) 里的小数小于 `HELDOUT_FRACTION`（0.02）即留出。它只是 seed 的函数：同一 seed 的全部片段落在同一侧，与分片边界、导入批次和子集无关，所以同一个 seed 在 `imported-potions` 和它的 1in8 子集里都在同一侧，数据重新导入或增长也不改变已有 seed 的归属。依据见 [评估](../ARCHITECTURE.md#评估)。
+训练数据按 seed 分组固定留出约 2%，永不训练，只用来比较 NLL。规则是 `model/data.py` 的 `held_out`：取索引行的 `seed`（独立监督样本的 seed 是来源对局 seed 的 `split_group` 哈希，学生战斗样本同样取游戏 seed 的 `split_group`，采样对局的是游戏 seed），其 `fingerprint` 的前 32 位作为 [0, 1) 里的小数小于 `HELDOUT_FRACTION`（0.02）即留出。它只是 seed 的函数：同一 seed 的全部片段落在同一侧，与分片边界、导入批次和子集无关，所以同一个 seed 在 `imported-potions` 和它的 1in8 子集里都在同一侧，数据重新导入或增长也不改变已有 seed 的归属。依据见 [评估](../ARCHITECTURE.md#评估)。
 
 `bootstrap` 默认跳过留出组（`--include-heldout` 关掉跳过）：加载器只读训练部分的索引行，留出组的行连解析都不做，样本权重按训练部分归一。每轮记录（`history.jsonl` 的 `metrics`）带 `held_out`（留出的组数、宏动作数、seed 数）、`training`（训练部分的同样计数）和 `samples`（加载器这一轮交给训练器的宏动作数）：`samples` 等于 `training.macros`，与 `held_out.macros` 相加等于索引总数，这就是留出组没进训练窗口的证据；检查点的 `progress.held_out` 保存同样的计数，`training_seeds` 仍记录整个数据集的 seed。
 

@@ -134,8 +134,8 @@ def test_import_shards_are_read_a_window_at_a_time_with_global_weights(tmp_path)
     # Weights of a window are those the whole data set gives its samples.
     whole = {(i.run_id, i.macro["phase"]): i.weight for i in data_samples(everything)}
     window = next(shards.windows(shards=1))
-    assert all(i.weight == whole[i.run_id, i.macro["phase"]] for i in data_samples(window, counts=shards.counts))
-    assert sum(i.weight for w in shards.windows(1) for i in data_samples(w, counts=shards.counts)) == pytest.approx(1.0)
+    assert all(i.weight == whole[i.run_id, i.macro["phase"]] for i in data_samples(window, weights=shards.weights))
+    assert sum(i.weight for w in shards.windows(1) for i in data_samples(w, weights=shards.weights)) == pytest.approx(1.0)
     # A seed is held out whole, and the two parts never share a run.
     train, validation = shards.split(0.5)
     assert len(train) + len(validation) == 6 and not train.seeds & validation.seeds
@@ -152,7 +152,7 @@ def test_import_shards_are_read_a_window_at_a_time_with_global_weights(tmp_path)
         learner.config.loader_workers = workers
         rows = []
         for logical in loader.stream(shards, learner.vocabulary, learner.config, window_shards=1, shuffle=False,
-                                     counts=shards.counts):
+                                     weights=shards.weights):
             for micro, prepared in logical:
                 with torch.no_grad():
                     scores = learner.model.replay(prepared)[0].tolist()

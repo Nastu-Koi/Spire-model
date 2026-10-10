@@ -133,7 +133,7 @@ def test_sharded_and_in_memory_bc_exclude_chests_before_weighting_and_batching(t
     window = dataset.read([shard])
     assert [r["run_id"] for r in window] == [mixed["run_id"], plain["run_id"]]
     expected = training_samples(load_runs(tmp_path / shard))
-    for items in (training_samples(window, counts=dataset.counts), training_samples(runs)):
+    for items in (training_samples(window, weights=dataset.weights), training_samples(runs)):
         assert len(items) == len(expected) == sum(dataset.counts.values())
         assert [i.weight for i in items] == [i.weight for i in expected]
         assert sum(i.weight for i in items) == pytest.approx(1.0)
