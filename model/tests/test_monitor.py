@@ -318,6 +318,35 @@ class HistoryTests(unittest.TestCase):
         self.assertTrue({"raw", "config", "validation"}.isdisjoint(row))
         self.assertEqual(detail["summary"]["raw"]["training_runs"], 7)
 
+    def test_iterations_are_a_kind_of_run_with_a_summary_for_each(self):
+        writer = TrainingHistory(self.root, "iterate", {"runs_per_character": 200})
+        self.addCleanup(writer.close)
+        writer.status("running", round=0, step="sample")
+        store = MonitorStore(self.root)
+        (run,) = store.list_runs()["runs"]
+        self.assertEqual((run["kind"], run["status"]["round"], run["status"]["step"]), ("iterate", 0, "sample"))
+        writer.append_update({"updates": 5, "loss": 1.0, "awr_loss": 0.6, "supervised_loss": 1.4, "beta": 0.25,
+                              "effective_share": 0.31, "sources": {"rollout": {"loss": 0.6}}}, round=0, stage="awr")
+        writer.append_update({"updates": 6, "loss": 0.9, "awr_loss": 0.5, "supervised_loss": 1.3, "beta": None,
+                              "effective_share": 1.0}, round=0, stage="awr")
+        summary = {"updates": 6, "sampled_win_rate": 0.12, "sampled_mean_floor": 23.5, "critic_win_ev": 0.14,
+                   "critic_gate_passed": True, "policy_updated": True, "beta": 0.25, "effective_share": 0.31,
+                   "awr_loss": 0.55}
+        writer.append(0, summary, policy_version=18, duration_seconds=90.0)
+        detail = store.detail(".")
+        self.assertEqual((detail["kind"], detail["source"], updates(detail)), ("iterate", "updates", [5, 6]))
+        # Every update of the weighted pass is a point; a β that was not used is a gap.
+        self.assertEqual(detail["series"]["metrics"]["beta"], [0.25, None])
+        self.assertEqual(detail["series"]["metrics"]["effective_share"], [0.31, 1.0])
+        self.assertEqual(detail["series"]["metrics"]["awr_loss"], [0.6, 0.5])
+        self.assertEqual(detail["series"]["labels"]["stage"], ["awr"])
+        self.assertNotIn("sources", detail["series"]["metrics"])
+        # An iteration's summary keeps its plain values, the verdicts among them.
+        (row,) = detail["summaries"]["records"]
+        self.assertEqual((row["round"], row["update"], row["policy_version"]), (0, 6, 18))
+        self.assertEqual(row["metrics"], dict(summary, validation_nll=None, a0_validation_nll=None,
+                                              duration_seconds=90.0))
+
     def test_real_writer_status_only_append_and_resumed_session(self):
         writer = TrainingHistory(self.root, "bootstrap", {"head_lr": 0.001})
         self.addCleanup(writer.close)
