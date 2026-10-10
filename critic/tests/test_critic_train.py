@@ -14,7 +14,7 @@ from critic.model import Critic, Scorer, load
 from critic.tests.conftest import frames_of
 from critic.train import build_optimizer, main, set_head_bias, trainable
 from model.config import ModelConfig
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.representation import Vocabulary
 
 
@@ -81,7 +81,7 @@ def test_the_profile_gives_the_model_and_the_critic_section(profile):
 
 def test_the_body_is_the_policy_weights_and_the_optimizer_groups_are_the_policy_s():
     config = ModelConfig.tiny()
-    policy = PolicyValue(config)
+    policy = PolicyNetwork(config)
     net = Critic(config)
     net.load_body(policy.state_dict())
     for name, tensor in policy.state_dict().items():

@@ -9,7 +9,7 @@ import pytest
 from model.checkpoint import save_checkpoint
 from model.config import ModelConfig, TrainConfig
 from model.data import held_out
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.protocol import SCHEMA
 from model.representation import Vocabulary
 from model.testing import demonstration
@@ -102,6 +102,6 @@ def checkpoint(tmp_path, runs):
     config = ModelConfig.tiny()
     vocabulary = Vocabulary.from_frames((f for run in runs for f in frames_of(run)), config)
     path = tmp_path / "policy"
-    save_checkpoint(path, PolicyValue(config), vocabulary, training=TrainConfig(precision="no"),
+    save_checkpoint(path, PolicyNetwork(config), vocabulary, training=TrainConfig(precision="no"),
                     progress=dict(policy_version=3))
     return path
