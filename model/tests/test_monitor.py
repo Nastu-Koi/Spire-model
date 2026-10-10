@@ -23,6 +23,10 @@ def write_records(path, records):
     path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
 
 
+def updates(detail):
+    return detail["series"]["meta"]["update"]
+
+
 class MetricsTests(unittest.TestCase):
     def test_update_coordinate_is_never_inferred_from_epoch(self):
         raw = record(3)
@@ -75,6 +79,15 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(row["stage"], "value")
         self.assertIsNone(row["metrics"]["validation_nll"])
         self.assertIsNone(row["metrics"]["equal_character_win_rate"])
+        self.assertIsNone(row["metrics"]["equal_character_mean_floor"])
+
+    def test_ppo_round_carries_how_far_its_runs_climbed(self):
+        evaluation = {"equal_character_mean_floor": 21.5, "equal_character_mean_score": 0.75,
+                      "act_floors": [17, 16], "characters": {"Silent": {"death_floors": [[9, 3], [22, 1]]}}}
+        row = normalize_record(record(kind="ppo", evaluation=evaluation))
+        self.assertEqual(row["metrics"]["equal_character_mean_floor"], 21.5)
+        self.assertEqual(row["metrics"]["equal_character_mean_score"], 0.75)
+        self.assertEqual(row["evaluation"], evaluation)
 
     def test_nonfinite_values_become_json_null(self):
         raw = record()
@@ -124,8 +137,9 @@ class HistoryTests(unittest.TestCase):
         writer.append_update({"updates": 7, "loss": 1.5, "duration_seconds": 0.5},
                              round=2, optimization_epoch=1, stage="ppo")
         store = MonitorStore(self.root)
-        self.assertEqual(store.list_runs()["runs"][0]["total_records"], 1)
+        self.assertEqual(store.list_runs()["runs"][0]["kind"], "ppo")
         initial = store.detail(".")
+        self.assertEqual(initial["total_records"], 1)
         self.assertEqual(initial["source"], "updates")
         self.assertIsNone(initial["summary"])
         self.assertEqual(initial["latest"]["update"], 7)
@@ -135,7 +149,9 @@ class HistoryTests(unittest.TestCase):
         writer.status("completed", round=2)
         result = store.detail(".")
         self.assertEqual(result["status"]["updates"], 8)
-        self.assertEqual([row["update"] for row in result["records"]], [7, 8])
+        self.assertEqual(updates(result), [7, 8])
+        self.assertEqual(result["series"]["metrics"]["loss"], [1.5, 0.75])
+        self.assertEqual(result["series"]["meta"]["target_kl"], [0.015, 0.015])
         self.assertEqual(result["latest"]["metrics"]["loss"], 0.75)
         self.assertEqual(result["summary"]["metrics"]["loss"], 1.1)
         self.assertEqual(result["summary"]["metrics"]["equal_character_win_rate"], 0.2)
@@ -151,15 +167,19 @@ class HistoryTests(unittest.TestCase):
         resumed.append_update({"updates": 8, "loss": 0.5}, round=1)
         store = MonitorStore(self.root)
         store.list_runs()
-        rows = store.detail(".")["records"]
-        self.assertEqual([row["update"] for row in rows], [9, 8])
-        self.assertNotEqual(rows[0]["session"], rows[1]["session"])
+        detail = store.detail(".")
+        self.assertEqual(updates(detail), [9, 8])
+        # A resumed session whose count went back: both points stay, told apart by session.
+        self.assertEqual(detail["series"]["meta"]["session"], [0, 1])
+        self.assertEqual(detail["series"]["labels"]["session"], [writer.session, resumed.session])
 
     def test_update_only_directory_is_discovered(self):
         write_records(self.root / "updates.jsonl", [record(record_type="update")])
-        result = MonitorStore(self.root).list_runs()["runs"]
+        store = MonitorStore(self.root)
+        result = store.list_runs()["runs"]
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["source"], "updates")
+        self.assertEqual(result[0]["kind"], "bootstrap")
+        self.assertEqual(store.detail(".")["source"], "updates")
 
     def test_invalid_lines_do_not_hide_later_records(self):
         self.path.write_bytes(b"broken\n\xff\n[]\n{\"kind\": []}\n\n" + json.dumps(record()).encode() + b"\n")
@@ -167,6 +187,14 @@ class HistoryTests(unittest.TestCase):
         reader.update(self.path)
         self.assertEqual(reader.invalid, 4)
         self.assertEqual(reader.total, 1)
+
+    def test_nan_written_by_old_trainers_is_a_gap_on_the_curve(self):
+        self.path.write_bytes(b'{"kind": "ppo", "metrics": {"loss": NaN, "kl": Infinity, "entropy": 0.5, "updates": 4}}\n')
+        (self.root / "status.json").write_text('{"kind": "ppo", "state": "completed"}')
+        detail = MonitorStore(self.root).detail(".")
+        self.assertEqual(detail["series"]["metrics"], {"entropy": [0.5], "updates": [4.0]})
+        self.assertIsNone(detail["latest"]["raw"]["metrics"]["loss"])
+        json.dumps(detail, allow_nan=False)
 
     def test_truncation_regrowth_and_rotation_reset_history(self):
         write_records(self.path, [record(1), record(2)])
@@ -183,6 +211,7 @@ class HistoryTests(unittest.TestCase):
         replacement.replace(self.path)
         reader.update(self.path)
         self.assertEqual([row["round"] for row in reader.records], [30])
+        self.assertEqual(list(reader.series.meta["round"]), [30])
 
     def test_bounded_retention_still_counts_all_valid_records(self):
         write_records(self.path, [record(i) for i in range(10)])
@@ -190,8 +219,10 @@ class HistoryTests(unittest.TestCase):
         reader.update(self.path)
         self.assertEqual(reader.total, 10)
         self.assertEqual([row["round"] for row in reader.records], [7, 8, 9])
+        self.assertEqual(list(reader.series.meta["update"]), [7, 8, 9])
+        self.assertEqual(reader.series.since(0)["start"], 7)
 
-    def test_default_keeps_full_history_and_compact_curves_keep_every_scalar(self):
+    def test_default_keeps_full_history_as_columns_and_sends_only_what_is_new(self):
         for source in ("history", "updates"):
             with self.subTest(source=source):
                 directory = self.root / source
@@ -199,28 +230,100 @@ class HistoryTests(unittest.TestCase):
                 path = directory / f"{source}.jsonl"
                 first = record(1, config={"target_kl": 0.02, "logical_batch_size": 32})
                 first["metrics"].update(accuracy=0, accuracy_correct=0, accuracy_decisions=8,
-                                        learning_rates={"head": 0.0001})
+                                        learning_rates={"head": 0.0001}, parameter_updates={"head": {"samples": 1}})
                 write_records(path, [first, *(record(i) for i in range(2, 2502))])
                 store = MonitorStore(directory)
                 full = store.detail(".")
+                series = full["series"]
+                self.assertEqual(full["source"], source)
                 self.assertEqual(full["total_records"], 2501)
                 self.assertEqual(full["retained_records"], 2501)
-                self.assertEqual([row["update"] for row in full["records"]], list(range(1, 2502)))
-                compact = store.detail(".", compact=True)
-                self.assertEqual(len(compact["records"]), 2501)
-                self.assertEqual(compact["records"][0]["metrics"]["accuracy"], 0)
-                self.assertEqual(compact["records"][0]["metrics"]["accuracy_decisions"], 8)
-                self.assertEqual(compact["records"][0]["config"], {"target_kl": 0.02})
-                self.assertNotIn("raw", compact["records"][0])
-                self.assertNotIn("learning_rates", compact["records"][0]["metrics"])
-                self.assertEqual(compact["recent_records"], full["records"][-200:])
-                self.assertEqual(compact["latest"], full["latest"])
-                self.assertEqual(full["records"][0]["raw"], first)
+                self.assertEqual(series["start"], 0)
+                self.assertEqual(updates(full), list(range(1, 2502)))
+                # A measured zero is a value; a metric the later records lack is a gap.
+                self.assertEqual(series["metrics"]["accuracy"][:2], [0, None])
+                self.assertEqual(series["metrics"]["accuracy_decisions"][0], 8)
+                self.assertEqual(series["metrics"]["learning_rates.head"][:2], [0.0001, None])
+                self.assertEqual(series["meta"]["target_kl"][:2], [0.02, None])
+                self.assertFalse(any(name.startswith("parameter_updates") for name in series["metrics"]))
+                self.assertEqual(len({len(column) for column in (*series["meta"].values(), *series["metrics"].values())}), 1)
+                json.dumps(full, allow_nan=False)
+                # Raw records stay for the table's newest rows; a summary log keeps its rounds.
+                self.assertEqual(len(full["recent"]), 200)
+                self.assertEqual(full["recent"][-1]["raw"], record(2501))
+                self.assertEqual(full["latest"], full["recent"][-1])
+                if source == "updates":
+                    self.assertEqual(len(store.update_readers["."].records), 200)
+                else:
+                    self.assertEqual(len(full["summaries"]["records"]), 2501)
+                    self.assertNotIn("raw", full["summaries"]["records"][0])
                 with path.open("a") as stream:
                     stream.write(json.dumps(record(2502)) + "\n")
-                appended = store.detail(".", compact=True)["records"]
-                self.assertEqual(len(appended), 2502)
-                self.assertEqual([appended[0]["update"], appended[-1]["update"]], [1, 2502])
+                held = dict(after=2501, summaries=full["summaries"]["total"], token=full["token"])
+                appended = store.detail(".", **held)
+                self.assertEqual(appended["token"], full["token"])
+                self.assertEqual(appended["series"]["start"], 2501)
+                self.assertEqual(updates(appended), [2502])
+                self.assertEqual([row["update"] for row in appended["recent"]], [2502])
+                self.assertEqual(len(appended["summaries"]["records"]), int(source == "history"))
+                self.assertEqual(appended["total_records"], 2502)
+                # Positions counted against another log are not trusted.
+                self.assertEqual(len(updates(store.detail(".", **dict(held, token="stale")))), 2502)
+                self.assertEqual(updates(store.detail(".", after=2502, token=full["token"])), [])
+
+    def test_a_replaced_log_starts_the_client_over(self):
+        path = self.root / "updates.jsonl"
+        write_records(path, [record(i, record_type="update") for i in range(1, 6)])
+        store = MonitorStore(self.root)
+        first = store.detail(".")
+        write_records(path, [record(i, record_type="update") for i in range(40, 43)])
+        again = store.detail(".", after=5, token=first["token"])
+        self.assertNotEqual(again["token"], first["token"])
+        self.assertEqual(again["series"]["start"], 0)
+        self.assertEqual(updates(again), [40, 41, 42])
+        path.unlink()
+        write_records(self.root / "history.jsonl", [record(50)])
+        gone = store.detail(".", after=3, token=again["token"])
+        self.assertEqual((gone["source"], updates(gone)), ("history", [50]))
+        self.assertNotEqual(gone["token"], again["token"])
+
+    def test_limit_keeps_the_newest_points_and_says_where_they_start(self):
+        write_records(self.root / "updates.jsonl", [record(i, record_type="update") for i in range(1, 11)])
+        store = MonitorStore(self.root, limit=4)
+        detail = store.detail(".")
+        self.assertEqual((detail["total_records"], detail["retained_records"]), (10, 4))
+        self.assertEqual(detail["series"]["start"], 6)
+        self.assertEqual(updates(detail), [7, 8, 9, 10])
+        self.assertEqual(updates(store.detail(".", after=2, token=detail["token"])), [7, 8, 9, 10])
+        self.assertEqual(updates(store.detail(".", after=9, token=detail["token"])), [10])
+
+    def test_listing_does_not_read_the_logs_of_runs_that_state_their_kind(self):
+        for name, kind in (("a", "bootstrap"), ("b", "ppo")):
+            (self.root / name).mkdir()
+            write_records(self.root / name / "updates.jsonl", [record(1, kind=kind, record_type="update")])
+            (self.root / name / "status.json").write_text(json.dumps({"kind": kind, "state": "updating"}))
+        (self.root / "old").mkdir()
+        write_records(self.root / "old" / "history.jsonl", [record(3, kind="ppo")])
+        store = MonitorStore(self.root)
+        self.assertEqual({run["id"]: run["kind"] for run in store.list_runs()["runs"]},
+                         {"a": "bootstrap", "b": "ppo", "old": "ppo"})
+        # Only the run without a status file had to be opened to learn what it is.
+        self.assertEqual([key for key, reader in store.readers.items() if reader.total], ["old"])
+        self.assertEqual(store.detail("b")["total_records"], 1)
+
+    def test_summaries_keep_the_round_report_without_raw_records(self):
+        evaluation = {"equal_character_win_rate": 0.2, "act_floors": [17],
+                      "characters": {"Silent": {"wins": 0, "death_floors": [[9, 4]]}}}
+        writer = TrainingHistory(self.root, "ppo", {"target_kl": 0.015})
+        self.addCleanup(writer.close)
+        writer.append_update({"updates": 3, "loss": 1.0}, round=1, stage="ppo")
+        writer.append(1, [{"updates": 3, "loss": 1.0}], stage="ppo", evaluation=evaluation)
+        detail = MonitorStore(self.root).detail(".")
+        (row,) = detail["summaries"]["records"]
+        self.assertEqual(row["evaluation"], evaluation)
+        self.assertEqual((row["update"], row["round"], row["stage"]), (3, 1, "ppo"))
+        self.assertTrue({"raw", "config", "validation"}.isdisjoint(row))
+        self.assertEqual(detail["summary"]["raw"]["evaluation"], evaluation)
 
     def test_real_writer_status_only_append_and_resumed_session(self):
         writer = TrainingHistory(self.root, "bootstrap", {"head_lr": 0.001})
@@ -236,8 +339,9 @@ class HistoryTests(unittest.TestCase):
         writer.status("completed", round=2)
         detail = store.detail(".")
         self.assertEqual(detail["total_records"], 2)
-        self.assertEqual(detail["records"][0]["session"], first_session)
-        self.assertNotEqual(detail["records"][1]["session"], first_session)
+        rounds = detail["summaries"]["records"]
+        self.assertEqual(rounds[0]["session"], first_session)
+        self.assertNotEqual(rounds[1]["session"], first_session)
         self.assertEqual(detail["latest"]["config"]["head_lr"], 0.0001)
 
     def test_nested_discovery_and_symlinks_do_not_expose_other_files(self):
@@ -313,17 +417,23 @@ class HttpTests(unittest.TestCase):
 
     def test_compressed_api_keeps_full_history(self):
         write_records(self.root / "updates.jsonl", [record(i, record_type="update") for i in range(1, 2502)])
-        request = Request(self.base + "/api/run?id=.&compact=1", headers={"Accept-Encoding": "deflate,gzip"})
+        request = Request(self.base + "/api/run?id=.", headers={"Accept-Encoding": "deflate,gzip"})
         with urlopen(request) as response:
             self.assertEqual(response.headers["Content-Encoding"], "gzip")
             compressed = response.read()
         body = gzip.decompress(compressed)
         payload = json.loads(body)
         self.assertLess(len(compressed), len(body) / 5)
-        self.assertEqual(len(payload["records"]), 2501)
-        self.assertEqual(payload["records"][0]["update"], 1)
-        self.assertEqual(payload["records"][-1]["update"], 2501)
-        self.assertEqual(len(payload["recent_records"]), 200)
+        self.assertEqual(len(updates(payload)), 2501)
+        self.assertEqual((updates(payload)[0], updates(payload)[-1]), (1, 2501))
+        self.assertEqual(len(payload["recent"]), 200)
+        # The next poll names what it holds and is sent nothing it already has.
+        query = urlencode({"id": ".", "after": 2501, "summaries": payload["summaries"]["total"], "token": payload["token"]})
+        with urlopen(self.base + "/api/run?" + query) as response:
+            follow = json.loads(response.read())
+        self.assertEqual((updates(follow), follow["recent"], follow["summaries"]["records"]), ([], [], []))
+        with urlopen(self.base + "/api/run?id=.&after=junk&token=" + payload["token"]) as response:
+            self.assertEqual(len(updates(json.loads(response.read()))), 2501)
 
 
 if __name__ == "__main__":
