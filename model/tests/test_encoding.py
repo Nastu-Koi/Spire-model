@@ -5,7 +5,7 @@ import copy
 import torch
 
 from model.config import ModelConfig
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.batch import Fields
 from model.representation import Vocabulary, fields_of, observation
 
@@ -51,7 +51,7 @@ def map_frame(change=None):
 def build(frames):
     torch.manual_seed(0)
     config = ModelConfig.tiny()
-    return PolicyValue(config).eval(), Vocabulary.from_frames(frames, config)
+    return PolicyNetwork(config).eval(), Vocabulary.from_frames(frames, config)
 
 
 def row_vocabulary(rows):
@@ -69,7 +69,7 @@ def logits(model, vocabulary, frames):
 
 def test_numbers_are_bound_to_their_fields():
     torch.manual_seed(0)
-    encoder = PolicyValue(ModelConfig.tiny()).eval().encoder
+    encoder = PolicyNetwork(ModelConfig.tiny()).eval().encoder
     rows = [fields_of(x) for x in ({"entity_type": "enemy", "hp": 12, "block": 40},
                                    {"entity_type": "enemy", "hp": 40, "block": 12},
                                    {"entity_type": "enemy", "hp": 12, "block": 40})]
@@ -81,7 +81,7 @@ def test_numbers_are_bound_to_their_fields():
 
 def test_adjacent_large_numbers_stay_distinct():
     torch.manual_seed(0)
-    encoder = PolicyValue(ModelConfig.tiny()).eval().encoder
+    encoder = PolicyNetwork(ModelConfig.tiny()).eval().encoder
     rows = [fields_of({"entity_type": "player", "gold": gold}) for gold in (998, 999)]
     with torch.no_grad():
         a, b = encoder.fields(Fields.pack(rows, row_vocabulary(rows)))
@@ -192,15 +192,6 @@ def test_batched_encoding_matches_single_encoding():
     together = logits(model, vocabulary, frames)
     for f, expected in zip(frames, together):
         assert torch.allclose(logits(model, vocabulary, [f])[0], expected, atol=1e-5)
-
-
-def test_value_head_starts_at_zero():
-    model, vocabulary = build([duel("enemy:0")])
-    obs = observation(duel("enemy:0"))
-    with torch.no_grad():
-        encoded = model.encode([obs], vocabulary)
-        out = model.decode(encoded[0], torch.ones(2, dtype=torch.bool))
-    assert float(out.value) == 0.0
 
 
 def test_free_travel_reaches_every_node_of_the_next_floor():

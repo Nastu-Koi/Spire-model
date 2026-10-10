@@ -13,7 +13,7 @@ import torch
 
 from model import rules
 from model.config import ModelConfig
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.representation import ENCODING_VERSION, Vocabulary
 from model.public_history import HISTORY_VERSION, require_history_version
 
@@ -31,7 +31,7 @@ def check_encounters(encounters, symbols):
 class CombatOutcomeNet(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.body = PolicyValue(config)
+        self.body = PolicyNetwork(config)
         d = config.hidden_size
         self.head = torch.nn.Sequential(torch.nn.Linear(d, d), torch.nn.SiLU(), torch.nn.Linear(d, 2))
 
@@ -78,7 +78,9 @@ def load_model(directory, device="cpu"):
         raise ValueError("Model input encoding changed; retrain with the current public encoding")
     if manifest.get("rules") != rules.digest():
         raise ValueError("Model was trained with different rule text")
-    config = ModelConfig(**manifest["model"])
+    config = ModelConfig.from_dict(manifest["model"])
     net = CombatOutcomeNet(config)
-    net.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu", weights_only=True))
+    weights = torch.load(directory / "weights.pt", map_location="cpu", weights_only=True)
+    # The policy network no longer carries the value head of the removed PPO.
+    net.load_state_dict({key: tensor for key, tensor in weights.items() if not key.startswith("body.value.")})
     return net.to(device).eval(), Vocabulary.from_state(manifest["vocabulary"], config), manifest

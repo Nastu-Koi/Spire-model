@@ -7,7 +7,7 @@ import torch
 
 from model import rules
 from model.config import ModelConfig
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.representation import Vocabulary, clean_entity, observation
 from model.batch import collate
 
@@ -181,7 +181,7 @@ def test_rule_text_replaces_an_opaque_program_and_reaches_the_model():
     vocabulary = Vocabulary.from_frames([frame(bash), frame(weaker)], config)
     assert vocabulary.encode("word=vulnerable") != 1 and not vocabulary.unregistered()
     torch.manual_seed(0)
-    model = PolicyValue(config).eval()
+    model = PolicyNetwork(config).eval()
     with torch.no_grad():
         a, b = (e.hidden[1] for e in model.encode([observation(frame(bash)), observation(frame(weaker))], vocabulary))
     assert (a - b).abs().max() > 1e-4
@@ -241,7 +241,7 @@ def test_a_name_an_option_displays_is_the_content_it_names():
     assert min(vocabulary.encode("names=ENCHANTMENT." + name) for name in ("SHARP", "NIMBLE")) > 1
     frames = [naming_frame("ENCHANTMENT.SHARP"), naming_frame("ENCHANTMENT.NIMBLE")]
     torch.manual_seed(0)
-    model = PolicyValue(config).eval()
+    model = PolicyNetwork(config).eval()
     with torch.no_grad():
         a, b = model.encode([observation(state) for state in frames], vocabulary)
     assert (a.actions - b.actions).abs().max() > 1e-4 and not vocabulary.unregistered()
@@ -268,7 +268,7 @@ def test_displayed_variables_bind_to_their_option_and_reach_the_model():
     reordered = deepcopy(original)
     reordered["public"]["entities"].reverse()
     torch.manual_seed(0)
-    model = PolicyValue(config).eval()
+    model = PolicyNetwork(config).eval()
     with torch.no_grad():
         a, b, c = model.encode([obs, swapped, observation(reordered)], vocabulary)
     assert (a.actions - b.actions).abs().max() > 1e-4

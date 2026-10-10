@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from model.config import ModelConfig
 from model.data import validate_run
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.representation import Vocabulary
 from model.rollout import RolloutRunner
 from model.testing import SyntheticEngine
@@ -53,10 +53,10 @@ class Policy:
     def choose(self, frame, *, sample=True):
         self.phases.append(frame["public"]["phase"])
         return SimpleNamespace(candidate_ref=frame["legal"]["candidates"][-1]["candidate_ref"],
-                               log_prob=-0.7, value=0.25)
+                               log_prob=-0.7)
 
 
-def test_payment_and_leaving_rewards_receive_return_across_grid_environment_steps():
+def test_payment_and_leaving_rewards_are_policy_choices_across_grid_environment_steps():
     payment = policy_frame("event", ["CHOOSE_EVENT_OPTION", "CHOOSE_EVENT_OPTION"], 0)
     crystal = policy_frame("crystal_sphere", [], 1)
     crystal.update(board_frame(revealed=corners(), remaining=1))
@@ -69,12 +69,12 @@ def test_payment_and_leaving_rewards_receive_return_across_grid_environment_step
     config = ModelConfig.tiny()
     vocabulary = Vocabulary.from_frames([payment, rewards], config)
     policy = Policy()
-    trace = RolloutRunner(PolicyValue(config), vocabulary).run(
+    trace = RolloutRunner(PolicyNetwork(config), vocabulary).run(
         engine, "Ironclad", "control", _policy=policy)
     assert trace["status"] == "complete", trace.get("error")
     assert policy.phases == ["event", "rewards"]
     assert [m["phase"] for m in trace["macros"]] == ["event", "rewards"]
-    assert [m["return"] for m in trace["macros"]] == [1, 1]
+    assert [m["reward"] for m in trace["macros"]] == [0, 1]
     assert [m["old_log_prob"] for m in trace["macros"]] == [-0.7, -0.7]
     assert trace["macros"][-1]["steps"][0]["candidate_ref"] == "2:1"
     assert trace["automatic_steps"] == 1
@@ -123,14 +123,14 @@ def test_rollout_claims_free_rewards_only_when_asked():
     config = ModelConfig.tiny()
     vocabulary = Vocabulary.from_frames([first, third], config)
     engine, policy = ScriptedEngine([first, second, third, terminal]), Policy()
-    trace = RolloutRunner(PolicyValue(config), vocabulary, claim_rewards=True).run(
+    trace = RolloutRunner(PolicyNetwork(config), vocabulary, claim_rewards=True).run(
         engine, "Ironclad", "control", _policy=policy)
     assert trace["status"] == "complete", trace.get("error")
-    assert trace["victory"] is False and {macro["return"] for macro in trace["macros"]} == {-1}
+    assert trace["victory"] is False and [macro["reward"] for macro in trace["macros"]] == [-1]
     assert [a["actor"] for a in trace["environment_actions"]] == ["reward_controller"] * 2
     assert [a["candidate_ref"] for a in trace["environment_actions"]] == ["0:take:0", "1:take:0"]
     assert policy.phases == ["rewards"] and trace["macros"][0]["steps"][0]["candidate_ref"] == "2:LEAVE_REWARDS"
     assert trace["reward_claim_rule"] == "claim-free-rewards-v1"
     engine, policy = ScriptedEngine([first, terminal]), Policy()
-    trace = RolloutRunner(PolicyValue(config), vocabulary).run(engine, "Ironclad", "control", _policy=policy)
+    trace = RolloutRunner(PolicyNetwork(config), vocabulary).run(engine, "Ironclad", "control", _policy=policy)
     assert policy.phases == ["rewards"] and not trace["environment_actions"] and trace["reward_claim_rule"] is None

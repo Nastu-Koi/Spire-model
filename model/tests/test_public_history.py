@@ -6,7 +6,7 @@ import torch
 
 from model.config import ModelConfig
 from model.checkpoint import save_checkpoint, load_model
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.protocol import ProtocolError
 from model.public_history import HISTORY_VERSION, recorded_memory, draw_relations, unknown_memory
 from model.recorder import PublicSnapshot
@@ -106,7 +106,7 @@ def test_guessed_or_incomplete_recorded_probabilities_are_rejected():
 def test_history_version_prevents_silent_checkpoint_resume(tmp_path):
     config = ModelConfig.tiny()
     f = frame([], [action("end", "END_TURN")])
-    model = PolicyValue(config)
+    model = PolicyNetwork(config)
     vocabulary = Vocabulary.from_frames([f], config)
     save_checkpoint(tmp_path / "model", model, vocabulary)
     manifest_file = tmp_path / "model/manifest.json"

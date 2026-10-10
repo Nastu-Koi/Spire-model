@@ -7,7 +7,7 @@ from model.cli import vocabulary_for
 from model.config import ModelConfig, TrainConfig
 from model.data import microbatches, samples
 from model.loader import batches
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.policy import SessionPolicy, replay_batch
 from model.protocol import CHARACTERS
 from model.representation import Table, Vocabulary
@@ -40,7 +40,7 @@ def test_workers_prepare_the_batches_the_trainer_would():
     runs = [demonstration(c, "loader", 6, 3) for c in CHARACTERS]
     vocabulary = vocabulary_for(runs, config)
     torch.manual_seed(0)
-    model = PolicyValue(config).eval()
+    model = PolicyNetwork(config).eval()
     results = []
     for workers in (0, 2):
         training = TrainConfig(precision="no", logical_batch_size=5, microbatch_size=2, token_buckets=[32, 64],
@@ -88,15 +88,13 @@ def test_replay_matches_the_sampling_path():
     run = demonstration("Silent", "paths", 6, 3)
     vocabulary = vocabulary_for([run], config)
     torch.manual_seed(0)
-    model = PolicyValue(config).eval()
-    torch.nn.init.normal_(model.value.weight, std=0.1)
+    model = PolicyNetwork(config).eval()
     for macro in run["macros"]:
-        policy, sampled, value = SessionPolicy(model, vocabulary), 0.0, None
+        policy, sampled = SessionPolicy(model, vocabulary), 0.0
         with torch.no_grad():
             for step in macro["steps"]:
                 choice = policy.choose(step["frame"], teacher=step["candidate_ref"])
                 if choice.log_prob is not None:
                     sampled += float(choice.log_prob)
-                    value = float(choice.value) if value is None else value
-            log_prob, replayed, _ = replay_batch(model, vocabulary, [macro["steps"]])[0]
-        assert abs(float(log_prob) - sampled) < 1e-5 and abs(float(replayed) - value) < 1e-5
+            log_prob, _ = replay_batch(model, vocabulary, [macro["steps"]])[0]
+        assert abs(float(log_prob) - sampled) < 1e-5

@@ -17,8 +17,7 @@ def require_reward_version(version):
     if version != REWARD_VERSION:
         raise ProtocolError(
             f"Reward version mismatch: expected {REWARD_VERSION}, got {version!r}. "
-            "Initialize a new checkpoint for this reward contract and collect fresh PPO data; "
-            "old checkpoints remain available for inference and evaluation."
+            "Collect fresh runs under this reward contract; old runs are not training data."
         )
 
 

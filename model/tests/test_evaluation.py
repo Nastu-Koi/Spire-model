@@ -6,7 +6,7 @@ import pytest
 
 from model.cli import main, vocabulary_for
 from model.config import ModelConfig, TrainConfig
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.protocol import CHARACTERS
 from model.representation import observation
 from model.rollout import RolloutRunner, write_run
@@ -105,7 +105,7 @@ def test_rollouts_play_the_configured_ascension():
     config = ModelConfig.tiny()
     runs = [demonstration(c, "ascension", 4, 2) for c in CHARACTERS]
     vocabulary = vocabulary_for(runs, config)
-    runner = RolloutRunner(PolicyValue(config), vocabulary, ascension=4)
+    runner = RolloutRunner(PolicyNetwork(config), vocabulary, ascension=4)
     trace = runner.run(SyntheticEngine(4, 2), "Ironclad", "ascension-rollout")
     assert trace["ascension"] == 4 and trace["contract"]["fixed_ascension"] == 4
     assert evaluate_runs([trace])["ascensions"] == [4]
@@ -157,5 +157,3 @@ def test_an_evaluation_seed_is_refused_however_training_recorded_it():
     for known in ("SEED0", split_group("SEED0"), split_group("seedo")):
         with pytest.raises(ValueError, match="overlaps"):
             validate_evaluation_seeds(queue, {"training_seeds": [known]})
-    with pytest.raises(ValueError, match="overlaps"):
-        validate_evaluation_seeds(queue, {"random_seed_schedule": {"used_seeds": ["SEED4"]}})

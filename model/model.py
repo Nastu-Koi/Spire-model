@@ -203,7 +203,6 @@ class Encoded:
 @dataclass
 class DecisionOutput:
     logits: torch.Tensor
-    value: torch.Tensor | None
 
     def distribution(self, temperature=1.0):
         return torch.distributions.Categorical(logits=self.logits.float() / temperature)
@@ -216,7 +215,7 @@ class DecisionOutput:
         return indices, values
 
 
-class PolicyValue(nn.Module):
+class PolicyNetwork(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -245,24 +244,13 @@ class PolicyValue(nn.Module):
         )
         self.final_norm = norm(d)
         # The global token (index 0) carries phase and selection progress; its
-        # final state is the decision query and the value input. Selection
-        # progress is written into the observation, so no state is carried
-        # between decisions.
+        # final state is the decision query. Selection progress is written into
+        # the observation, so no state is carried between decisions.
         self.query = nn.Linear(d, d, bias=bias)
         self.key = nn.Linear(d, d, bias=bias)
         # Normalized query and keys bound the decision logits as the width grows.
         self.query_norm = norm(d) if config.head_qk_norm else None
         self.key_norm = norm(d) if config.head_qk_norm else None
-        self.value = (
-            nn.Sequential(nn.Linear(d, d, bias=bias), nn.GELU(), nn.Linear(d, 1))
-            if config.value_mlp
-            else nn.Linear(d, 1)
-        )
-        # An untrained value head predicts zero instead of a random projection
-        # whose spread exceeds that of the returns.
-        output = self.value[-1] if config.value_mlp else self.value
-        nn.init.zeros_(output.weight)
-        nn.init.zeros_(output.bias)
         self.encoder_calls = 0
         self.decoder_calls = 0
         if config.compile_blocks:
@@ -288,9 +276,9 @@ class PolicyValue(nn.Module):
         Its batches are small and vary in size with what a decision is batched
         with, so FP32 kernels differ in the last bits between batches, and under
         BF16 the backbone turns that into log-probability differences of about
-        1e-3 per decision. Sampling and PPO replay tolerate this: it is far
-        inside the ratio clip, and the old-policy check allows it per decision.
-        An FP64 encoder would remove it at several times the backbone's cost.
+        1e-3 per decision. The log-probabilities a sampled run records carry
+        this noise; nothing is learned from them as a ratio. An FP64 encoder
+        would remove it at several times the backbone's cost.
         """
         with torch.autocast(device_type=self.device.type, enabled=False):
             return self.encoder(batch)
@@ -386,14 +374,11 @@ class PolicyValue(nn.Module):
             logits = logits / math.sqrt(self.config.hidden_size)
             return logits.masked_fill(~masks, -float("inf"))
 
-    def decode_batch(self, encoded_list, legal_masks, *, value=None):
+    def decode_batch(self, encoded_list, legal_masks):
         """Score legal actions of independent decisions in one batched head pass."""
         count = len(encoded_list)
         if not count or len(legal_masks) != count:
             raise ValueError("Decoder batch inputs must have the same nonzero length")
-        value = [True] * count if value is None else value
-        if len(value) != count:
-            raise ValueError("Value flags must match the encoded batch")
         for encoded, mask in zip(encoded_list, legal_masks):
             if mask.dtype != torch.bool or mask.shape != (encoded.actions.shape[0],):
                 raise ValueError("Invalid engine mask")
@@ -416,25 +401,18 @@ class PolicyValue(nn.Module):
             ]
         )
         logits = self._score(self._query(state), keys, masks)
-        values = self._heads(self.value, state).squeeze(-1) if any(value) else None
         return [
-            DecisionOutput(
-                logits[index, : encoded.actions.shape[0]],
-                values[index] if values is not None and value[index] else None,
-            )
+            DecisionOutput(logits[index, : encoded.actions.shape[0]])
             for index, encoded in enumerate(encoded_list)
         ]
 
-    def replay(self, prepared, *, with_accuracy=False, temperature=1.0):
+    def replay(self, prepared, *, with_accuracy=False):
         """Differentiable macro-action statistics of a prepared replay batch.
 
-        Returns the summed log-probability, the value at the first decision and
-        the summed entropy of every macro-action, as three [macros] tensors.
-        With accuracy enabled, also return [macros, 2] integer counts of correct
-        Top-1 decisions and all decisions. Forced choices do not count.
-
-        The probabilities are those of the scores divided by `temperature`: the
-        distribution a round sampled at that temperature was drawn from.
+        Returns the summed log-probability and the summed entropy of every
+        macro-action, as two [macros] tensors. With accuracy enabled, also return
+        [macros, 2] integer counts of correct Top-1 decisions and all decisions.
+        Forced choices do not count.
         """
         batch = prepared.batch
         hidden = self.hidden(batch)
@@ -442,13 +420,12 @@ class PolicyValue(nn.Module):
         state = hidden[:, 0]
         keys = self._keys(self._actions(hidden, batch))
         logits = self._score(self._query(state), keys, prepared.masks)
-        log_probs = (logits / temperature).log_softmax(-1)
+        log_probs = logits.log_softmax(-1)
         chosen = log_probs.gather(1, prepared.labels.unsqueeze(1)).squeeze(1)
         entropy = -(log_probs.exp() * log_probs.masked_fill(~prepared.masks, 0)).sum(-1)
         macros = len(prepared.first)
         result = (
             chosen.new_zeros(macros).index_add(0, prepared.owners, chosen),
-            self._heads(self.value, state.index_select(0, prepared.first)).squeeze(-1),
             entropy.new_zeros(macros).index_add(0, prepared.owners, entropy),
         )
         if with_accuracy:
@@ -464,9 +441,9 @@ class PolicyValue(nn.Module):
     def choose(self, decisions, *, sample=True, temperature=1.0):
         """One action for every decision of a packed batch, in a single pass.
 
-        Returns the chosen slot, its log-probability and the state value, each
-        [decisions]: drawn from the distribution `replay` scores at the same
-        `temperature`, or its most likely slot when not sampling.
+        Returns the chosen slot and its log-probability, each [decisions]: drawn
+        from the scores divided by `temperature` (one number, or one per
+        decision), or the most likely slot when not sampling.
         """
         batch = decisions.batch
         hidden = self.hidden(batch)
@@ -474,18 +451,15 @@ class PolicyValue(nn.Module):
         state = hidden[:, 0]
         keys = self._keys(self._actions(hidden, batch))
         scores = self._score(self._query(state), keys, decisions.masks)
-        log_probs = (scores / temperature).log_softmax(-1)
+        temperature = torch.as_tensor(temperature, dtype=scores.dtype, device=scores.device)
+        log_probs = (scores / temperature.view(-1, 1)).log_softmax(-1)
         slots = (
             torch.multinomial(log_probs.exp(), 1).squeeze(1) if sample else log_probs.argmax(-1)
         )
-        return (
-            slots,
-            log_probs.gather(1, slots.unsqueeze(1)).squeeze(1),
-            self._heads(self.value, state).squeeze(-1),
-        )
+        return slots, log_probs.gather(1, slots.unsqueeze(1)).squeeze(1)
 
-    def decode(self, encoded, legal_mask, *, value=True):
-        return self.decode_batch([encoded], [legal_mask], value=[value])[0]
+    def decode(self, encoded, legal_mask):
+        return self.decode_batch([encoded], [legal_mask])[0]
 
     def parameter_report(self):
         return {

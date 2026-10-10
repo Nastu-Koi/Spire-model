@@ -73,7 +73,7 @@ def validate_run(run, *, on_policy=False):
         run.get("source") != "on_policy" or run.get("sampling") != "full_distribution"
     ):
         raise ProtocolError(
-            "PPO requires autonomous full-distribution on-policy samples"
+            "A sampled run is an autonomous full-distribution on-policy run"
         )
     if (
         not on_policy
@@ -83,20 +83,18 @@ def validate_run(run, *, on_policy=False):
         raise ProtocolError("Teacher visibility has not been verified")
     seen = set()
     for macro in run.get("macros", []):
-        # A round handed over by its sampling processes holds the packed decisions of
-        # its macro-actions instead of their frames, which were checked as they were played.
         steps = macro.get("steps", [])
-        if not steps and not macro.get("packed"):
+        if not steps:
             raise ProtocolError("Empty macro")
-        segment = segment_key(steps[0]["frame"]) if steps else None
-        branches = len(macro.get("packed", ()))
+        segment = segment_key(steps[0]["frame"])
+        branches = 0
         for step in steps:
             frame = step["frame"]
             validate_frame(frame)
             phase = frame["public"]["phase"]
             if on_policy and controller_for(phase, frame["legal"]["candidates"]) is not None:
                 raise ProtocolError(
-                    "Controller actions are environment steps, not PPO policy samples"
+                    "Controller actions are environment steps, not policy samples"
                 )
             if phase != macro["phase"]:
                 raise ProtocolError("Macro phase disagrees with its decision frames")
@@ -120,28 +118,21 @@ def validate_run(run, *, on_policy=False):
         if not branches:
             raise ProtocolError("Forced-only macro must not be a training sample")
         if on_policy:
-            for key in ("old_log_prob", "old_value", "return", "advantage", "reward"):
+            # What a sampled run records of each macro-action: the log-probability it
+            # was played with and the reward paid after it.
+            for key in ("old_log_prob", "reward"):
                 if not isinstance(macro.get(key), (float, int)) or not math.isfinite(
                     macro[key]
                 ):
-                    raise ProtocolError(f"Missing or non-finite PPO {key}")
-            if abs(macro["advantage"] - (macro["return"] - macro["old_value"])) > 1e-5:
-                raise ProtocolError(
-                    "Advantage must equal complete return minus old value"
-                )
+                    raise ProtocolError(f"Missing or non-finite sampled {key}")
     if on_policy:
         from .public_history import require_history_version
 
         require_history_version(run.get("contract", {}).get("public_history_version"))
         if run.get("control_version") != CONTROL_VERSION:
-            raise ProtocolError("PPO requires the current policy control version; collect new rollouts")
+            raise ProtocolError("Sampled runs require the current policy control version; collect new rollouts")
         require_reward_version(run.get("reward_version"))
         require_reward_version(run.get("ledger", {}).get("version"))
-        total = 0.0
-        for macro in reversed(run["macros"]):
-            total += macro["reward"]
-            if abs(total - macro["return"]) > 1e-5:
-                raise ProtocolError("Invalid complete-run Monte Carlo return")
     return run
 
 
@@ -309,8 +300,10 @@ class RunShards:
 
 @dataclass
 class Sample:
-    """A macro-action to learn from. `macro` is None where only the packed tensors of
-    its frames travel on: the fields after it say what a report needs of it."""
+    """A macro-action to learn from, with what the weighted NLL trainer and its reports
+    need of it. `source` is the run's: demonstrations, solver labels and sampled runs are
+    the sources the trainer weighs. `macro` is None once a feeder has packed it: the
+    fields after it travel on alone."""
 
     macro: dict | None
     character: str
@@ -319,49 +312,35 @@ class Sample:
     phase: str
     branches: int  # decisions of the macro-action that had a choice
     ascension: int | None
+    source: str | None = None
     _lengths: tuple[tuple[int, int], ...] | None = field(
         default=None, repr=False, compare=False
     )
 
 
 def _sample(run, macro, weight):
-    branches = (len(macro["packed"]) if "packed" in macro
-                else sum(is_policy_frame(step["frame"]) for step in macro["steps"]))
-    return Sample(macro, run["character"], run["run_id"], weight, macro["phase"], branches, run.get("ascension"))
+    branches = sum(is_policy_frame(step["frame"]) for step in macro["steps"])
+    return Sample(macro, run["character"], run["run_id"], weight, macro["phase"], branches,
+                  run.get("ascension"), run.get("source"))
 
 
-def samples(runs, *, ppo=False, horizon_scale=100.0, counts=None):
-    """Weighted samples. `counts` gives the policy macros per (character, phase)
-    from the current index when `runs` is only a window of the whole data set."""
+def samples(runs, *, counts=None):
+    """Weighted samples of the policy macro-actions of `runs`: every (character, phase)
+    group weighs the same, and its macro-actions share that weight equally.
+
+    `counts` gives the policy macros per (character, phase) of the whole data set, from
+    its index, when `runs` is only a window of it; the weights follow the whole set.
+    Shares between the sources of a group are the index's to give through `counts`.
+    """
+    if counts is None:
+        counts = Counter(
+            (r["character"], m["phase"]) for r in runs for m in policy_macros(r)
+        )
     result = []
-    if ppo:
-        counts = Counter(r["character"] for r in runs)
-        if set(counts) != set(CHARACTERS) or len(set(counts.values())) != 1:
-            raise ProtocolError(
-                "PPO round requires equal complete-run counts for all five characters"
-            )
-        versions = {
-            (r["policy_version"], r["precision"], r["vocabulary_hash"]) for r in runs
-        }
-        if len(versions) != 1:
-            raise ProtocolError("Mixed policy/precision/vocabulary rollout versions")
-        from .protocol import fingerprint
-
-        if len({fingerprint(r["contract"]) for r in runs}) != 1:
-            raise ProtocolError("PPO round mixes engine/content/effect contracts")
-        for run in runs:
-            validate_run(run, on_policy=True)
-            for macro in run["macros"]:
-                result.append(_sample(run, macro, 1 / (5 * counts[run["character"]] * horizon_scale)))
-    else:
-        if counts is None:
-            counts = Counter(
-                (r["character"], m["phase"]) for r in runs for m in policy_macros(r)
-            )
-        for run in runs:
-            validate_run(run)
-            for macro in policy_macros(run):
-                result.append(_sample(run, macro, 1 / (len(counts) * counts[run["character"], macro["phase"]])))
+    for run in runs:
+        validate_run(run)
+        for macro in policy_macros(run):
+            result.append(_sample(run, macro, 1 / (len(counts) * counts[run["character"], macro["phase"]])))
     return result
 
 
@@ -371,10 +350,6 @@ def bucket_size(length, buckets):
 
 def sample_lengths(item, observe=None):
     """(tokens, action slots) of every branching decision of a sample."""
-    if "packed" in item.macro:
-        from .wire import dimensions
-
-        return tuple(map(dimensions, item.macro["packed"]))
     if observe is None:
         from .representation import observation as observe
 

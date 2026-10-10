@@ -9,7 +9,7 @@ from model.checkpoint import load_model, save_checkpoint
 from model.cli import _learner, parser, vocabulary_for
 from model.config import ModelConfig, TrainConfig
 from model.data import validate_run
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.protocol import ProtocolError
 from model.rewards import MilestoneLedger, REWARD_VERSION
 from model.rollout import RolloutRunner
@@ -106,10 +106,10 @@ def test_reward_ledger_round_trip_and_old_reward_rejection():
 def tiny_policy():
     config = ModelConfig.tiny()
     vocabulary = vocabulary_for([demonstration("Ironclad", "reward-test", 4, 2)], config)
-    return PolicyValue(config), vocabulary
+    return PolicyNetwork(config), vocabulary
 
 
-def test_default_rollout_is_a0_and_old_rewards_cannot_enter_ppo():
+def test_default_rollout_is_a0_and_old_rewards_are_not_sampled_data():
     model, vocabulary = tiny_policy()
     run = RolloutRunner(model, vocabulary).run(SyntheticEngine(4, 2), "Ironclad", "fresh")
     assert run["status"] == "complete"
@@ -140,8 +140,9 @@ def test_checkpoint_keeps_explicit_difficulty_and_rejects_implicit_migration(tmp
     _, _, manifest = load_model(path)
     assert manifest["training"]["ascension"] == 10
     assert _learner(path, "cpu", weights_only=True)[0].config.ascension == 10
-    with pytest.raises(ProtocolError, match="Reward version mismatch"):
-        _learner(path, "cpu", require_current_rewards=True)
+    # It sampled rounds: a policy of the removed PPO, which only plays or starts over.
+    with pytest.raises(ValueError, match="PPO"):
+        _learner(path, "cpu")
     assert json.loads((path / "manifest.json").read_text())["progress"]["reward_version"] == "milestones-v1"
     del manifest["training"]["ascension"]
     (path / "manifest.json").write_text(json.dumps(manifest))
@@ -149,7 +150,7 @@ def test_checkpoint_keeps_explicit_difficulty_and_rejects_implicit_migration(tmp
         load_model(path)
 
 
-def test_a_checkpoint_that_sampled_no_round_starts_ppo_whatever_reward_it_names(tmp_path):
+def test_a_bc_checkpoint_resumes_whatever_reward_it_names_and_a_ppo_one_does_not(tmp_path):
     model, vocabulary = tiny_policy()
     training = TrainConfig(loader_workers=0, precision="no")
     learner = Learner(model, vocabulary, training)
@@ -159,25 +160,29 @@ def test_a_checkpoint_that_sampled_no_round_starts_ppo_whatever_reward_it_names(
                         training=training, progress={"reward_version": "act-progress-v2", **progress})
         return tmp_path / name
 
-    # Demonstrations taught it all it knows: no reward has shaped its policy or value head.
+    # Demonstrations taught it all it knows: no reward has shaped its policy.
     cloned = saved("cloned", completed_bootstrap_epochs=17)
-    assert _learner(cloned, "cpu", require_current_rewards=True)[0].config == training
+    assert _learner(cloned, "cpu")[0].config == training
+    # Rounds of the removed PPO shaped these: they play, or start over from their weights.
     for name, progress in (("warmed", {"sampling_round": 0}), ("updated", {"completed_ppo_rounds": 1})):
-        with pytest.raises(ProtocolError, match="Reward version mismatch"):
-            _learner(saved(name, **progress), "cpu", require_current_rewards=True)
+        with pytest.raises(ValueError, match="PPO"):
+            _learner(saved(name, **progress), "cpu")
+        assert _learner(tmp_path / name, "cpu", inference=True)[0].updates == 0
+        assert _learner(tmp_path / name, "cpu", weights_only=True)[0].policy_version == 0
 
 
-def test_a_lost_rollout_returns_minus_one_for_every_macro_action():
+def test_a_rollout_pays_its_outcome_once_at_its_end():
     model, vocabulary = tiny_policy()
     runner = RolloutRunner(model, vocabulary)
-    returns = set()
+    outcomes = set()
     for index in range(40):
         run = runner.run(SyntheticEngine(4, 2), "Ironclad", f"either-{index}")
         assert run["status"] == "complete"
         outcome = 1.0 if run["victory"] else -1.0
-        assert {macro["return"] for macro in run["macros"]} == {outcome}
+        rewards = [macro["reward"] for macro in run["macros"]]
+        assert rewards[-1] == outcome and sum(rewards) == outcome
         assert sum(run["ledger"]["components"].values()) == outcome
         validate_run(run, on_policy=True)
-        returns.add(outcome)
-    assert returns == {1.0, -1.0}
+        outcomes.add(outcome)
+    assert outcomes == {1.0, -1.0}
 

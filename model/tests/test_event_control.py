@@ -12,7 +12,7 @@ from model.data import RunShards, samples as training_samples, validate_run
 from model.dataset_index import INDEX, rebuild_index
 from model.independent import convert_group
 from model.loader import stream
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.policy import prepare_replay
 from model.protocol import ProtocolError, action_semantics
 from model.representation import Vocabulary
@@ -56,7 +56,7 @@ def macro(phase, verbs, index):
                                        forced=len(verbs) == 1)])
 
 
-def test_event_advance_preserves_followup_choices_and_downstream_ppo_returns():
+def test_event_advance_preserves_followup_choices_and_the_run_outcome():
     frames = [
         policy_frame("map", ["CHOOSE_MAP_NODE", "CHOOSE_MAP_NODE"], 0),
         policy_frame("event", ["DISCARD_POTION", "CHOOSE_EVENT_OPTION"], 1),
@@ -70,12 +70,12 @@ def test_event_advance_preserves_followup_choices_and_downstream_ppo_returns():
     config, policy = ModelConfig.tiny(), Policy()
     engine = ScriptedEngine([*frames, terminal])
     vocabulary = Vocabulary.from_frames(frames, config)
-    trace = RolloutRunner(PolicyValue(config), vocabulary).run(engine, "Ironclad", "control", _policy=policy)
+    trace = RolloutRunner(PolicyNetwork(config), vocabulary).run(engine, "Ironclad", "control", _policy=policy)
     assert trace["status"] == "complete", trace.get("error")
     assert trace["control_version"] == CONTROL_VERSION
     assert policy.phases == ["map", "event", "card_select"]
     assert [m["phase"] for m in trace["macros"]] == policy.phases
-    assert [m["return"] for m in trace["macros"]] == [1, 1, 1]
+    assert [m["reward"] for m in trace["macros"]] == [0, 0, 1]
     assert [m["old_log_prob"] for m in trace["macros"]] == [-0.7] * 3
     assert trace["automatic_steps"] == 1
     assert trace["environment_actions"][0]["candidate_ref"] == "1:1"
@@ -119,7 +119,7 @@ def test_infer_emits_the_controller_action_without_model_scoring(tmp_path, monke
     path = tmp_path / "frame.json"
     path.write_text(json.dumps(frame))
     monkeypatch.setattr(cli, "load_model", lambda *_: (
-        PolicyValue(config), Vocabulary.from_frames([frame], config), dict(training=dict(precision="no"))))
+        PolicyNetwork(config), Vocabulary.from_frames([frame], config), dict(training=dict(precision="no"))))
 
     def unexpected(*_, **__):
         raise AssertionError("An automatic event advance must not call the model")

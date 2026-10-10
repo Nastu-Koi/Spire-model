@@ -20,7 +20,6 @@ class Choice:
     candidate_ref: str
     log_prob: torch.Tensor | None = None
     entropy: torch.Tensor | None = None
-    value: torch.Tensor | None = None
     ranking: list[dict] | None = None
 
 
@@ -82,7 +81,7 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
                  temperature=1.0):
     """Choose one action for each independent session with one model batch.
 
-    Forced actions bypass both model heads. Probabilities are those of the scores
+    Forced actions bypass the model. Probabilities are those of the scores
     divided by `temperature`.
     """
     policies, frames = list(policies), list(frames)
@@ -162,7 +161,6 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
             legal[slots[index]]["candidate_ref"],
             distribution.log_prob(index_tensor),
             distribution.entropy(),
-            output.value,
             ranking,
         )
     return results
@@ -249,8 +247,8 @@ def prepare_replay(vocabulary, list_of_steps, *, pad_to=None, observe=observatio
 def replay_batch(model, vocabulary, list_of_steps, *, pad_to=None):
     """Differentiably replay macro-actions; all decision steps form one batch.
 
-    Returns (summed log-prob, value at the first decision step, summed entropy)
-    per macro, matching the semantics used when the macro was sampled.
+    Returns (summed log-prob, summed entropy) per macro, the log-probability
+    being the one the macro was sampled with at temperature 1.
     """
     prepared = prepare_replay(vocabulary, list_of_steps, pad_to=pad_to)
     return list(zip(*(x.unbind(0) for x in model.replay(prepared.to(model.device)))))
