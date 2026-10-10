@@ -18,13 +18,10 @@ Each feeder writes its messages to a pipe of its own, read by the trainer; a
 `multiprocessing.Queue` would write them from a thread too.
 """
 
-import ctypes
 import gc
 import os
 import random
-import signal
 import sys
-import time
 import traceback
 from dataclasses import replace
 from multiprocessing.connection import wait
@@ -35,6 +32,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from .data import batch_pad_size, microbatches, sample_lengths, samples
 from .policy import prepare_replay
+from .processes import end, end_with
 from .representation import observation
 
 def pack(logical, start, vocabulary, config):
@@ -103,8 +101,9 @@ def _stream(dataset, workers):
     _share_by_name()
     # A worker shares the samples only while it writes to none of them, and a garbage
     # collection writes to every object it visits: what exists now is set aside from
-    # the collector, here and in the workers forked next.
-    gc.collect()
+    # the collector, here and in the workers forked next. Nothing is collected first:
+    # walking everything a window or a round holds takes over a second each time, and
+    # what it would free is not what a worker reads.
     gc.freeze()
     done = 0
     try:
@@ -168,7 +167,7 @@ def _feed(connection, shards, windows, counts, vocabulary, config, shuffle, seed
         # otherwise wait forever to finish writing a result to it.
         trainer = os.getppid()
         os.setsid()
-        _end_with(trainer)
+        end_with(trainer)
         # The parent's intra-op pool does not survive the fork; packing needs none.
         torch.set_num_threads(1)
         random.seed(seed)
@@ -272,49 +271,4 @@ def stream(shards, vocabulary, config, *, window_shards, shuffle, counts=None):
     finally:
         for receiver in receivers:
             receiver.close()
-        _end(feeders)
-
-
-def _end_with(trainer):
-    """Make the calling feeder's group end when the trainer is gone, however it went.
-
-    A trainer that is killed runs no cleanup, and a feeder leads a session of its own:
-    left alone it would keep the trainer's GPU memory and the lock of its output."""
-    leader = os.getpid()
-
-    def stop(*_):
-        if os.getpid() == leader:
-            os.killpg(leader, signal.SIGKILL)
-        # A worker inherits this handler and is terminated one at a time.
-        os._exit(143)
-
-    signal.signal(signal.SIGTERM, stop)
-    ctypes.CDLL(None).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG, not inherited by workers
-    if os.getppid() != trainer:
-        stop()
-
-
-def _end(feeders, grace=5.0):
-    """End the feeders and their workers: a feeder that has not finished is asked to
-    stop along with its process group, then killed if it does not."""
-    for process in feeders:
-        if process.is_alive():
-            _signal_group(process.pid, signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    for process in feeders:
-        process.join(max(0.0, deadline - time.monotonic()))
-    for process in feeders:
-        if process.is_alive():
-            _signal_group(process.pid, signal.SIGKILL)
-            process.join()
-        else:
-            # The workers of a finished feeder have exited with it; of a killed
-            # feeder they may linger, and its group still names them.
-            _signal_group(process.pid, signal.SIGKILL)
-
-
-def _signal_group(pid, signum):
-    try:
-        os.killpg(pid, signum)
-    except ProcessLookupError:
-        pass
+        end(feeders)

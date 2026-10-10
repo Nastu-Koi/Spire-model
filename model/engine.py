@@ -12,6 +12,10 @@ from .dotnet_runtime import runtime_command
 from .protocol import ProtocolError
 
 
+# An engine process grows by a few megabytes with every run it plays.
+RUNS_PER_PROCESS = 16
+
+
 class CliEngine:
     def __init__(self, command=None, *, root=None, timeout=30.0):
         self.root = Path(
@@ -27,29 +31,34 @@ class CliEngine:
                     f"Build the engine first: dotnet build {self.root}/src/Sts2Headless"
                 )
             command = runtime_command(dll)
-        env = dict(os.environ, STS2_GAME_DIR=str(self.root / "lib"))
+        self.command = command
+        self.lock = threading.Lock()
+        self._start()
+
+    def _start(self):
+        """Begin a process and wait until it is ready."""
         self.stderr = tempfile.TemporaryFile(mode="w+t")
-        self.proc = subprocess.Popen(
-            command,
+        self.proc = proc = subprocess.Popen(
+            self.command,
             cwd=self.root,
-            env=env,
+            env=dict(os.environ, STS2_GAME_DIR=str(self.root / "lib")),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self.stderr,
             text=True,
             bufsize=1,
         )
-        self.responses = queue.Queue(maxsize=32)
+        self.responses = responses = queue.Queue(maxsize=32)
         self.closed = False
-        self.lock = threading.Lock()
+        self.runs = 0
 
         def reader():
             try:
-                for line in self.proc.stdout:
+                for line in proc.stdout:
                     if line.lstrip().startswith("{"):
-                        self.responses.put(line)
+                        responses.put(line)
             finally:
-                self.responses.put(None)
+                responses.put(None)
 
         self.reader = threading.Thread(target=reader, daemon=True)
         self.reader.start()
@@ -82,16 +91,27 @@ class CliEngine:
             return self._read()
 
     def reset(self, character, seed, ascension):
-        response = self.send(
-            {
-                "cmd": "start_run",
-                "character": character,
-                "seed": str(seed),
-                "ascension": ascension,
-                "lang": "en",
-                "decision_protocol": True,
-            }
-        )
+        """Begin a run. The process that played the run before begins this one too,
+        without loading the game again; a new process does where there is none left,
+        where it has played its share of runs, or where the run before cannot be
+        ended (it stopped in a fight, or failed)."""
+        command = {
+            "cmd": "start_run",
+            "character": character,
+            "seed": str(seed),
+            "ascension": ascension,
+            "lang": "en",
+            "decision_protocol": True,
+        }
+        if self.closed or self.proc.poll() is not None or self.runs >= RUNS_PER_PROCESS:
+            self.close()
+            self._start()
+        response = self.send(command)
+        if response.get("code") == "run_not_ended":
+            self.close()
+            self._start()
+            response = self.send(command)
+        self.runs += 1
         if response.get("type") == "error":
             raise ProtocolError(str(response))
         return (

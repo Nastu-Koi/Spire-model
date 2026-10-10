@@ -74,7 +74,7 @@ def test_payment_and_leaving_rewards_receive_return_across_grid_environment_step
     assert trace["status"] == "complete", trace.get("error")
     assert policy.phases == ["event", "rewards"]
     assert [m["phase"] for m in trace["macros"]] == ["event", "rewards"]
-    assert [m["return"] for m in trace["macros"]] == [5, 5]
+    assert [m["return"] for m in trace["macros"]] == [1, 1]
     assert [m["old_log_prob"] for m in trace["macros"]] == [-0.7, -0.7]
     assert trace["macros"][-1]["steps"][0]["candidate_ref"] == "2:1"
     assert trace["automatic_steps"] == 1
@@ -117,6 +117,7 @@ def test_rollout_claims_free_rewards_only_when_asked():
     second = reward_screen(1, ["RELIC.ANCHOR", "CardReward"], extra=("TAKE_CARD_REWARD", "LEAVE_REWARDS"))
     third = reward_screen(2, ["CardReward"], extra=("TAKE_CARD_REWARD", "LEAVE_REWARDS"))
     terminal = policy_frame("terminal", [], 3)
+    # The engine ends some lost runs without an event: the terminal state says so alone.
     terminal.update(boundary="terminal", events=[])
     terminal["public"]["outcome"] = dict(victory=False)
     config = ModelConfig.tiny()
@@ -125,6 +126,7 @@ def test_rollout_claims_free_rewards_only_when_asked():
     trace = RolloutRunner(PolicyValue(config), vocabulary, claim_rewards=True).run(
         engine, "Ironclad", "control", _policy=policy)
     assert trace["status"] == "complete", trace.get("error")
+    assert trace["victory"] is False and {macro["return"] for macro in trace["macros"]} == {-1}
     assert [a["actor"] for a in trace["environment_actions"]] == ["reward_controller"] * 2
     assert [a["candidate_ref"] for a in trace["environment_actions"]] == ["0:take:0", "1:take:0"]
     assert policy.phases == ["rewards"] and trace["macros"][0]["steps"][0]["candidate_ref"] == "2:LEAVE_REWARDS"

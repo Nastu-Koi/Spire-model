@@ -64,7 +64,7 @@ def test_rollout_chest_steps_have_no_policy_probability_but_keep_downstream_retu
     assert trace["status"] == "complete", trace.get("error")
     assert policy.phases == ["map", "card_select"]
     assert [m["phase"] for m in trace["macros"]] == policy.phases
-    assert [m["return"] for m in trace["macros"]] == [5, 5]
+    assert [m["return"] for m in trace["macros"]] == [1, 1]
     assert [m["old_log_prob"] for m in trace["macros"]] == [-0.7, -0.7]
     assert trace["automatic_steps"] == 3
     actions = trace["environment_actions"]

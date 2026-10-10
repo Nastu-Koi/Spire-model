@@ -254,6 +254,11 @@ def program(entity):
         return _program.__wrapped__(key)
 
 
+def forget():
+    """Drop the programs rendered so far."""
+    _program.cache_clear()
+
+
 @lru_cache(maxsize=16384)
 def _program(parts):
     tokens = []

@@ -75,7 +75,7 @@ def test_event_advance_preserves_followup_choices_and_downstream_ppo_returns():
     assert trace["control_version"] == CONTROL_VERSION
     assert policy.phases == ["map", "event", "card_select"]
     assert [m["phase"] for m in trace["macros"]] == policy.phases
-    assert [m["return"] for m in trace["macros"]] == [5, 5, 5]
+    assert [m["return"] for m in trace["macros"]] == [1, 1, 1]
     assert [m["old_log_prob"] for m in trace["macros"]] == [-0.7] * 3
     assert trace["automatic_steps"] == 1
     assert trace["environment_actions"][0]["candidate_ref"] == "1:1"

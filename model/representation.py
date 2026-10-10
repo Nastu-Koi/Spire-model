@@ -814,6 +814,20 @@ def entity_fields(entity):
     return rows
 
 
+def forget():
+    """Drop what parsing has cached of entities, programs and maps.
+
+    The caches pay within a run, whose frames repeat its entities and its maps. A
+    process that parses one run after another needs nothing of the run before; kept,
+    the caches grow to their limits in every such process."""
+    from . import rules
+
+    _FIELD_ROWS.clear()
+    _effect_tree_cached.cache_clear()
+    _map_program.cache_clear()
+    rules.forget()
+
+
 def _bind_displayed_variables(entities, by_ref):
     """Render an option's text with the public numbers linked to that option."""
     for item in entities:

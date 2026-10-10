@@ -38,26 +38,46 @@ def numeric_features(numbers, frequencies):
     )
 
 
+def norm_class(config):
+    return nn.RMSNorm if config.rms_norm else nn.LayerNorm
+
+
 class SwiGLU(nn.Module):
     """SwiGLU feed-forward layer with an explicit intermediate width."""
 
-    def __init__(self, width, intermediate):
+    def __init__(self, width, intermediate, *, bias=True):
         super().__init__()
-        self.input = nn.Linear(width, 2 * intermediate)
-        self.output = nn.Linear(intermediate, width)
+        self.input = nn.Linear(width, 2 * intermediate, bias=bias)
+        self.output = nn.Linear(intermediate, width, bias=bias)
 
     def forward(self, x):
         gate, value = self.input(x).chunk(2, dim=-1)
         return self.output(F.silu(gate) * value)
 
 
+def scale_residual_outputs(blocks):
+    """Shrink each block's residual-branch output projections by 1/sqrt(2 * blocks).
+
+    A residual stream summing 2L branches of unit-scale outputs grows like
+    sqrt(2L); scaling the branches down at initialization keeps the stream's
+    scale, and hence the usable learning rate, independent of depth.
+    """
+    factor = 1 / math.sqrt(2 * len(blocks))
+    with torch.no_grad():
+        for block in blocks:
+            block.attention.output.weight.mul_(factor)
+            block.ffn.output.weight.mul_(factor)
+
+
 class Block(nn.Module):
-    def __init__(self, width, heads, ffn_size, *, backend="sdpa"):
+    def __init__(self, width, heads, ffn_size, *, backend="sdpa", qk_norm=False,
+                 bias=True, norm=nn.LayerNorm):
         super().__init__()
-        self.norm1 = nn.LayerNorm(width)
-        self.attention = Attention(width, heads, backend=backend)
-        self.norm2 = nn.LayerNorm(width)
-        self.ffn = SwiGLU(width, ffn_size)
+        self.norm1 = norm(width)
+        self.attention = Attention(width, heads, backend=backend, qk_norm=qk_norm,
+                                   bias=bias, norm=norm)
+        self.norm2 = norm(width)
+        self.ffn = SwiGLU(width, ffn_size, bias=bias)
 
     def forward(self, x, valid, bias):
         x = x + self.attention(self.norm1(x), valid, bias)
@@ -74,35 +94,62 @@ class SharedEncoder(nn.Module):
         # The number encoder sees which field it encodes: a field-blind encoder
         # followed by a sum over fields cannot tell hp=12, block=40 from
         # hp=40, block=12.
+        norm, bias = norm_class(config), config.linear_bias
         self.numeric = nn.Sequential(
-            nn.Linear(local + NUMERIC_FEATURES, local), nn.GELU(), nn.Linear(local, local)
+            nn.Linear(local + NUMERIC_FEATURES, local, bias=bias),
+            nn.GELU(),
+            nn.Linear(local, local, bias=bias),
         )
         self.register_buffer(
             "frequencies",
             2 * math.pi / (4 * 512 ** (torch.arange(NUMERIC_BANDS) / (NUMERIC_BANDS - 1))),
         )
-        self.field_norm = nn.LayerNorm(local)
+        self.field_norm = norm(local)
         # 8*ceil(d/3) keeps SwiGLU near the parameter count of a 4d GELU FFN.
         local_ffn = 8 * math.ceil(local / 3)
+        # The fields of one entity attend to each other before they are summed, so
+        # a combination (a cost with a keyword) is seen at the entity, not left for
+        # the global layers to rediscover.
+        self.field_block = (
+            Block(local, config.local_heads, local_ffn, backend=config.backend,
+                  qk_norm=config.qk_norm, bias=bias, norm=norm)
+            if config.field_attention
+            else None
+        )
         self.local_blocks = nn.ModuleList(
             [
-                Block(local, config.local_heads, local_ffn, backend=config.backend)
+                Block(local, config.local_heads, local_ffn, backend=config.backend,
+                      qk_norm=config.qk_norm, bias=bias, norm=norm)
                 for _ in range(config.local_layers)
             ]
         )
+        if config.scaled_residual_init:
+            scale_residual_outputs(self.local_blocks)
+            if self.field_block is not None:
+                scale_residual_outputs([self.field_block])
         self.program_relation = nn.Embedding(
             config.relation_size, config.local_heads, padding_idx=0
         )
-        self.reference = nn.Linear(local, local)
-        self.program_binding = nn.Linear(local, local)
-        self.local_norm = nn.LayerNorm(local)
-        self.projection = nn.Linear(local, config.hidden_size)
+        self.reference = nn.Linear(local, local, bias=bias)
+        self.program_binding = nn.Linear(local, local, bias=bias)
+        self.local_norm = norm(local)
+        self.projection = nn.Linear(local, config.hidden_size, bias=bias)
 
     def fields(self, packed):
         identity = self.symbol(packed.ids) + self.field(packed.kinds)
         numbers = numeric_features(packed.numbers.to(identity.dtype), self.frequencies)
         x = identity + self.numeric(torch.cat([identity, numbers], dim=-1))
         mask = packed.mask
+        if self.field_block is not None:
+            valid = mask.bool()
+            # Padded fields are excluded as keys; a row without fields (padding
+            # of a program group) attends uniformly to stay finite and is zeroed
+            # by the block.
+            excluded = ~valid & valid.any(1, keepdim=True)
+            bias = x.new_zeros((len(x), 1, 1, valid.shape[1])).masked_fill(
+                excluded[:, None, None, :], -float("inf")
+            )
+            x = self.field_block(x, valid, bias)
         # Sum retains multiplicity; sqrt normalization controls magnitude only.
         return self.field_norm(
             (x * mask.unsqueeze(-1)).sum(1)
@@ -158,8 +205,8 @@ class DecisionOutput:
     logits: torch.Tensor
     value: torch.Tensor | None
 
-    def distribution(self):
-        return torch.distributions.Categorical(logits=self.logits.float())
+    def distribution(self, temperature=1.0):
+        return torch.distributions.Categorical(logits=self.logits.float() / temperature)
 
     def topk(self, k):
         if k < 1:
@@ -175,29 +222,47 @@ class PolicyValue(nn.Module):
         self.config = config
         d = config.hidden_size
         self.encoder = SharedEncoder(config)
+        norm, bias = norm_class(config), config.linear_bias
         self.blocks = nn.ModuleList(
             [
-                Block(d, config.num_heads, config.ffn_size, backend=config.backend)
+                Block(d, config.num_heads, config.ffn_size, backend=config.backend,
+                      qk_norm=config.qk_norm, bias=bias, norm=norm)
                 for _ in range(config.layers)
             ]
         )
-        # One bias per relation type and head, shared by every global layer:
-        # entity references, their reverses and engine relations.
-        self.relation = nn.Embedding(
-            config.relation_size, config.num_heads, padding_idx=0
+        if config.scaled_residual_init:
+            scale_residual_outputs(self.blocks)
+        # One bias per relation type and head: entity references, their reverses
+        # and engine relations. Shared by every global layer, or one table per
+        # layer so that each layer follows relations in its own way.
+        def table():
+            return nn.Embedding(config.relation_size, config.num_heads, padding_idx=0)
+
+        self.relation = (
+            nn.ModuleList([table() for _ in range(config.layers)])
+            if config.relation_bias_per_layer
+            else table()
         )
-        self.final_norm = nn.LayerNorm(d)
+        self.final_norm = norm(d)
         # The global token (index 0) carries phase and selection progress; its
         # final state is the decision query and the value input. Selection
         # progress is written into the observation, so no state is carried
         # between decisions.
-        self.query = nn.Linear(d, d)
-        self.key = nn.Linear(d, d)
-        self.value = nn.Linear(d, 1)
+        self.query = nn.Linear(d, d, bias=bias)
+        self.key = nn.Linear(d, d, bias=bias)
+        # Normalized query and keys bound the decision logits as the width grows.
+        self.query_norm = norm(d) if config.head_qk_norm else None
+        self.key_norm = norm(d) if config.head_qk_norm else None
+        self.value = (
+            nn.Sequential(nn.Linear(d, d, bias=bias), nn.GELU(), nn.Linear(d, 1))
+            if config.value_mlp
+            else nn.Linear(d, 1)
+        )
         # An untrained value head predicts zero instead of a random projection
         # whose spread exceeds that of the returns.
-        nn.init.zeros_(self.value.weight)
-        nn.init.zeros_(self.value.bias)
+        output = self.value[-1] if config.value_mlp else self.value
+        nn.init.zeros_(output.weight)
+        nn.init.zeros_(output.bias)
         self.encoder_calls = 0
         self.decoder_calls = 0
         if config.compile_blocks:
@@ -209,8 +274,8 @@ class PolicyValue(nn.Module):
     def device(self):
         return self.query.weight.device
 
-    def _relation_bias(self, edges, valid):
-        bias = relation_bias(self.relation, edges, valid)
+    def _relation_bias(self, table, edges, valid):
+        bias = relation_bias(table, edges, valid)
         # Every layer reads the same bias: convert it to the attention dtype once.
         device = valid.device.type
         if torch.is_autocast_enabled(device):
@@ -257,8 +322,17 @@ class PolicyValue(nn.Module):
             .index_copy(0, slots, tokens)
             .view(rows, pad, -1)
         )
-        bias = self._relation_bias(batch.relations, valid)
-        for block in self.blocks:
+        shared = (
+            None
+            if self.config.relation_bias_per_layer
+            else self._relation_bias(self.relation, batch.relations, valid)
+        )
+        for index, block in enumerate(self.blocks):
+            bias = (
+                shared
+                if shared is not None
+                else self._relation_bias(self.relation[index], batch.relations, valid)
+            )
             if (
                 self.config.checkpoint_layers
                 and self.training
@@ -275,7 +349,7 @@ class PolicyValue(nn.Module):
         batch = collate(observations, vocabulary, pad_to).to(self.device)
         hidden = self.hidden(batch)
         actions = self._actions(hidden, batch)
-        keys = self._heads(self.key, actions)
+        keys = self._keys(actions)
         result = []
         for b, obs in enumerate(observations):
             count = len(obs.action_indices)
@@ -295,6 +369,16 @@ class PolicyValue(nn.Module):
         # batch; FP32 keeps their output independent of that count.
         with torch.autocast(device_type=x.device.type, enabled=False):
             return head(x.float())
+
+    def _project(self, head, norm, x):
+        projected = self._heads(head, x)
+        return projected if norm is None else norm(projected)
+
+    def _query(self, state):
+        return self._project(self.query, self.query_norm, state)
+
+    def _keys(self, actions):
+        return self._project(self.key, self.key_norm, actions)
 
     def _score(self, queries, keys, masks):
         with torch.autocast(device_type=queries.device.type, enabled=False):
@@ -331,7 +415,7 @@ class PolicyValue(nn.Module):
                 for mask in legal_masks
             ]
         )
-        logits = self._score(self._heads(self.query, state), keys, masks)
+        logits = self._score(self._query(state), keys, masks)
         values = self._heads(self.value, state).squeeze(-1) if any(value) else None
         return [
             DecisionOutput(
@@ -341,21 +425,24 @@ class PolicyValue(nn.Module):
             for index, encoded in enumerate(encoded_list)
         ]
 
-    def replay(self, prepared, *, with_accuracy=False):
+    def replay(self, prepared, *, with_accuracy=False, temperature=1.0):
         """Differentiable macro-action statistics of a prepared replay batch.
 
         Returns the summed log-probability, the value at the first decision and
         the summed entropy of every macro-action, as three [macros] tensors.
         With accuracy enabled, also return [macros, 2] integer counts of correct
         Top-1 decisions and all decisions. Forced choices do not count.
+
+        The probabilities are those of the scores divided by `temperature`: the
+        distribution a round sampled at that temperature was drawn from.
         """
         batch = prepared.batch
         hidden = self.hidden(batch)
         self.decoder_calls += len(batch.lengths)
         state = hidden[:, 0]
-        keys = self._heads(self.key, self._actions(hidden, batch))
-        logits = self._score(self._heads(self.query, state), keys, prepared.masks)
-        log_probs = logits.log_softmax(-1)
+        keys = self._keys(self._actions(hidden, batch))
+        logits = self._score(self._query(state), keys, prepared.masks)
+        log_probs = (logits / temperature).log_softmax(-1)
         chosen = log_probs.gather(1, prepared.labels.unsqueeze(1)).squeeze(1)
         entropy = -(log_probs.exp() * log_probs.masked_fill(~prepared.masks, 0)).sum(-1)
         macros = len(prepared.first)
@@ -373,6 +460,29 @@ class PolicyValue(nn.Module):
             counts = counts.new_zeros((macros, 2)).index_add(0, prepared.owners, counts)
             return (*result, counts)
         return result
+
+    def choose(self, decisions, *, sample=True, temperature=1.0):
+        """One action for every decision of a packed batch, in a single pass.
+
+        Returns the chosen slot, its log-probability and the state value, each
+        [decisions]: drawn from the distribution `replay` scores at the same
+        `temperature`, or its most likely slot when not sampling.
+        """
+        batch = decisions.batch
+        hidden = self.hidden(batch)
+        self.decoder_calls += len(batch.lengths)
+        state = hidden[:, 0]
+        keys = self._keys(self._actions(hidden, batch))
+        scores = self._score(self._query(state), keys, decisions.masks)
+        log_probs = (scores / temperature).log_softmax(-1)
+        slots = (
+            torch.multinomial(log_probs.exp(), 1).squeeze(1) if sample else log_probs.argmax(-1)
+        )
+        return (
+            slots,
+            log_probs.gather(1, slots.unsqueeze(1)).squeeze(1),
+            self._heads(self.value, state).squeeze(-1),
+        )
 
     def decode(self, encoded, legal_mask, *, value=True):
         return self.decode_batch([encoded], [legal_mask], value=[value])[0]
