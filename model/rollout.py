@@ -1,13 +1,14 @@
 import hashlib
 import json
 import time
+import zlib
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 
 import torch
 
-from combat_outcome.online import CombatRecorder
+from combat_outcome.online import CombatRecorder, act_results
 
 from .policy import SessionPolicy
 from .control import CONTROL_VERSION, REWARD_RULE, environment_action, free_reward
@@ -23,6 +24,7 @@ from .protocol import (
 )
 from .rewards import MilestoneLedger
 from .public_history import require_history_version
+from .saves import EntrySaves, FightTracker
 
 
 def precision_context(model, precision):
@@ -95,6 +97,25 @@ def climbed(stands):
     return reached, lengths
 
 
+def _pack(frame):
+    """A frame as a run holds it while it is played: compressed. A run is hundreds of
+    frames of tens of kilobytes that differ little; packed, a sampling process holds
+    a run in a few hundred kilobytes instead of tens of megabytes."""
+    return zlib.compress(json.dumps(frame, separators=(",", ":"), allow_nan=False).encode(), 1)
+
+
+def _unpack(packed):
+    return json.loads(zlib.decompress(packed))
+
+
+# What a round writes of each run. Evaluation keeps everything: the run with every
+# frame, its journal and its fights. Sampling keeps what training reads (see
+# `model/buffer.py`): the frames of the decisions outside fights, the entry save of
+# each fight, the fights, and no run file of its own.
+FULL_RUNS = dict(trajectory=True, journal=True, combat_frames=True, saves=False)
+OUTSIDE_FRAMES = dict(trajectory=False, journal=False, combat_frames=False, saves=True)
+
+
 class RolloutRunner:
     def __init__(
         self,
@@ -108,6 +129,7 @@ class RolloutRunner:
         ascension=0,
         claim_rewards=False,
         temperatures=None,
+        iteration=None,
     ):
         if max_steps < 1 or timeout <= 0:
             raise ValueError("Rollout limits must be positive")
@@ -116,6 +138,8 @@ class RolloutRunner:
             raise ValueError("The sampling temperatures must be positive, one for fights and one for the rest")
         if type(ascension) is not int or not 0 <= ascension <= 10:
             raise ValueError("Ascension must be an integer from 0 to 10")
+        if iteration is not None and (type(iteration) is not int or iteration < 0):
+            raise ValueError("The sampling iteration must be a non-negative integer")
         self.model, self.vocabulary = model, vocabulary
         self.precision, self.version = precision, version
         self.max_steps, self.timeout = max_steps, timeout
@@ -127,6 +151,8 @@ class RolloutRunner:
         # which are the same at every temperature. The temperatures are part of the
         # policy's definition: a run records them.
         self.temperatures = temperatures
+        # The sampling iteration the runs belong to: the buffer keeps the last few.
+        self.iteration = iteration
         self._digest = None
 
     @property
@@ -143,9 +169,15 @@ class RolloutRunner:
         return self.temperatures["combat" if frame["public"]["phase"] == "combat" else "other"]
 
     def run(self, engine, character, seed, *, sample=True, journal=None, combats=None,
-            _policy=None):
+            saves=None, combat_frames=True, _policy=None):
         """Play one run. `combats` is where the fights of the run are written as
-        combat-outcome labels of this policy (combat_outcome.online)."""
+        combat-outcome labels of this policy (combat_outcome.online); `saves` where the
+        engine's save at the entry of each fight goes (`model.saves`).
+
+        Without `combat_frames` the macro-actions played inside fights keep their
+        counts and log-probability but not their frames: a fight is taught by the
+        solver from its entry save, not by the policy's own play, and its frames are
+        most of a run."""
         if character not in CHARACTERS:
             raise ValueError("Unknown character")
         trace = {
@@ -158,9 +190,10 @@ class RolloutRunner:
             "precision": self.precision,
             "vocabulary_hash": self.vocabulary.digest,
             "numeric_backend": numeric_backend(self.model),
-            "source": "on_policy" if sample else "evaluation",
+            "source": "rollout" if sample else "evaluation",
             "sampling": "full_distribution" if sample else "argmax",
             "temperature": dict(self.temperatures) if sample else None,
+            "iteration": self.iteration,
             "status": "unresolved",
             "macros": [],
             "automatic_steps": 0,
@@ -184,7 +217,8 @@ class RolloutRunner:
 
         pending_steps, current_segment, active_macro = [], None, None
         waiting_since = None
-        recorder = None
+        recorder = entries = None
+        fights, stands, last_act = FightTracker(), [], None
         sink = Path(journal).open("w") if journal else nullcontext()
         self.model.eval()
         try:
@@ -213,6 +247,9 @@ class RolloutRunner:
                                 "vocabulary_hash", "precision", "sampling", "temperature",
                                 "numeric_backend")}),
                     )
+                if saves:
+                    entries = EntrySaves(saves, seed=seed, character=character, run_id=trace["run_id"],
+                                         ascension=self.ascension)
                 steps = 0
                 while True:
                     validate_frame(frame)
@@ -237,6 +274,7 @@ class RolloutRunner:
                             + "\n"
                         )
                         stream.flush()
+                    fights.events(frame.get("events", []))
                     if recorder:
                         recorder.events(frame.get("events", []))
                     if boundary == "terminal":
@@ -256,6 +294,14 @@ class RolloutRunner:
                         trace["error"] = "unresolved_step_limit"
                         break
                     frame = clean_frame(frame)
+                    act, floor, length = stand(frame)
+                    stands.append((act, floor, length))
+                    last_act = act if act is not None else last_act
+                    fight, entry = fights.decision()
+                    if entry and entries:
+                        # The first decision of a fight: the engine still stands at its
+                        # entry, and saves the run as it was before the room.
+                        entries.take(engine, entry, floor)
                     if recorder:
                         recorder.decision(frame)
                     automatic = environment_action(frame)
@@ -264,7 +310,7 @@ class RolloutRunner:
                     if automatic is not None:
                         policy.reset()
                         current_segment, pending_steps, active_macro = None, [], None
-                        trace["environment_actions"].append(dict(frame=deepcopy(frame), **automatic))
+                        trace["environment_actions"].append(dict(frame=_pack(frame), **automatic))
                         trace["automatic_steps"] += 1
                         steps += 1
                         frame = engine.send(execution_command(frame, automatic["candidate_ref"]))
@@ -283,18 +329,20 @@ class RolloutRunner:
                             ),
                             steps,
                         )
+                    # A frame played inside a fight is kept only where every frame is.
                     step = {
-                        "frame": frame,
+                        "frame": _pack(frame) if combat_frames or fight is None else None,
                         "candidate_ref": choice.candidate_ref,
                         "forced": not branching,
                     }
                     if branching:
                         if active_macro is None:
                             active_macro = {
-                                "steps": pending_steps,
+                                "phase": frame["public"]["phase"],
+                                "fight": fight,
                                 "old_log_prob": 0.0,
                                 "reward": 0.0,
-                                "phase": frame["public"]["phase"],
+                                "steps": pending_steps,
                             }
                             trace["macros"].append(active_macro)
                         active_macro["old_log_prob"] += float(choice.log_prob)
@@ -310,10 +358,27 @@ class RolloutRunner:
             trace["status"] = "unresolved" if isinstance(exc, TimeoutError) else "error"
             trace["error"] = str(exc)
         trace["ledger"] = ledger.state_dict()
+        reached, lengths = climbed(stands)
+        trace["climb"] = {"reached": reached, "lengths": lengths}
+        # The acts whose boss fell; the last act is passed by winning the run.
+        passed = set(ledger.bosses) | ({3} if ledger.victory_paid else set())
+        trace["acts"] = {str(act): result for act, result in sorted(
+            act_results(trace["status"], trace.get("victory"), passed, last_act).items())}
+        for macro in trace["macros"]:
+            steps = macro.pop("steps")
+            if macro["fight"] is not None and not combat_frames:
+                macro["branches"] = sum(not step["forced"] for step in steps)
+                macro["decisions"] = len(steps)
+            else:
+                macro["steps"] = [dict(step, frame=_unpack(step["frame"])) for step in steps]
+        for action in trace["environment_actions"]:
+            action["frame"] = _unpack(action["frame"])
         if recorder:
-            # The acts whose boss fell; the last act is passed by winning the run.
-            passed = set(ledger.bosses) | ({3} if ledger.victory_paid else set())
             trace["combats"] = recorder.close(trace["status"], trace.get("victory"), passed)
+        if entries:
+            trace["saves"] = entries.close(
+                {row["encounter_id"]: (row["combat_index"], row["result"]) for row in recorder.rows}
+                if recorder else {})
         return trace
 
 
@@ -325,21 +390,52 @@ def write_run(path, trace):
     temporary.replace(path)
 
 
-def play(engine, runner, job, *, sample=True, policy=None):
-    """One job of a round: a run, written beside its journal and the fights it
-    recorded. Returns the run."""
+def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, journal=True,
+         combat_frames=True, saves=False):
+    """One job of a round: a run, with the fights it recorded beside it and, as the
+    layout says (`FULL_RUNS`, `OUTSIDE_FRAMES`), its journal, its run file and the entry
+    saves of its fights. Returns the run."""
     character, seed, path = job
     trace = runner.run(
         engine,
         character,
         seed,
         sample=sample,
-        journal=path.with_suffix(".jsonl"),
+        journal=path.with_suffix(".jsonl") if journal else None,
         combats=path.with_suffix(".combats.jsonl.gz"),
+        saves=path.with_suffix(".saves.jsonl.gz") if saves else None,
+        combat_frames=combat_frames,
         _policy=policy,
     )
-    write_run(path, trace)
+    if trajectory:
+        write_run(path, trace)
     return trace
+
+
+def assign(seeds, directory):
+    """The jobs of a round, in a directory of its own: the assignment is saved before
+    any engine starts, including queues which later fail."""
+    counts = {c: len(seeds.get(c, [])) for c in CHARACTERS}
+    if len(set(counts.values())) != 1 or not all(counts.values()):
+        raise ValueError("Allocate equal nonzero run counts to all five characters")
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    if any(directory.glob("*.json")) or (directory / "index.jsonl.gz").exists():
+        raise FileExistsError(
+            "Rollout directory already contains runs; choose a new round directory"
+        )
+    # Keep metadata outside the trajectory JSON glob.
+    assignment = directory / "metadata" / "seeds.json"
+    if assignment.exists():
+        raise FileExistsError(
+            "Rollout seed assignment already exists; choose a new round directory"
+        )
+    write_run(assignment, seeds)
+    return [
+        (character, seed, directory / f"{character}-{i}.json")
+        for character in CHARACTERS
+        for i, seed in enumerate(seeds[character])
+    ]
 
 
 def collect_round(samplers, runner, seeds, directory, on_run=None, *, sample=True):
@@ -347,31 +443,11 @@ def collect_round(samplers, runner, seeds, directory, on_run=None, *, sample=Tru
 
     The round is played by the engines of `samplers` (`sampling.Samplers`), each run
     in an engine of its own, while this process only runs the network. Returns where
-    the runs were written, in the order of the jobs: every run beside its journal and
-    the fights it recorded.
+    the runs were written, in the order of the jobs: every run with every frame,
+    beside its journal and the fights it recorded. A sampled round that training
+    reads is written by `buffer.sample_round` instead.
     """
-    counts = {c: len(seeds.get(c, [])) for c in CHARACTERS}
-    if len(set(counts.values())) != 1 or not all(counts.values()):
-        raise ValueError("Allocate equal nonzero run counts to all five characters")
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    if any(directory.glob("*.json")):
-        raise FileExistsError(
-            "Rollout directory already contains runs; choose a new round directory"
-        )
-    # Save the full assignment before starting any engine, including queues
-    # which later fail. Keep metadata outside the trajectory JSON glob.
-    assignment = directory / "metadata" / "seeds.json"
-    if assignment.exists():
-        raise FileExistsError(
-            "Rollout seed assignment already exists; choose a new round directory"
-        )
-    write_run(assignment, seeds)
-    jobs = [
-        (character, seed, directory / f"{character}-{i}.json")
-        for character in CHARACTERS
-        for i, seed in enumerate(seeds[character])
-    ]
+    jobs = assign(seeds, directory)
     played = samplers.collect(runner, jobs, sample=sample, on_run=on_run)
     failures = [str(path) for (_, _, path), run in zip(jobs, played) if run["status"] != "complete"]
     if failures and sample:
