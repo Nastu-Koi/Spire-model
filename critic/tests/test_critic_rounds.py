@@ -189,3 +189,13 @@ def test_the_constant_loss_is_the_entropy_of_the_base_rates(world):
         return 0.0 if rate in (0, 1) else -(rate * math.log(rate) + (1 - rate) * math.log(1 - rate))
 
     assert constant_loss(rows, 0.5) == pytest.approx(entropy(wins) + 0.5 * entropy(passed))
+
+
+def test_a_baseline_of_labels_that_do_not_vary_is_their_constant():
+    from critic.baselines import fit_logistic
+
+    features = [[float(index), float(index % 3)] for index in range(12)]
+    assert fit_logistic(features, [1.0] * 12)(features[:3]) == [1.0] * 3
+    assert fit_logistic(features, [0.0] * 12)(features[:2]) == [0.0] * 2
+    varied = fit_logistic(features, [float(index > 5) for index in range(12)])(features)
+    assert varied[0] < 0.1 and varied[-1] > 0.9
