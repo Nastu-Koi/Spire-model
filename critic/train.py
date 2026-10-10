@@ -155,6 +155,16 @@ def base_rates(rows):
     return [sum(r.win for r in rows) / len(rows), sum(r.act_passed for r in rows) / len(rows)]
 
 
+def constant_loss(rows, act_weight):
+    """The training loss of predicting the rows' own base rates: what a head that has
+    learned nothing scores on them, and the mark a fitted loss is measured from."""
+    def entropy(rate):
+        return 0.0 if rate in (0.0, 1.0) else -(rate * math.log(rate) + (1 - rate) * math.log(1 - rate))
+
+    win, act = base_rates(rows)
+    return entropy(win) + act_weight * entropy(act)
+
+
 def set_head_bias(net, rates):
     """The head predicts the base rates before it is trained: the constant baseline."""
     with torch.no_grad():
@@ -236,7 +246,11 @@ def fit(net, vocabulary, train, test, training, device):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("data", type=Path, nargs="+", help="run directories or files (JSON per run, or JSONL)")
+    parser.add_argument("data", type=Path, nargs="+",
+                        help="sampled rounds (round-N/), a buffer directory of rounds, or run directories "
+                             "and files (JSON per run, or JSONL)")
+    parser.add_argument("--buffer-iterations", type=int,
+                        help="of a buffer directory, train on the rounds of its last so many iterations")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                         help="policy profile: its model section is the network, its critic section the settings")
     parser.add_argument("--checkpoint", type=Path, help="policy checkpoint: the frozen vocabulary and, by default, the body's initial weights")
@@ -273,7 +287,7 @@ def main(argv=None):
     torch.manual_seed(training.seed)
     device = torch.device(args.device)
 
-    rows, data = load_rows(args.data)
+    rows, data = load_rows(args.data, args.buffer_iterations)
     train, test = split(rows, training.holdout)
     if args.train_runs:
         kept = sorted({r.seed for r in train})
@@ -282,12 +296,13 @@ def main(argv=None):
         train = [r for r in train if r.seed in kept]
     report = dict(data=dict(data, coverage=coverage(rows), split=dict(
         holdout=training.holdout, train=len(train), train_seeds=len({r.seed for r in train}),
-        test=len(test), test_seeds=len({r.seed for r in test}))))
+        test=len(test), test_seeds=len({r.seed for r in test}))),
+        train=dict(constant_loss=round(constant_loss(train, training.act_weight), 5)))
 
     if args.pretrained:
         scorer = load_critic(args.pretrained, device)
         net, vocabulary, previous = scorer.net, scorer.vocabulary, scorer.manifest
-        if previous["model"] != asdict(config.model):
+        if architecture(previous["model"]) != architecture(asdict(config.model)):
             raise ValueError("The saved critic has a different architecture; its manifest holds the profile to use")
         version, policy = previous["version"] + 1, previous["policy"]
         pretrained = str(args.pretrained)
@@ -321,8 +336,8 @@ def main(argv=None):
         args.report.write_text(text)
     if args.save:
         save(args.save, net, vocabulary, config, version=version, pretrained=pretrained, policy=policy,
-             data=report["data"], report={k: report[k] for k in ("baselines", "critic", "history", "unregistered")
-                                         if k in report})
+             data=report["data"], report={k: report[k] for k in ("baselines", "critic", "history", "train",
+                                                                 "unregistered") if k in report})
     return report
 
 
