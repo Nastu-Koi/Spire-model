@@ -161,12 +161,16 @@ class RolloutRunner:
             self._digest = policy_digest(self.model)
         return self._digest
 
-    def temperature_for(self, frame, sample=True):
+    def temperature_for(self, frame, sample=True, fight=None):
         """The temperature a decision of `frame` is drawn at: a fight's or the rest's.
+        `fight` is the fight the decision belongs to (`saves.FightTracker`): a fight is
+        what the engine's encounter events bound, so a selection made inside one (a
+        discard, an exhaust) is drawn at the fight's temperature whatever its phase.
         The most likely action, which a greedy run takes, is scored at 1."""
         if not sample:
             return 1.0
-        return self.temperatures["combat" if frame["public"]["phase"] == "combat" else "other"]
+        inside = fight is not None or frame["public"]["phase"] == "combat"
+        return self.temperatures["combat" if inside else "other"]
 
     def run(self, engine, character, seed, *, sample=True, journal=None, combats=None,
             saves=None, combat_frames=True, _policy=None):
@@ -208,12 +212,10 @@ class RolloutRunner:
             self.model, self.vocabulary, version=self.version
         )
 
-        # A policy handed in draws its choices where the network runs, at the
-        # temperatures it was told; this runner's own is told them here.
-        def choose(frame, *, sample):
-            if _policy:
-                return policy.choose(frame, sample=sample)
-            return policy.choose(frame, sample=sample, temperature=self.temperature_for(frame, sample))
+        # A policy handed in draws its choices where the network runs; either is told
+        # the temperature of each decision here, where the fight it belongs to is known.
+        def choose(frame, fight, *, sample):
+            return policy.choose(frame, sample=sample, temperature=self.temperature_for(frame, sample, fight))
 
         pending_steps, current_segment, active_macro = [], None, None
         waiting_since = None
@@ -319,7 +321,7 @@ class RolloutRunner:
                     if key != current_segment:
                         current_segment, pending_steps, active_macro = key, [], None
                     branching = len(frame["legal"]["candidates"]) > 1
-                    choice = choose(frame, sample=sample)
+                    choice = choose(frame, fight, sample=sample)
                     if recorder:
                         recorder.step(
                             frame,

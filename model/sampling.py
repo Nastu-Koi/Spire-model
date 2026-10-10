@@ -15,7 +15,7 @@ network, which is why a sampling process is best given a single engine.
 
 Sampling processes are forked: they share the vocabulary with the collecting process
 without copying, and never touch its CUDA state. What they pack crosses in the flat
-form of `wire`, each decision with the temperature of its phase. They stay from round
+form of `wire`, each decision with the temperature it is drawn at. They stay from round
 to round with their engines: an engine process begins its next run without loading
 the game again. Every run is written where it was played, or handed over compressed
 for the round's shards (`model/buffer.py`) as it ends; nothing of a round stays in
@@ -59,19 +59,19 @@ class _Waiting:
     def policy(self, job):
         """The policy of one run: `job` says whose decisions they are."""
         session = SessionPolicy(None, self.vocabulary, version=self.runner.version)
-        requests, runner = self.requests, self.runner
+        requests = self.requests
 
         class Remote:
             def reset(self):
                 session.reset()
 
-            def choose(self, frame, *, sample=True):
+            def choose(self, frame, *, sample=True, temperature=1.0):
                 candidates = session.advance(frame)
                 # A forced action needs no network, hence no trip to it.
                 if len(candidates) == 1:
                     return Choice(candidates[0]["candidate_ref"])
                 result = Future()
-                requests.put((job, frame, runner.temperature_for(frame, sample), result))
+                requests.put((job, frame, temperature, result))
                 return result.result()
 
         return Remote()

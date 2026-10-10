@@ -48,9 +48,11 @@ def read(paths):
     return [json.loads(path.read_text()) for path in paths]
 
 
-def scored(model, vocabulary, run, temperatures=None):
+def scored(model, vocabulary, run, temperatures=None, by_phase=False):
     """Each macro-action's log-probability scored again from its frames, decision by
-    decision at the temperature of its phase (at 1 without temperatures)."""
+    decision at the temperature it was drawn at: the fight's inside a fight, the
+    rest's outside (at 1 without temperatures). With `by_phase` a fight is only what
+    stands in the combat phase, which leaves a selection made inside one out of it."""
     result = []
     for macro in run["macros"]:
         total = 0.0
@@ -63,18 +65,19 @@ def scored(model, vocabulary, run, temperatures=None):
             mask = torch.tensor([slot in set(slots.values()) for slot in obs.slot_refs])
             with torch.no_grad():
                 output = model.decode_batch(model.encode([obs], vocabulary), [mask])[0]
-            phase = "combat" if frame["public"]["phase"] == "combat" else "other"
-            temperature = temperatures[phase] if temperatures else 1.0
+            inside = frame["public"]["phase"] == "combat" or (macro.get("fight") is not None and not by_phase)
+            temperature = temperatures["combat" if inside else "other"] if temperatures else 1.0
             chosen = obs.slot_refs.index(slots[step["candidate_ref"]])
             total += float((output.logits / temperature).log_softmax(-1)[chosen])
         result.append(total)
     return result
 
 
-def largest_gap(model, vocabulary, runs, temperatures=None):
+def largest_gap(model, vocabulary, runs, temperatures=None, by_phase=False):
     """How far a stored log-probability is, at most, from its replay."""
     return max(abs(macro["old_log_prob"] - log_prob)
-               for run in runs for macro, log_prob in zip(run["macros"], scored(model, vocabulary, run, temperatures)))
+               for run in runs
+               for macro, log_prob in zip(run["macros"], scored(model, vocabulary, run, temperatures, by_phase)))
 
 
 def test_choosing_for_a_packed_batch_scores_as_decision_by_decision():
@@ -347,6 +350,25 @@ def test_a_round_sampled_at_phase_temperatures_records_them_and_replays_at_them(
     with gzip.open(paths[0].with_suffix(".combats.jsonl.gz"), "rt") as stream:
         rows = [json.loads(line) for line in stream]
     assert rows and all(row["policy"]["temperature"] == temperatures for row in rows)
+
+
+def test_a_selection_inside_a_fight_is_drawn_at_the_fights_temperature(tmp_path):
+    temperatures = {"combat": 0.5, "other": 0.8}
+    learner, runner, seeds = setup_round(temperatures)
+    # The plain engine's fight is a selection in the `card_select` phase: the engine's
+    # encounter events, not the phase, say that it is inside a fight.
+    with samplers(runner, engines=5, processes=3) as pool:
+        runs = read(collect_round(pool, runner, seeds, tmp_path / "round"))
+    assert all([(macro["phase"], macro["fight"]) for macro in run["macros"]]
+               == [("card_select", 1), ("combat_play", None)] for run in runs)
+    assert largest_gap(learner.model, learner.vocabulary, runs, temperatures) < 1e-4
+    assert largest_gap(learner.model, learner.vocabulary, runs, temperatures, by_phase=True) > 1e-3
+    # The runner alone draws at the same temperatures as the sampling processes.
+    alone = runner.run(engine(), "Ironclad", "alone")
+    assert largest_gap(learner.model, learner.vocabulary, [alone], temperatures) < 1e-4
+    frame = alone["macros"][0]["steps"][0]["frame"]
+    assert (runner.temperature_for(frame), runner.temperature_for(frame, fight=1)) == (0.8, 0.5)
+    assert runner.temperature_for(frame, sample=False, fight=1) == 1.0
 
 
 def test_greedy_runs_have_no_temperature():

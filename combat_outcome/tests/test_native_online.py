@@ -32,7 +32,7 @@ class Scripted:
     def reset(self):
         pass
 
-    def choose(self, frame, *, sample=True):
+    def choose(self, frame, *, sample=True, temperature=1.0):
         slot = next(self.records)["action"]["decoder_slot_ref"]
         (candidate,) = [c for c in frame["legal"]["candidates"] if c["decoder_slot_ref"] == slot]
         return Choice(candidate["candidate_ref"], log_prob=torch.zeros(()))
