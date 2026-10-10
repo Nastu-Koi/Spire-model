@@ -14,14 +14,6 @@
   /* Chart colours, checked for separation under colour-vision deficiency. */
   --series:#1b8a66;
   --time:#8468c8;
-  --target:#c8712a;
-  --pass-1:#74bb9d;
-  --pass-2:#2f9472;
-  --pass-3:#125a44;
-  --act-1:#b3a3dc;
-  --act-2:#8468c8;
-  --act-3:#553d96;
-  --reference:#7d8782;
   --good:#17694f;
   font-family:Inter,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
   font-synthesis:none;
@@ -228,10 +220,6 @@ select {
 
 .kind-dot.bootstrap {
   background:#82c9a4;
-}
-
-.kind-dot.ppo {
-  background:#e0ab72;
 }
 
 .search input {
@@ -454,11 +442,6 @@ main {
   letter-spacing:.5px;
 }
 
-.tag.ppo {
-  background:#fbeedc;
-  color:#8a5522;
-}
-
 .path {
   color:var(--muted);
   font-size:11px;
@@ -525,12 +508,6 @@ main {
 .status-time {
   color:var(--muted);
   font-size:12px;
-}
-
-.status-strip progress {
-  width:100%;
-  height:5px;
-  accent-color:var(--series);
 }
 
 .notice {
@@ -609,7 +586,7 @@ main {
   margin-bottom:22px;
 }
 
-.filters label,.section-controls label {
+.filters label {
   display:flex;
   align-items:center;
   gap:8px;
@@ -640,12 +617,6 @@ main {
   max-width:980px;
 }
 
-.section-controls {
-  display:flex;
-  gap:14px;
-  flex-wrap:wrap;
-}
-
 /* Charts */
 
 .chart-grid {
@@ -661,10 +632,6 @@ main {
   border-radius:8px;
   padding:14px 16px 10px;
   min-width:0;
-}
-
-.floor-card {
-  margin-bottom:14px;
 }
 
 .chart-heading {
@@ -699,10 +666,6 @@ main {
   position:relative;
 }
 
-.floor-chart {
-  height:260px;
-}
-
 .chart svg {
   width:100%;
   height:100%;
@@ -723,11 +686,6 @@ main {
   stroke-width:1;
 }
 
-.chart .baseline {
-  stroke:var(--axis);
-  stroke-width:1;
-}
-
 .chart .boundary {
   stroke:#d3dad4;
   stroke-width:1;
@@ -738,62 +696,12 @@ main {
   font-size:10px;
 }
 
-.chart .act-label {
-  fill:var(--ink-2);
-  font-size:12px;
-}
-
-.chart .boss-tick {
-  fill:var(--ink);
-  font-weight:600;
-}
-
-.main,.win {
+.main {
   --c:var(--series);
 }
 
 .time {
   --c:var(--time);
-}
-
-.target {
-  --c:var(--target);
-}
-
-.pass-1 {
-  --c:var(--pass-1);
-}
-
-.pass-2 {
-  --c:var(--pass-2);
-}
-
-.pass-3 {
-  --c:var(--pass-3);
-}
-
-.act-1 {
-  --c:var(--act-1);
-}
-
-.act-2 {
-  --c:var(--act-2);
-}
-
-.act-3 {
-  --c:var(--act-3);
-}
-
-.reference {
-  --c:var(--reference);
-}
-
-.worst {
-  --c:var(--target);
-}
-
-.mean {
-  --c:var(--ink);
 }
 
 .chart .series-line {
@@ -814,11 +722,6 @@ main {
   stroke-opacity:.13;
 }
 
-/* A different measure from the rates above it: dotted as well as coloured. */
-.chart .series-line.worst {
-  stroke-dasharray:1 5;
-}
-
 .chart .series-dot {
   fill:var(--c);
   stroke:var(--surface);
@@ -829,45 +732,9 @@ main {
   stroke-width:2;
 }
 
-.chart .target-line {
-  fill:none;
-  stroke:var(--target);
-  stroke-dasharray:6 4;
-  stroke-width:1.5;
-}
-
 .chart .focus-line {
   stroke:#8d9a93;
   stroke-width:1;
-}
-
-.chart .bar {
-  fill:var(--c);
-}
-
-.chart .bar.active {
-  filter:brightness(1.12) saturate(1.15);
-}
-
-.chart .band-focus {
-  fill:#eef2ee;
-}
-
-.chart .reference-line {
-  fill:none;
-  stroke:var(--reference);
-  stroke-width:1.5;
-  stroke-linejoin:round;
-}
-
-.chart .mean-line {
-  stroke:var(--ink);
-  stroke-width:1;
-}
-
-.chart .mean-label {
-  fill:var(--ink);
-  font-weight:600;
 }
 
 .chart-empty {
@@ -966,55 +833,6 @@ main {
 .key.line.raw {
   opacity:.45;
   height:1px;
-}
-
-.key.line.worst {
-  background:repeating-linear-gradient(90deg,var(--c) 0 2px,transparent 2px 5px);
-}
-
-.key.line.target {
-  background:repeating-linear-gradient(90deg,var(--c) 0 5px,transparent 5px 8px);
-}
-
-.key.box {
-  width:10px;
-  height:10px;
-  border-radius:2px;
-}
-
-/* Where the runs ended, as one bar */
-
-.ends {
-  margin:6px 0 10px;
-}
-
-.ends-bar {
-  display:flex;
-  gap:2px;
-  height:12px;
-}
-
-.ends-part {
-  background:var(--c);
-  min-width:3px;
-  flex-basis:0;
-}
-
-.ends-part:first-child {
-  border-radius:3px 0 0 3px;
-}
-
-.ends-part:last-child {
-  border-radius:0 3px 3px 0;
-}
-
-.ends-labels {
-  display:flex;
-  flex-wrap:wrap;
-  gap:3px 20px;
-  font-size:12px;
-  color:var(--ink-2);
-  margin-top:7px;
 }
 
 /* Details */
@@ -1132,14 +950,6 @@ tr:last-child td {
   font-size:12px;
 }
 
-.mini-bar {
-  width:56px;
-  height:5px;
-  accent-color:var(--series);
-  margin-left:9px;
-  vertical-align:middle;
-}
-
 .row-action {
   border:0;
   background:#edf3ee;
@@ -1238,9 +1048,6 @@ noscript {
   }
   .chart {
     height:250px;
-  }
-  .floor-chart {
-    height:300px;
   }
 }
 
@@ -1367,9 +1174,6 @@ noscript {
   }
   .chart {
     height:190px;
-  }
-  .floor-chart {
-    height:230px;
   }
   .tabs {
     gap:14px;

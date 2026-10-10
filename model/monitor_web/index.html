@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Spire 模型 Bootstrap 与 PPO 训练指标监测">
+  <meta name="description" content="Spire 模型 Bootstrap 训练指标监测">
   <title>Spire · 训练监测</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
@@ -16,7 +16,6 @@
   <div class="kind-filters" role="group" aria-label="训练类型">
     <button type="button" class="kind-filter active" data-kind="all" aria-pressed="true"><span>全部训练</span><span id="count-all">0</span></button>
     <button type="button" class="kind-filter" data-kind="bootstrap" aria-pressed="false"><span><i class="kind-dot bootstrap"></i>Bootstrap</span><span id="count-bootstrap">0</span></button>
-    <button type="button" class="kind-filter" data-kind="ppo" aria-pressed="false"><span><i class="kind-dot ppo"></i>PPO</span><span id="count-ppo">0</span></button>
   </div>
   <div class="sidebar-label">训练记录</div>
   <label class="search"><span class="sr-only">搜索训练目录</span><input id="search" type="search" placeholder="搜索训练目录…" autocomplete="off"></label>
@@ -27,10 +26,10 @@
   <header class="topbar"><div id="connection" class="connection" role="status">连接中</div><div class="refresh-controls"><label class="auto-refresh"><input id="auto-refresh" type="checkbox" checked><span>自动刷新 · 5 秒</span></label><button id="refresh" class="button" type="button">刷新</button></div></header>
   <div class="workspace">
     <div id="error" class="notice error" role="alert" hidden></div>
-    <div id="empty" class="empty-state" hidden><h1 id="empty-title">等待训练记录</h1><p id="empty-description"></p><code id="root-path"></code><p id="empty-hint">Bootstrap 和 PPO 每完成一次优化器更新，指标就会写入。</p></div>
+    <div id="empty" class="empty-state" hidden><h1 id="empty-title">等待训练记录</h1><p id="empty-description"></p><code id="root-path"></code><p id="empty-hint">Bootstrap 每完成一次优化器更新，指标就会写入。</p></div>
     <div id="dashboard" hidden>
       <section class="run-heading" aria-label="当前训练任务"><div class="run-heading-main"><div class="run-title-line"><span id="run-kind" class="tag"></span><h1 id="run-name"></h1></div><p id="run-path" class="path"></p></div><button id="export" class="button" type="button">导出 CSV</button></section>
-      <section class="status-strip" aria-label="训练状态"><div class="status-main"><span id="state" class="state-tag"></span><span id="status-detail"></span></div><div id="updated" class="status-time"></div><progress id="collection-progress" hidden></progress></section>
+      <section class="status-strip" aria-label="训练状态"><div class="status-main"><span id="state" class="state-tag"></span><span id="status-detail"></span></div><div id="updated" class="status-time"></div></section>
       <div id="warnings" class="notices" aria-live="polite"></div>
       <div id="summary" class="summary-grid"></div>
       <div class="filters" role="group" aria-label="曲线显示设置">
@@ -39,11 +38,6 @@
         <label>纵轴<select id="scale"><option value="focus">聚焦主体</option><option value="full">完整范围</option></select></label>
         <p id="curve-note" class="filters-note"></p>
       </div>
-      <section id="progress-section" aria-labelledby="progress-title" hidden>
-        <div class="section-heading"><div><h2 id="progress-title">对局进度</h2><p id="progress-note"></p></div><div class="section-controls"><label>角色<select id="character"></select></label><label>汇总<select id="window"><option value="1">最近 1 轮</option><option value="5">最近 5 轮</option><option value="20">最近 20 轮</option><option value="100">最近 100 轮</option><option value="0">范围内全部</option></select></label></div></div>
-        <article id="floor-card" class="chart-card floor-card"><div class="chart-heading"><h3>前进楼层分布</h3><span id="floor-value" class="chart-value"></span></div><div id="floor-ends" class="ends"></div><div id="chart-floors" class="chart floor-chart"></div><div id="floor-legend" class="legend"></div></article>
-        <div class="chart-grid"><article class="chart-card"><div class="chart-heading"><h3>平均到达楼层</h3><span id="climb-value" class="chart-value"></span></div><div id="chart-climb" class="chart"></div><div id="climb-legend" class="legend"></div></article><article class="chart-card"><div class="chart-heading"><h3>过幕率与通关率</h3><span id="acts-value" class="chart-value"></span></div><div id="chart-acts" class="chart"></div><div id="acts-legend" class="legend"></div></article></div>
-      </section>
       <section aria-labelledby="trends-title">
         <div class="section-heading"><div><h2 id="trends-title">学习曲线</h2><p id="trends-note"></p></div></div>
         <div class="chart-grid"><article class="chart-card"><div class="chart-heading"><h3 id="primary-title"></h3><span id="primary-value" class="chart-value"></span></div><div id="chart-primary" class="chart"></div><div id="primary-legend" class="legend"></div></article><article class="chart-card"><div class="chart-heading"><h3 id="secondary-title"></h3><span id="secondary-value" class="chart-value"></span></div><div id="chart-secondary" class="chart"></div><div id="secondary-legend" class="legend"></div></article><article class="chart-card"><div class="chart-heading"><label for="metric-select">优化指标</label><select id="metric-select"></select></div><div id="chart-metric" class="chart"></div><div id="metric-legend" class="legend"></div></article><article class="chart-card"><div class="chart-heading"><h3 id="duration-title">单次更新耗时</h3><span id="duration-value" class="chart-value"></span></div><div id="chart-duration" class="chart"></div><div id="duration-legend" class="legend"></div></article></div>

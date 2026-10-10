@@ -1,4 +1,4 @@
-"""Read-only Bootstrap/PPO dashboard; deliberately independent of Torch."""
+"""Read-only Bootstrap dashboard; deliberately independent of Torch."""
 
 import argparse
 from array import array
@@ -18,13 +18,13 @@ import uuid
 
 
 WEB = Path(__file__).with_name("monitor_web")
-KINDS = {"bootstrap", "ppo"}
+KINDS = {"bootstrap"}
 # Complete records kept per update log: the page tabulates only this many.
 RECENT = 200
 # Dictionaries of numbers that become one curve per entry.
 NESTED = {"learning_rates", "grad_norm"}
-META = ("update", "round", "policy_version", "time", "stage", "session", "early_stop", "target_kl")
-INTEGRAL = {"update", "round", "policy_version", "stage", "session", "early_stop"}
+META = ("update", "round", "policy_version", "time", "stage", "session")
+INTEGRAL = {"update", "round", "policy_version", "stage", "session"}
 NAN = float("nan")
 
 
@@ -63,7 +63,7 @@ def normalize_record(raw, *, strict=False):
     `strict` says the caller already parsed NaN and Infinity away.
     """
     if not isinstance(raw, dict) or not isinstance(raw.get("kind"), str) or raw["kind"] not in KINDS:
-        raise ValueError("Not a Bootstrap/PPO training record")
+        raise ValueError("Not a Bootstrap training record")
     if not strict:
         raw = finite_json(raw)
     epochs = raw.get("metrics", {})
@@ -72,17 +72,12 @@ def normalize_record(raw, *, strict=False):
     if not isinstance(epochs, list) or any(not isinstance(item, dict) for item in epochs):
         raise ValueError("Metrics must be an object or a list of objects")
     validation = raw.get("validation") or {}
-    evaluation = raw.get("evaluation") or {}
     config = raw.get("config") or {}
-    if not all(isinstance(value, dict) for value in (validation, evaluation, config)):
+    if not all(isinstance(value, dict) for value in (validation, config)):
         raise ValueError("Invalid training metadata")
     metrics = dict(epochs[-1]) if epochs else {}
     metrics["validation_nll"] = validation_average(validation)
     metrics["a0_validation_nll"] = validation_average(validation, a0=True)
-    for name in ("equal_character_win_rate", "worst_character_win_rate",
-                 "equal_character_completion_rate", "equal_character_mean_floor",
-                 "equal_character_mean_score"):
-        metrics[name] = evaluation.get(name)
     metrics["duration_seconds"] = raw.get("duration_seconds", metrics.get("duration_seconds"))
     update = metrics.get("updates")
     update = update if number(update) and update >= 0 and int(update) == update else None
@@ -92,8 +87,7 @@ def normalize_record(raw, *, strict=False):
         time=raw.get("time"), stage=raw.get("stage", raw["kind"]),
         policy_version=raw.get("policy_version"), metrics=metrics,
         optimization_epochs=len(epochs),
-        early_stop=any(bool(item.get("early_stop")) for item in epochs),
-        validation=validation, evaluation=evaluation, config=config, raw=raw,
+        validation=validation, config=config, raw=raw,
     )
 
 
@@ -145,7 +139,6 @@ class Series:
             policy_version=record["policy_version"], time=timestamp(record["time"]),
             stage=self.label("stage", record["stage"]),
             session=self.label("session", record["session"]),
-            early_stop=int(record["early_stop"]), target_kl=record["config"].get("target_kl"),
         )
         for name, column in self.meta.items():
             column.append(point[name] if number(point[name]) else NAN)
@@ -491,7 +484,7 @@ def create_server(root, host="127.0.0.1", port=8765, limit=None):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Read-only Bootstrap/PPO training dashboard")
+    parser = argparse.ArgumentParser(description="Read-only Bootstrap training dashboard")
     parser.add_argument("--runs", type=Path, default=Path("runs"), help="Training root or a single output directory")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: localhost only)")
     parser.add_argument("--port", type=int, default=8765)

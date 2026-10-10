@@ -62,32 +62,25 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(row["metrics"]["a0_validation_nll"], 2)
         self.assertEqual(row["metrics"]["loss"], 0.5)
 
-    def test_ppo_final_epoch_preserves_raw_epochs_and_sampling_denominator(self):
-        raw = record(kind="ppo", evaluation={"equal_character_win_rate": 0.25, "comparable": False})
-        raw["metrics"] = [{"loss": 4, "updates": 10}, {"loss": 2, "updates": 20, "early_stop": 1}]
+    def test_a_summary_of_several_epochs_keeps_the_last_and_the_raw_record(self):
+        raw = record()
+        raw["metrics"] = [{"loss": 4, "updates": 10}, {"loss": 2, "updates": 20}]
         row = normalize_record(raw)
         self.assertEqual(row["metrics"]["loss"], 2)
         self.assertEqual(row["metrics"]["updates"], 20)
-        self.assertEqual(row["metrics"]["equal_character_win_rate"], 0.25)
         self.assertEqual(row["optimization_epochs"], 2)
-        self.assertTrue(row["early_stop"])
         self.assertEqual(row["raw"]["metrics"], raw["metrics"])
-        self.assertFalse(row["evaluation"]["comparable"])
 
-    def test_missing_values_are_not_zero_and_warmup_is_preserved(self):
-        row = normalize_record(record(kind="ppo", stage="value"))
-        self.assertEqual(row["stage"], "value")
+    def test_missing_values_are_not_zero_and_the_stage_is_preserved(self):
+        row = normalize_record(record(stage="bootstrap"))
+        self.assertEqual(row["stage"], "bootstrap")
         self.assertIsNone(row["metrics"]["validation_nll"])
-        self.assertIsNone(row["metrics"]["equal_character_win_rate"])
-        self.assertIsNone(row["metrics"]["equal_character_mean_floor"])
+        self.assertNotIn("equal_character_win_rate", row["metrics"])
+        self.assertNotIn("evaluation", row)
 
-    def test_ppo_round_carries_how_far_its_runs_climbed(self):
-        evaluation = {"equal_character_mean_floor": 21.5, "equal_character_mean_score": 0.75,
-                      "act_floors": [17, 16], "characters": {"Silent": {"death_floors": [[9, 3], [22, 1]]}}}
-        row = normalize_record(record(kind="ppo", evaluation=evaluation))
-        self.assertEqual(row["metrics"]["equal_character_mean_floor"], 21.5)
-        self.assertEqual(row["metrics"]["equal_character_mean_score"], 0.75)
-        self.assertEqual(row["evaluation"], evaluation)
+    def test_records_of_the_removed_ppo_are_not_training_records(self):
+        with self.assertRaises(ValueError):
+            normalize_record(record(kind="ppo", evaluation={"equal_character_win_rate": 0.25}))
 
     def test_nonfinite_values_become_json_null(self):
         raw = record()
@@ -99,7 +92,7 @@ class MetricsTests(unittest.TestCase):
         json.dumps(row, allow_nan=False)
 
     def test_malformed_metric_shapes_are_rejected(self):
-        for raw in ([], {"kind": []}, {"kind": "other"}, {"kind": "ppo", "metrics": [4]},
+        for raw in ([], {"kind": []}, {"kind": "other"}, {"kind": "bootstrap", "metrics": [4]},
                     {"kind": "bootstrap", "config": "bad"}):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 normalize_record(raw)
@@ -132,29 +125,29 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual([row["round"] for row in reader.records], [1, 2])
 
     def test_updates_are_available_before_a_summary_and_not_overwritten_by_it(self):
-        writer = TrainingHistory(self.root, "ppo", {"target_kl": 0.015})
+        writer = TrainingHistory(self.root, "bootstrap", {"head_lr": 3e-5})
         self.addCleanup(writer.close)
         writer.append_update({"updates": 7, "loss": 1.5, "duration_seconds": 0.5},
-                             round=2, optimization_epoch=1, stage="ppo")
+                             round=2, optimization_epoch=1, stage="bootstrap")
         store = MonitorStore(self.root)
-        self.assertEqual(store.list_runs()["runs"][0]["kind"], "ppo")
+        self.assertEqual(store.list_runs()["runs"][0]["kind"], "bootstrap")
         initial = store.detail(".")
         self.assertEqual(initial["total_records"], 1)
         self.assertEqual(initial["source"], "updates")
         self.assertIsNone(initial["summary"])
         self.assertEqual(initial["latest"]["update"], 7)
         self.assertFalse((self.root / "history.jsonl").exists())
-        writer.append_update({"updates": 8, "loss": 0.75}, round=2, stage="ppo")
-        writer.append(2, [{"updates": 8, "loss": 1.1}], evaluation={"equal_character_win_rate": 0.2})
+        writer.append_update({"updates": 8, "loss": 0.75}, round=2, stage="bootstrap")
+        writer.append(2, [{"updates": 8, "loss": 1.1, "accuracy": 0.5}])
         writer.status("completed", round=2)
         result = store.detail(".")
         self.assertEqual(result["status"]["updates"], 8)
         self.assertEqual(updates(result), [7, 8])
         self.assertEqual(result["series"]["metrics"]["loss"], [1.5, 0.75])
-        self.assertEqual(result["series"]["meta"]["target_kl"], [0.015, 0.015])
+        self.assertEqual(sorted(result["series"]["meta"]), ["policy_version", "round", "session", "stage", "time", "update"])
         self.assertEqual(result["latest"]["metrics"]["loss"], 0.75)
         self.assertEqual(result["summary"]["metrics"]["loss"], 1.1)
-        self.assertEqual(result["summary"]["metrics"]["equal_character_win_rate"], 0.2)
+        self.assertEqual(result["summary"]["metrics"]["accuracy"], 0.5)
 
     def test_resume_repairs_only_torn_update_tail_and_preserves_sessions(self):
         writer = TrainingHistory(self.root, "bootstrap", {})
@@ -189,8 +182,8 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(reader.total, 1)
 
     def test_nan_written_by_old_trainers_is_a_gap_on_the_curve(self):
-        self.path.write_bytes(b'{"kind": "ppo", "metrics": {"loss": NaN, "kl": Infinity, "entropy": 0.5, "updates": 4}}\n')
-        (self.root / "status.json").write_text('{"kind": "ppo", "state": "completed"}')
+        self.path.write_bytes(b'{"kind": "bootstrap", "metrics": {"loss": NaN, "accuracy": Infinity, "entropy": 0.5, "updates": 4}}\n')
+        (self.root / "status.json").write_text('{"kind": "bootstrap", "state": "completed"}')
         detail = MonitorStore(self.root).detail(".")
         self.assertEqual(detail["series"]["metrics"], {"entropy": [0.5], "updates": [4.0]})
         self.assertIsNone(detail["latest"]["raw"]["metrics"]["loss"])
@@ -228,7 +221,7 @@ class HistoryTests(unittest.TestCase):
                 directory = self.root / source
                 directory.mkdir()
                 path = directory / f"{source}.jsonl"
-                first = record(1, config={"target_kl": 0.02, "logical_batch_size": 32})
+                first = record(1, config={"head_lr": 3e-5, "logical_batch_size": 32})
                 first["metrics"].update(accuracy=0, accuracy_correct=0, accuracy_decisions=8,
                                         learning_rates={"head": 0.0001}, parameter_updates={"head": {"samples": 1}})
                 write_records(path, [first, *(record(i) for i in range(2, 2502))])
@@ -244,7 +237,6 @@ class HistoryTests(unittest.TestCase):
                 self.assertEqual(series["metrics"]["accuracy"][:2], [0, None])
                 self.assertEqual(series["metrics"]["accuracy_decisions"][0], 8)
                 self.assertEqual(series["metrics"]["learning_rates.head"][:2], [0.0001, None])
-                self.assertEqual(series["meta"]["target_kl"][:2], [0.02, None])
                 self.assertFalse(any(name.startswith("parameter_updates") for name in series["metrics"]))
                 self.assertEqual(len({len(column) for column in (*series["meta"].values(), *series["metrics"].values())}), 1)
                 json.dumps(full, allow_nan=False)
@@ -298,32 +290,33 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(updates(store.detail(".", after=9, token=detail["token"])), [10])
 
     def test_listing_does_not_read_the_logs_of_runs_that_state_their_kind(self):
-        for name, kind in (("a", "bootstrap"), ("b", "ppo")):
+        for name, kind in (("a", "bootstrap"), ("b", "bootstrap"), ("removed", "ppo")):
             (self.root / name).mkdir()
             write_records(self.root / name / "updates.jsonl", [record(1, kind=kind, record_type="update")])
             (self.root / name / "status.json").write_text(json.dumps({"kind": kind, "state": "updating"}))
         (self.root / "old").mkdir()
-        write_records(self.root / "old" / "history.jsonl", [record(3, kind="ppo")])
+        write_records(self.root / "old" / "history.jsonl", [record(3)])
         store = MonitorStore(self.root)
+        # A directory of the removed PPO is not a training run.
         self.assertEqual({run["id"]: run["kind"] for run in store.list_runs()["runs"]},
-                         {"a": "bootstrap", "b": "ppo", "old": "ppo"})
-        # Only the run without a status file had to be opened to learn what it is.
-        self.assertEqual([key for key, reader in store.readers.items() if reader.total], ["old"])
+                         {"a": "bootstrap", "b": "bootstrap", "old": "bootstrap"})
+        # Only the runs without a status file naming a known kind had to be opened.
+        self.assertEqual(sorted(key for key, reader in store.readers.items() if reader.total), ["old"])
         self.assertEqual(store.detail("b")["total_records"], 1)
+        with self.assertRaises(KeyError):
+            store.detail("removed")
 
     def test_summaries_keep_the_round_report_without_raw_records(self):
-        evaluation = {"equal_character_win_rate": 0.2, "act_floors": [17],
-                      "characters": {"Silent": {"wins": 0, "death_floors": [[9, 4]]}}}
-        writer = TrainingHistory(self.root, "ppo", {"target_kl": 0.015})
+        writer = TrainingHistory(self.root, "bootstrap", {"head_lr": 3e-5})
         self.addCleanup(writer.close)
-        writer.append_update({"updates": 3, "loss": 1.0}, round=1, stage="ppo")
-        writer.append(1, [{"updates": 3, "loss": 1.0}], stage="ppo", evaluation=evaluation)
+        writer.append_update({"updates": 3, "loss": 1.0}, round=1, stage="bootstrap")
+        writer.append(1, [{"updates": 3, "loss": 1.0, "accuracy": 0.25}], stage="bootstrap", training_runs=7)
         detail = MonitorStore(self.root).detail(".")
         (row,) = detail["summaries"]["records"]
-        self.assertEqual(row["evaluation"], evaluation)
-        self.assertEqual((row["update"], row["round"], row["stage"]), (3, 1, "ppo"))
+        self.assertEqual((row["update"], row["round"], row["stage"]), (3, 1, "bootstrap"))
+        self.assertEqual(row["metrics"]["accuracy"], 0.25)
         self.assertTrue({"raw", "config", "validation"}.isdisjoint(row))
-        self.assertEqual(detail["summary"]["raw"]["evaluation"], evaluation)
+        self.assertEqual(detail["summary"]["raw"]["training_runs"], 7)
 
     def test_real_writer_status_only_append_and_resumed_session(self):
         writer = TrainingHistory(self.root, "bootstrap", {"head_lr": 0.001})
