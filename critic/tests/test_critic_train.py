@@ -114,6 +114,9 @@ def test_the_body_is_the_policy_weights_and_the_optimizer_groups_are_the_policy_
     assert any(name.startswith("body.blocks.1.") for name in top) and not any("blocks.0." in name for name in top)
     with pytest.raises(ValueError):
         TrainingConfig(train_blocks=0)
+    frozen = trainable(net, TrainingConfig(precision="no", embedding_lr=0.0))
+    assert len(frozen) == len(net.trainable()) - 4 and not any(name.endswith(("symbol.weight", "relation.weight")) for name, _ in frozen)
+    assert "embedding_no_decay" not in {g["name"] for g in build_optimizer(net, TrainingConfig(precision="no", embedding_lr=0.0)).param_groups}
 
 
 def test_the_untrained_head_predicts_the_base_rates(runs):
