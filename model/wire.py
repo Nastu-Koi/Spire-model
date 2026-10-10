@@ -9,10 +9,6 @@ number of processes are joined on the device by a fixed number of array operatio
 `unpack(map(pack, packs))` holds the decisions of the packs in order. It is the pack
 `prepare_decisions` gives them together, except for the programs: one that two packs
 hold is encoded once for each, and programs are padded into fewer groups.
-
-What crossed for sampling is kept for the update that follows: `replay` joins the
-packed decisions of macro-actions into the batch `prepare_replay` builds from their
-frames, without parsing a frame again.
 """
 
 import numpy as np
@@ -20,7 +16,7 @@ import torch
 from torch.nn import functional as F
 
 from .batch import Batch, Fields, ProgramGroup
-from .policy import Decisions, Replay
+from .policy import Decisions
 
 # Program groups of 1, 2, 4, ... nodes.
 BUCKETS = 12
@@ -68,9 +64,6 @@ EMPTY = np.zeros(0, dtype=np.int32)
 # the interpreter, not the GPU: every group is another round of the entity encoder's
 # loop, whatever it holds, and padding a few programs further costs nothing.
 GROUPED = ((0, 1, 2), tuple(range(3, BUCKETS)))
-# An update's batches are hundreds of decisions and bound by the GPU: there every
-# bucket is a group of its own, as `collate` packs them, and nothing is padded further.
-EVERY_BUCKET = tuple((bucket,) for bucket in range(BUCKETS))
 
 
 def pack(decisions):
@@ -124,11 +117,6 @@ def size(message):
     return int(message[0][INTEGERS + NUMBERS + OBSERVATIONS])
 
 
-def dimensions(message):
-    """(tokens, action slots) of the one decision a packed message holds."""
-    return int(message[0][INTEGERS + NUMBERS + TOKENS]), int(message[0][-2])
-
-
 def _joined(buffers, lengths, device, moves=None):
     """The fields of every message, each field's values together: the tensor and the
     bounds of the fields in it. `lengths` is [messages, fields]; `moves` what to add
@@ -161,10 +149,9 @@ def _padded(mask, cells, *, shape=()):
     return cells.new_zeros((*mask.shape, *shape)).masked_scatter_(place, cells)
 
 
-def unpack(messages, device, *, pad_to=None, grouped=GROUPED):
+def unpack(messages, device):
     """The decisions of `pack`ed messages on `device`, in their order, and the names
-    they met which the vocabulary never registered. `grouped` lists the buckets of
-    each program group; `pad_to` pads the token sequences further."""
+    they met which the vocabulary never registered."""
     headers = np.stack([message[0] for message in messages])
     counts = headers[:, INTEGERS + NUMBERS:][:, :COUNTS]
     widths = headers[:, -WIDTHS:].max(0)
@@ -179,7 +166,7 @@ def unpack(messages, device, *, pad_to=None, grouped=GROUPED):
 
     tokens = _mask(field(0), int(widths[0]))
     groups = []
-    for buckets in grouped:
+    for buckets in GROUPED:
         present = [bucket for bucket in buckets if counts[:, GROUPS + bucket].any()]
         if not present:
             continue
@@ -234,7 +221,7 @@ def unpack(messages, device, *, pad_to=None, grouped=GROUPED):
             tokens,
         ),
         field(GLOBAL.index("lengths")),
-        max(int(widths[-1]), pad_to or 0),
+        int(widths[-1]),
         field(GLOBAL.index("reference_targets")),
         field(GLOBAL.index("reference_sources")),
         field(GLOBAL.index("reference_roles")),
@@ -247,20 +234,3 @@ def unpack(messages, device, *, pad_to=None, grouped=GROUPED):
     )
     legal = _padded(slots, field(GLOBAL.index("legal")).bool())
     return Decisions(batch, legal), sorted({name for message in messages for name in message[3]})
-
-
-def replay(macros, device, *, pad_to=None):
-    """Macro-actions packed for one differentiable pass, from the packed decisions
-    sampling kept of them: each macro-action is (messages of one decision each, the
-    slots chosen). The batch of `prepare_replay` for their frames, on `device`."""
-    counts = [len(messages) for messages, _ in macros]
-    decisions, _ = unpack([message for messages, _ in macros for message in messages], device,
-                          pad_to=pad_to, grouped=EVERY_BUCKET)
-    counts = torch.tensor(counts, device=device)
-    return Replay(
-        decisions.batch,
-        decisions.masks,
-        torch.tensor([slot for _, slots in macros for slot in slots], device=device),
-        torch.repeat_interleave(torch.arange(len(macros), device=device), counts),
-        counts.cumsum(0) - counts,
-    )

@@ -9,9 +9,10 @@ from combat_outcome.data import SCHEMA, coverage, fights, load_data, split_runs
 from combat_outcome.online import CombatRecorder, act_results
 from model.cli import vocabulary_for
 from model.config import ModelConfig
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.protocol import ProtocolError
 from model.rollout import RolloutRunner, collect_round
+from model.sampling import Samplers
 from model.protocol import CHARACTERS
 from model.testing import SyntheticEngine, demonstration
 
@@ -150,13 +151,14 @@ def test_act_results_follow_the_run():
 def tiny_runner(**options):
     config = ModelConfig.tiny()
     vocabulary = vocabulary_for([demonstration("Ironclad", "combat-labels", 4, 2)], config)
-    return RolloutRunner(PolicyValue(config), vocabulary, **options)
+    return RolloutRunner(PolicyNetwork(config), vocabulary, **options)
 
 
 def test_a_rollout_records_the_fights_its_policy_played(tmp_path):
     runner = tiny_runner(version=5)
     seeds = {c: [f"{c}-a", f"{c}-b"] for c in CHARACTERS}
-    paths = collect_round(SyntheticEngine, runner, seeds, tmp_path / "round", sample=False)
+    with Samplers(SyntheticEngine, runner.model, runner.vocabulary, engines=2) as pool:
+        paths = collect_round(pool, runner, seeds, tmp_path / "round", sample=False)
     traces = [json.loads(p.read_text()) for p in paths]
     for path, trace in zip(paths, traces):
         (fight,) = rows(path.with_suffix(".combats.jsonl.gz"))

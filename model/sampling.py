@@ -15,12 +15,10 @@ network, which is why a sampling process is best given a single engine.
 
 Sampling processes are forked: they share the vocabulary with the collecting process
 without copying, and never touch its CUDA state. What they pack crosses in the flat
-form of `wire`. They stay from round to round with their engines: an engine process
-begins its next run without loading the game again.
-
-The update that follows a round needs every decision packed once more. The collecting
-process has all of them in hand as they pass: asked to, it keeps them, and hands the
-round over as runs whose macro-actions hold packed decisions in place of frames.
+form of `wire`, each decision with the temperature of its phase. They stay from round
+to round with their engines: an engine process begins its next run without loading
+the game again. Every run is written where it was played; nothing of a round stays in
+memory for whatever learns from it.
 """
 
 import gc
@@ -36,7 +34,6 @@ import torch
 
 from .policy import Choice, SessionPolicy, prepare_decisions
 from .processes import end, end_with, release_memory
-from .protocol import ProtocolError
 from .representation import forget
 from .rollout import RolloutRunner, play, precision_context
 from .trainer import climb
@@ -50,15 +47,15 @@ SILENCE_SECONDS = 60
 class _Waiting:
     """The decisions the engines of one sampling process wait for."""
 
-    def __init__(self, connection, send, vocabulary, version):
+    def __init__(self, connection, send, vocabulary, runner):
         self.connection, self.send = connection, send
-        self.vocabulary, self.version = vocabulary, version
+        self.vocabulary, self.runner = vocabulary, runner
         self.requests = queue.Queue()
 
     def policy(self, job):
         """The policy of one run: `job` says whose decisions they are."""
-        session = SessionPolicy(None, self.vocabulary, version=self.version)
-        requests = self.requests
+        session = SessionPolicy(None, self.vocabulary, version=self.runner.version)
+        requests, runner = self.requests, self.runner
 
         class Remote:
             def reset(self):
@@ -70,15 +67,14 @@ class _Waiting:
                 if len(candidates) == 1:
                     return Choice(candidates[0]["candidate_ref"])
                 result = Future()
-                requests.put((job, frame, result))
+                requests.put((job, frame, runner.temperature_for(frame, sample), result))
                 return result.result()
 
         return Remote()
 
     def serve(self):
         """Send the decisions that wait, if any, and hand out their choices. While the
-        collecting process works on them, the other engines queue the next ones. Each
-        decision is packed on its own: an update takes a round apart by macro-action."""
+        collecting process works on them, the other engines queue the next ones."""
         try:
             waiting = [self.requests.get(timeout=0.01)]
         except queue.Empty:
@@ -89,23 +85,23 @@ class _Waiting:
             except queue.Empty:
                 break
         observations, messages = [], []
-        for job, frame, _ in waiting:
+        for job, frame, temperature, _ in waiting:
             (obs,), decisions = prepare_decisions(self.vocabulary, [frame])
             observations.append(obs)
-            messages.append((job, pack(decisions)))
+            messages.append((job, pack(decisions), temperature))
         self.send(("decisions", messages))
         chosen = self.connection.recv()
-        for (_, frame, result), obs, (slot, log_prob, value) in zip(waiting, observations, chosen):
+        for (_, frame, _, result), obs, (slot, log_prob) in zip(waiting, observations, chosen):
             slot = obs.slot_refs[int(slot)]
             result.set_result(Choice(
                 next(c["candidate_ref"] for c in frame["legal"]["candidates"]
                      if c["decoder_slot_ref"] == slot),
-                log_prob, None, value))
+                log_prob))
 
 
 def _without_frames(run):
-    """A run as its sampling process hands it over: everything but its frames. Each
-    macro-action says how many decisions it holds, for the packed ones kept of them."""
+    """A run as its sampling process hands it over: everything but its frames, which
+    were written with it. Each macro-action says how many decisions it holds."""
     handed = {key: value for key, value in run.items() if key not in ("macros", "environment_actions")}
     handed["climb"] = climb(run)
     handed["macros"] = [
@@ -139,7 +135,7 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
         torch.set_num_threads(1)
         while True:
             try:
-                settings, digest, jobs, sample, save = connection.recv()
+                settings, digest, jobs, sample = connection.recv()
             except EOFError:
                 # The collecting process has no more rounds.
                 break
@@ -147,7 +143,7 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
             # Hashed once by the collecting process, not here from weights that are
             # not this process's to read.
             runner._digest = digest
-            waiting = _Waiting(connection, send, vocabulary, runner.version)
+            waiting = _Waiting(connection, send, vocabulary, runner)
             finished = []
 
             def work(slot):
@@ -160,7 +156,7 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
                     if engines[slot] is None:
                         engines[slot] = engine_factory()
                     run = play(engines[slot], runner, jobs[index], sample=sample,
-                               policy=waiting.policy(index), save=save)
+                               policy=waiting.policy(index))
                     send(("run", (index, _without_frames(run))))
                     finished.append(index)
 
@@ -181,7 +177,7 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
                     future.result()
                     working.remove(future)
             pool.shutdown()
-            # Nothing of the round is held while the collecting process updates.
+            # Nothing of the round is held between rounds.
             forget()
             release_memory()
             send(("done", None))
@@ -200,14 +196,13 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
 
 class Samplers:
     """Sampling processes holding `engines` engines between them, for the rounds of
-    one model and vocabulary. With `keep`, every round's packed decisions are kept for
-    the update that follows it (see `runs`)."""
+    one model and vocabulary. `processes` of them, at most one per engine."""
 
-    def __init__(self, engine_factory, model, vocabulary, *, engines, processes, keep=False):
+    def __init__(self, engine_factory, model, vocabulary, *, engines, processes=None):
+        processes = engines if processes is None else processes
         if type(engines) is not int or type(processes) is not int or min(engines, processes) < 1:
             raise ValueError("Sampling needs positive numbers of engines and processes")
-        self.model, self.vocabulary, self.keep = model, vocabulary, keep
-        self.handed = None
+        self.model, self.vocabulary = model, vocabulary
         processes = min(processes, engines)
         context = multiprocessing.get_context("fork")
         self.taken = context.Value("i", 0)
@@ -245,31 +240,7 @@ class Samplers:
         end(self.samplers)
         self.samplers, self.connections = [], []
 
-    def runs(self):
-        """The runs of the last round, in the order of its jobs, as their sampling
-        processes handed them over: without frames, each macro-action holding the
-        packed decisions (`packed`, one message each) and the slots chosen (`slots`)."""
-        if self.handed is None:
-            raise RuntimeError("No round was kept")
-        runs = []
-        for summary, decisions in zip(*self.handed):
-            run, taken = dict(summary, macros=[]), 0
-            for macro in summary["macros"]:
-                macro = dict(macro)
-                mine = decisions[taken:taken + macro.pop("branches")]
-                taken += len(mine)
-                # The run added up the same choices in the same order.
-                if "old_log_prob" in macro and sum(row[1] for _, row in mine) != macro["old_log_prob"]:
-                    raise ProtocolError("Kept decisions are not the ones a macro-action was played with")
-                macro["packed"] = [message for message, _ in mine]
-                macro["slots"] = [int(row[0]) for _, row in mine]
-                run["macros"].append(macro)
-            if taken != len(decisions):
-                raise ProtocolError("A run's kept decisions do not match its macro-actions")
-            runs.append(run)
-        return runs
-
-    def collect(self, runner, jobs, *, sample=True, on_run=None, save=True):
+    def collect(self, runner, jobs, *, sample=True, on_run=None):
         """Play `jobs`, each written where and as `rollout.play` writes it. Returns the
         runs without their frames, in the order of the jobs. A failure ends the
         processes: there is no telling what their engines are in the middle of."""
@@ -278,25 +249,22 @@ class Samplers:
         if not self.samplers:
             raise RuntimeError("The sampling processes have ended")
         try:
-            return self._collect(runner, jobs, sample, on_run, save)
+            return self._collect(runner, jobs, sample, on_run)
         except BaseException:
             self.close()
             raise
 
-    def _collect(self, runner, jobs, sample, on_run, save):
+    def _collect(self, runner, jobs, sample, on_run):
         self.model.eval()
         self.taken.value = 0
         settings = {name: getattr(runner, name) for name in (
             "precision", "version", "max_steps", "timeout", "ascension", "claim_rewards",
-            "temperature")}
+            "temperatures")}
         for connection in self.connections:
-            connection.send((settings, runner.digest, jobs, sample, save))
+            connection.send((settings, runner.digest, jobs, sample))
         active = dict(enumerate(self.connections))
         completed = 0
-        # What is kept of the round: every run without its frames, and with `keep` its
-        # decisions as they passed, each (packed message, (slot, log-probability, value)).
-        self.handed = None
-        summaries, kept = [None] * len(jobs), [[] for _ in jobs] if self.keep else None
+        summaries = [None] * len(jobs)
         while active:
             ready = wait(list(active.values()), timeout=SILENCE_SECONDS)
             if not ready:
@@ -327,25 +295,23 @@ class Samplers:
                 except EOFError:
                     raise RuntimeError(f"Sampling process {index} exited without finishing") from None
             if asked:
-                self._answer(runner, asked, sample, kept)
-        if kept is not None:
-            self.handed = summaries, kept
+                self._answer(runner, asked, sample)
         return summaries
 
-    def _answer(self, runner, asked, sample, kept):
+    def _answer(self, runner, asked, sample):
         """Choose for the decisions of several sampling processes in one pass. Each
-        process sent a list of (job, packed decision)."""
-        tagged = [pair for _, pairs in asked for pair in pairs]
-        decisions, unregistered = unpack([message for _, message in tagged], self.model.device)
+        process sent a list of (job, packed decision, temperature)."""
+        tagged = [triple for _, triples in asked for triple in triples]
+        decisions, unregistered = unpack([message for _, message, _ in tagged], self.model.device)
         self.vocabulary.report(unregistered)
         with torch.no_grad(), precision_context(self.model, runner.precision):
-            chosen = self.model.choose(decisions, sample=sample, temperature=runner.temperature)
-            # One transfer for the whole pass: (slot, log-probability, value) rows.
+            chosen = self.model.choose(
+                decisions, sample=sample,
+                temperature=torch.tensor([temperature for _, _, temperature in tagged],
+                                         dtype=torch.float32, device=self.model.device))
+            # One transfer for the whole pass: (slot, log-probability) rows.
             rows = torch.stack([column.float() for column in chosen], dim=1).cpu().tolist()
-        if kept is not None:
-            for (job, message), row in zip(tagged, rows):
-                kept[job].append((message, row))
         start = 0
-        for connection, pairs in asked:
-            connection.send(rows[start:start + len(pairs)])
-            start += len(pairs)
+        for connection, triples in asked:
+            connection.send(rows[start:start + len(triples)])
+            start += len(triples)

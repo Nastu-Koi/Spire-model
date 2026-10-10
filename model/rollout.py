@@ -1,19 +1,15 @@
 import hashlib
 import json
-import queue
-import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from copy import deepcopy
-from functools import partial
 from pathlib import Path
 
 import torch
 
 from combat_outcome.online import CombatRecorder
 
-from .policy import SessionPolicy, choose_batch
+from .policy import SessionPolicy
 from .control import CONTROL_VERSION, REWARD_RULE, environment_action, free_reward
 from .protocol import (
     CHARACTERS,
@@ -111,12 +107,13 @@ class RolloutRunner:
         timeout=30,
         ascension=0,
         claim_rewards=False,
-        temperature=1.0,
+        temperatures=None,
     ):
         if max_steps < 1 or timeout <= 0:
             raise ValueError("Rollout limits must be positive")
-        if not temperature > 0:
-            raise ValueError("The sampling temperature must be positive")
+        temperatures = {"combat": 1.0, "other": 1.0} if temperatures is None else dict(temperatures)
+        if set(temperatures) != {"combat", "other"} or not all(t > 0 for t in temperatures.values()):
+            raise ValueError("The sampling temperatures must be positive, one for fights and one for the rest")
         if type(ascension) is not int or not 0 <= ascension <= 10:
             raise ValueError("Ascension must be an integer from 0 to 10")
         self.model, self.vocabulary = model, vocabulary
@@ -125,9 +122,11 @@ class RolloutRunner:
         self.ascension = ascension
         # Gold, relics and potions the belt has room for are taken for the policy.
         self.claim_rewards = claim_rewards
-        # Sampled choices are drawn from the scores divided by this: under 1 the policy
-        # plays closer to its most likely actions. The most likely action is the same.
-        self.temperature = temperature
+        # Sampled choices are drawn from the scores divided by the temperature of the
+        # decision's phase: under 1 the policy plays closer to its most likely actions,
+        # which are the same at every temperature. The temperatures are part of the
+        # policy's definition: a run records them.
+        self.temperatures = temperatures
         self._digest = None
 
     @property
@@ -136,16 +135,17 @@ class RolloutRunner:
             self._digest = policy_digest(self.model)
         return self._digest
 
-    def run(self, engine, character, seed, *, sample=True, journal=None, combats=None, frames=True,
+    def temperature_for(self, frame, sample=True):
+        """The temperature a decision of `frame` is drawn at: a fight's or the rest's.
+        The most likely action, which a greedy run takes, is scored at 1."""
+        if not sample:
+            return 1.0
+        return self.temperatures["combat" if frame["public"]["phase"] == "combat" else "other"]
+
+    def run(self, engine, character, seed, *, sample=True, journal=None, combats=None,
             _policy=None):
         """Play one run. `combats` is where the fights of the run are written as
-        combat-outcome labels of this policy (combat_outcome.online).
-
-        Without `frames` the run keeps none of its frames, which are most of the memory
-        it takes while it is played: each recorded step says where it stood instead,
-        and the run brings its `climb`. That is all a round handed over in packed
-        decisions reads of the frames.
-        """
+        combat-outcome labels of this policy (combat_outcome.online)."""
         if character not in CHARACTERS:
             raise ValueError("Unknown character")
         trace = {
@@ -160,7 +160,7 @@ class RolloutRunner:
             "numeric_backend": numeric_backend(self.model),
             "source": "on_policy" if sample else "evaluation",
             "sampling": "full_distribution" if sample else "argmax",
-            "temperature": self.temperature if sample else None,
+            "temperature": dict(self.temperatures) if sample else None,
             "status": "unresolved",
             "macros": [],
             "automatic_steps": 0,
@@ -174,9 +174,14 @@ class RolloutRunner:
         policy = _policy or SessionPolicy(
             self.model, self.vocabulary, version=self.version
         )
-        # A policy handed in draws its choices where the network runs, at this runner's
-        # temperature; the runner's own is told it here.
-        choose = policy.choose if _policy else partial(policy.choose, temperature=self.temperature)
+
+        # A policy handed in draws its choices where the network runs, at the
+        # temperatures it was told; this runner's own is told them here.
+        def choose(frame, *, sample):
+            if _policy:
+                return policy.choose(frame, sample=sample)
+            return policy.choose(frame, sample=sample, temperature=self.temperature_for(frame, sample))
+
         pending_steps, current_segment, active_macro = [], None, None
         waiting_since = None
         recorder = None
@@ -259,9 +264,7 @@ class RolloutRunner:
                     if automatic is not None:
                         policy.reset()
                         current_segment, pending_steps, active_macro = None, [], None
-                        trace["environment_actions"].append(
-                            dict(frame=deepcopy(frame), **automatic) if frames
-                            else dict(stood=stand(frame), **automatic))
+                        trace["environment_actions"].append(dict(frame=deepcopy(frame), **automatic))
                         trace["automatic_steps"] += 1
                         steps += 1
                         frame = engine.send(execution_command(frame, automatic["candidate_ref"]))
@@ -281,7 +284,7 @@ class RolloutRunner:
                             steps,
                         )
                     step = {
-                        **({"frame": frame} if frames else {"stood": stand(frame)}),
+                        "frame": frame,
                         "candidate_ref": choice.candidate_ref,
                         "forced": not branching,
                     }
@@ -290,7 +293,6 @@ class RolloutRunner:
                             active_macro = {
                                 "steps": pending_steps,
                                 "old_log_prob": 0.0,
-                                "old_value": float(choice.value),
                                 "reward": 0.0,
                                 "phase": frame["public"]["phase"],
                             }
@@ -308,20 +310,10 @@ class RolloutRunner:
             trace["status"] = "unresolved" if isinstance(exc, TimeoutError) else "error"
             trace["error"] = str(exc)
         trace["ledger"] = ledger.state_dict()
-        if not frames:
-            trace["climb"] = climbed(
-                [step["stood"] for macro in trace["macros"] for step in macro["steps"]]
-                + [action["stood"] for action in trace["environment_actions"]])
         if recorder:
             # The acts whose boss fell; the last act is passed by winning the run.
             passed = set(ledger.bosses) | ({3} if ledger.victory_paid else set())
             trace["combats"] = recorder.close(trace["status"], trace.get("victory"), passed)
-        if trace["status"] == "complete":
-            future = 0.0
-            for macro in reversed(trace["macros"]):
-                future += macro["reward"]
-                macro["return"] = future
-                macro["advantage"] = future - macro["old_value"]
         return trace
 
 
@@ -333,120 +325,32 @@ def write_run(path, trace):
     temporary.replace(path)
 
 
-def play(engine, runner, job, *, sample=True, policy=None, save=True):
+def play(engine, runner, job, *, sample=True, policy=None):
     """One job of a round: a run, written beside its journal and the fights it
-    recorded. Returns the run. Without `save` only the fights are written, and a run
-    that did not finish, for whoever looks into why; the run then keeps no frames."""
+    recorded. Returns the run."""
     character, seed, path = job
     trace = runner.run(
         engine,
         character,
         seed,
         sample=sample,
-        journal=path.with_suffix(".jsonl") if save else None,
+        journal=path.with_suffix(".jsonl"),
         combats=path.with_suffix(".combats.jsonl.gz"),
-        frames=save,
         _policy=policy,
     )
-    if save or trace["status"] != "complete":
-        write_run(path, trace)
+    write_run(path, trace)
     return trace
 
 
-class _InferenceQueue:
-    """Engine threads wait here; the collecting thread owns all GPU execution."""
+def collect_round(samplers, runner, seeds, directory, on_run=None, *, sample=True):
+    """Freeze the assigned queue before running it; any failure blocks what follows.
 
-    def __init__(self, runner):
-        self.runner = runner
-        self.requests = queue.Queue()
-        self.lock = threading.Lock()
-        self.closed = False
-
-    def policy(self):
-        session = SessionPolicy(
-            self.runner.model, self.runner.vocabulary, version=self.runner.version
-        )
-        owner = self
-
-        class QueuedPolicy:
-            def reset(self):
-                session.reset()
-
-            def choose(self, frame, *, sample=True):
-                result = Future()
-                with owner.lock:
-                    if owner.closed:
-                        raise RuntimeError("Rollout inference queue closed")
-                    owner.requests.put((session, frame, sample, result))
-                return result.result()
-
-        return QueuedPolicy()
-
-    def process(self, workers):
-        try:
-            first = self.requests.get(timeout=0.01)
-        except queue.Empty:
-            return
-        requests = [first]
-        # Briefly coalesce ready decisions, without waiting for every engine.
-        deadline = time.monotonic() + 0.002
-        while len(requests) < workers:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                requests.append(self.requests.get(timeout=remaining))
-            except queue.Empty:
-                break
-        try:
-            if len({r[2] for r in requests}) != 1:
-                raise ValueError("A rollout batch cannot mix sampling and evaluation")
-            with (
-                torch.no_grad(),
-                precision_context(self.runner.model, self.runner.precision),
-            ):
-                choices = choose_batch(
-                    [r[0] for r in requests], [r[1] for r in requests], sample=first[2],
-                    temperature=self.runner.temperature,
-                )
-            for request, choice in zip(requests, choices):
-                request[3].set_result(choice)
-        except BaseException as exc:
-            for request in requests:
-                request[3].set_exception(exc)
-            raise
-
-    def close(self):
-        with self.lock:
-            self.closed = True
-            while True:
-                try:
-                    request = self.requests.get_nowait()
-                except queue.Empty:
-                    break
-                request[3].set_exception(RuntimeError("Rollout inference queue closed"))
-
-
-def collect_round(
-    engine_factory, runner, seeds, directory, on_run=None, *, workers=1, samplers=None, sample=True,
-    save=True,
-):
-    """Freeze the assigned queue before running it; any failure blocks the update.
-
-    `workers` engines run at a time, each run in an engine of its own. With
-    `samplers` (`sampling.Samplers`) the round is played by their processes and
-    engines instead, and this process only runs the network.
-
-    Returns where the runs were written. Without `save` they are not: a round its
-    sampling processes hand over in memory (`samplers.runs()`) is gigabytes on disk
-    that nothing reads again. Only the fights of each run are written then, and the
-    runs that did not finish.
+    The round is played by the engines of `samplers` (`sampling.Samplers`), each run
+    in an engine of its own, while this process only runs the network. Returns where
+    the runs were written, in the order of the jobs: every run beside its journal and
+    the fights it recorded.
     """
-    if not save and not samplers:
-        raise ValueError("Only sampling processes hand a round over without writing it")
     counts = {c: len(seeds.get(c, [])) for c in CHARACTERS}
-    if type(workers) is not int or workers < 1:
-        raise ValueError("Rollout workers must be a positive integer")
     if len(set(counts.values())) != 1 or not all(counts.values()):
         raise ValueError("Allocate equal nonzero run counts to all five characters")
     directory = Path(directory)
@@ -468,50 +372,10 @@ def collect_round(
         for character in CHARACTERS
         for i, seed in enumerate(seeds[character])
     ]
-    paths = [path for _, _, path in jobs]
-    broker = _InferenceQueue(runner) if workers > 1 and not samplers else None
-
-    # How every run ended, in the order of the jobs.
-    statuses = {}
-
-    def collect(job):
-        with engine_factory() as engine:
-            run = play(engine, runner, job, sample=sample, policy=broker.policy() if broker else None)
-        statuses[job[2]] = run["status"]
-        return run["character"]
-
-    if samplers:
-        played = samplers.collect(runner, jobs, sample=sample, on_run=on_run, save=save)
-        statuses = {path: run["status"] for path, run in zip(paths, played)}
-    elif broker is None:
-        for completed, job in enumerate(jobs, 1):
-            character = collect(job)
-            if on_run:
-                on_run(character, completed, len(jobs))
-    else:
-        runner.model.eval()
-        with ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="engine"
-        ) as pool:
-            pending = {pool.submit(collect, job) for job in jobs}
-            completed = 0
-            try:
-                while pending:
-                    broker.process(workers)
-                    for future in tuple(pending):
-                        if future.done():
-                            character = future.result()
-                            pending.remove(future)
-                            completed += 1
-                            if on_run:
-                                on_run(character, completed, len(jobs))
-            finally:
-                broker.close()
-                for future in pending:
-                    future.cancel()
-    failures = [str(p) for p in paths if statuses[p] != "complete"]
+    played = samplers.collect(runner, jobs, sample=sample, on_run=on_run)
+    failures = [str(path) for (_, _, path), run in zip(jobs, played) if run["status"] != "complete"]
     if failures and sample:
         raise ProtocolError(
-            f"Round incomplete; no PPO update is permitted. Inspect: {failures}"
+            f"Round incomplete; a sampled round must finish every run. Inspect: {failures}"
         )
-    return paths if save else []
+    return [path for _, _, path in jobs]
