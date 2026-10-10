@@ -23,7 +23,7 @@ Mod 同时提供实时控制桥接。检查点的训练、恢复与版本要求�
 
 ```bash
 python -m model --device cuda play-steam \
-  --checkpoint runs/ppo/current --bridge-dir "$RECORDING_DIR/bridge"
+  --checkpoint runs/bootstrap/current --bridge-dir "$RECORDING_DIR/bridge"
 ```
 
 控制端在 `bridge/request.json` 写入带唯一 ID 的请求，游戏主线程响应到 `response.json`。`observe` 读取状态，`execute` 提交动作，`advance` 推进无决策的 UI。执行前再次比对状态和合法动作；每个 token 只执行一次。Python 进程退出后不会继续发送动作。

@@ -2,7 +2,7 @@
 
 基于玩家公开信息，为《杀戮尖塔 2》训练覆盖整局的策略，目标是提高**五角色 A0 平均整局通关率**并接管 Steam 游戏。当前适配游戏 **0.111.0**。
 
-主策略先用摘要锚点及求解器示范做行为克隆，再自主采样。当前已有 BC、基础 MC PPO、公开历史、战斗结果记录和 Steam 桥接；结果分布、本幕通过势 Φ、两路优势及冻结 BC 参考 KL 尚未接入。设计见 [ARCHITECTURE](ARCHITECTURE.md)，术语见 [CONTEXT](CONTEXT.md)。
+主策略先用摘要锚点及求解器示范做行为克隆，再自主采样。当前已有 BC、多进程采样与评估、公开历史、战斗结果记录和 Steam 桥接；学生状态的求解器战斗标签、胜率模型和优势加权回归尚未接入。设计见 [ARCHITECTURE](ARCHITECTURE.md)，术语见 [CONTEXT](CONTEXT.md)。
 
 ## 从这里开始
 
@@ -20,7 +20,7 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| [model/](model/README.md) | 公开输入、主策略、控制器、BC／PPO、检查点、Steam 控制端和训练监测 |
+| [model/](model/README.md) | 公开输入、主策略、控制器、BC、采样与评估、检查点、Steam 控制端和训练监测 |
 | [spire_codex_data/](spire_codex_data/README.md) | 公开对局下载、来源审计、摘要账本、锚点生成、刷新和导出 |
 | [combat_outcome/](combat_outcome/README.md) | 当前入场标量结果模型及学生战斗／中途帧记录 |
 | [combat_solver_cli/](combat_solver_cli/README.md) | 第三方求解器 worker、引擎客户端和独立轨迹复验 |
@@ -87,4 +87,4 @@ python -m model --device cpu smoke --output /tmp/spire-smoke
 
 ## 公开对局数据
 
-[spire_codex_data](spire_codex_data/README.md) 使用 `.run` 摘要生成独立监督样本；操作回放只用于来源审计和核对。这些示范用于 BC，不是策略自行采集的 PPO 经验，也不构成连续通关证明。
+[spire_codex_data](spire_codex_data/README.md) 使用 `.run` 摘要生成独立监督样本；操作回放只用于来源审计和核对。这些示范用于 BC，不是策略自行采集的对局，也不构成连续通关证明。

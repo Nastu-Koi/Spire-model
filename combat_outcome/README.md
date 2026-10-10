@@ -28,7 +28,7 @@
 对局循环（`model collect`、`evaluate`、`train` 的采样）按引擎的事件划分战斗：`encounter_started` 给出遭遇，`encounter_completed` 确认获胜，战斗中死亡是这场的失败。入场状态取战斗的第一个决策，结束 HP 取获胜后的第一个决策；打赢最后一场 Boss 后没有下一帧，结束 HP 从对局状态读取。超时、步数上限或引擎出错时正在打的那一场不成为标签，计入轨迹的 `combats.unfinished`；轨迹的 `combats` 另有胜负场数和各幕结果，胜场数等于引擎确认的遭遇数。对局结束、各幕结果确定之后才写出这一局的战斗。
 
 ```bash
-python -m combat_outcome.data runs/ppo      # 按来源、策略、角色、难度、幕、战斗类型和胜负统计覆盖
+python -m combat_outcome.data runs/collect      # 按来源、策略、角色、难度、幕、战斗类型和胜负统计覆盖
 ```
 
 `combat_outcome.data.fights(<文件或目录>)` 逐场给出标签行和它的帧，两个来源相同。
@@ -66,7 +66,7 @@ python -m combat_outcome.train data/anchors/combat-outcomes.jsonl.gz --save runs
 以下命令读取采样目录里已有的战斗标签；训练入口本身不采样。现有网络只用每场战斗的入场输入，`frames` 留给结果分布使用。
 
 ```bash
-python -m combat_outcome.train runs/ppo --pretrained runs/combat-outcome --save runs/combat-outcome-2
+python -m combat_outcome.train runs/collect --pretrained runs/combat-outcome --save runs/combat-outcome-2
 ```
 
 `--pretrained` 从保存的模型继续，沿用它的词表和配置；数据可以是单个标签文件，也可以是目录（递归读取其中名字以 `combats.jsonl`、`combats.jsonl.gz` 结尾的文件和 `combat-outcomes.jsonl.gz`）。报告的 `policies` 列出这些标签出自哪些策略。续训和推理都拒绝词表未登记的遭遇，错误会列出对应 ID；需要用包含这些 ID 的静态目录重新初始化，不能用 `--catalog` 改写已有检查点的词表。

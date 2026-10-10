@@ -10,7 +10,7 @@ can do, a policy's what that policy can do: the actor is part of every row.
 Entities stay compressed in memory and are unpacked a batch at a time, so a full
 export fits.
 
-python -m combat_outcome.data runs/ppo      # coverage of the labels under a directory
+python -m combat_outcome.data runs/collect      # coverage of the labels under a directory
 """
 
 import argparse
