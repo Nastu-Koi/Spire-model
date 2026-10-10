@@ -225,8 +225,23 @@ class Learner:
         self.policy_version += 1
         return metrics
 
+    def _until(self, logicals, limit):
+        """The logical batches of `logicals` while the learner has made fewer than
+        `limit` updates in all; the stream is closed where it stops."""
+        iterator = iter(logicals)
+        try:
+            while self.updates < limit:
+                try:
+                    logical = next(iterator)
+                except StopIteration:
+                    return
+                yield logical
+        finally:
+            if hasattr(logicals, "close"):
+                logicals.close()
+
     def bootstrap(self, runs, epochs=1, on_epoch=None, window_shards=8, *, on_update=None,
-                  include_held_out=False):
+                  include_held_out=False, max_updates=None):
         """Behavior cloning. `runs` is a list held in memory, or RunShards, which are
         read `window_shards` at a time: the order of shards and the samples of each
         window are shuffled, and weights stay normalized over the whole training part.
@@ -235,9 +250,16 @@ class Learner:
         the loader never reads their runs. Every epoch's metrics count what was left
         out (`held_out`), what was trained on (`training`) and the macro-actions the
         loader delivered (`samples`), which is the training part's count. A schedule
-        with a decay stops once it is spent."""
+        with a decay stops once it is spent.
+
+        `max_updates` stops after that many updates of this call, in the middle of an
+        epoch if it comes to that: a probe of a setting over a fixed number of updates.
+        What was done of the last epoch is reported, and handed to `on_epoch`, as an
+        epoch, marked with `update_limit`."""
         if epochs is not None and epochs < 1:
             raise ValueError("Bootstrap needs at least one epoch")
+        if max_updates is not None and max_updates < 1:
+            raise ValueError("An update limit is at least one update")
         if self.scheduler.exhausted:
             raise ValueError("The decay has finished; this checkpoint is final")
         if include_held_out:
@@ -268,16 +290,20 @@ class Learner:
                 random.shuffle(items)
                 return batches(items, self.vocabulary, self.config)
 
+        limit = None if max_updates is None else self.updates + max_updates
         metrics = []
         for epoch in count(1):
             metrics.append(dict(self._optimize(
-                logicals(), total=total,
+                logicals() if limit is None else self._until(logicals(), limit), total=total,
                 on_update=(lambda metrics: on_update(metrics, epoch=epoch, stage="bootstrap"))
                 if on_update else None), **coverage))
+            limited = limit is not None and self.updates >= limit
+            if limited:
+                metrics[-1]["update_limit"] = max_updates
             self.policy_version += 1
             if on_epoch:
                 on_epoch(epoch, metrics[-1])
-            if self.scheduler.exhausted or (epochs is not None and epoch >= epochs):
+            if self.scheduler.exhausted or limited or (epochs is not None and epoch >= epochs):
                 break
             if epochs is None:
                 metrics.clear()

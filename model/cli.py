@@ -183,6 +183,10 @@ def parser():
                    help="Finish BC from the given current checkpoint: decay every rate linearly "
                         "to zero over this many updates, then stop")
     x.add_argument("--precision", choices=["no", "bf16"], default="bf16")
+    x.add_argument("--max-updates", type=int,
+                   help="Stop after this many updates of this run and save the checkpoint, in the "
+                        "middle of an epoch if it comes to that: a probe of a setting over a fixed "
+                        "number of updates. What was done of the last epoch is saved as an epoch")
     x.add_argument("--include-heldout", action="store_true",
                    help="Train on the held-out seed groups as well; by default they are "
                         "skipped and kept for NLL comparisons (heldout-nll)")
@@ -539,6 +543,8 @@ def main(argv=None):
                 raise ValueError("Bootstrap needs at least one epoch")
             if args.decay_updates < 0:
                 raise ValueError("Decay updates must be non-negative")
+            if args.max_updates is not None and args.max_updates < 1:
+                raise ValueError("--max-updates is at least one update")
             if args.decay_updates and (not args.checkpoint or args.weights_only):
                 raise ValueError("--decay-updates continues a checkpoint's optimizer: "
                                  "pass its current checkpoint without --weights-only")
@@ -638,7 +644,8 @@ def main(argv=None):
 
             history.status("updating", round=start_epoch + 1, updates=learner.updates)
             learner.bootstrap(runs, args.epochs, on_epoch=epoch_done, window_shards=args.window_shards,
-                              on_update=update_done, include_held_out=args.include_heldout)
+                              on_update=update_done, include_held_out=args.include_heldout,
+                              max_updates=args.max_updates)
             history.status("completed", round=start_epoch + completed)
         elif args.command == "heldout-nll":
             runs, _ = _dataset(args.data)
