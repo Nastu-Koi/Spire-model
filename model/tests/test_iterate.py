@@ -3,11 +3,15 @@ a run that was cut off goes on from the step it was in."""
 
 import gzip
 import json
+import os
+import signal
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch._dynamo
 
 import model
 from model import advantage, awr
@@ -17,7 +21,7 @@ from model.data import RunShards
 from model.dataset_index import read_index
 from model.history import TrainingHistory
 from model.independent import import_samples
-from model.iterate import Command, Driver, Settings, canonical, round_seeds, seeds_of
+from model.iterate import COMPILED_VARIANTS, Command, Driver, Settings, canonical, round_seeds, seeds_of
 from model.protocol import CHARACTERS, ProtocolError
 from model.tests import journeys
 from model.tests.test_student_share import POLICY, rows
@@ -207,6 +211,8 @@ def test_two_iterations_sample_label_value_weigh_update_and_evaluate(world):
     assert "eval_win_rate" not in history[0]["metrics"]
     assert read(world.output / "status.json")["state"] == "completed"
     assert not (world.output / "interrupted").exists()
+    # A process that samples, values and updates in turn may compile each way of running its layers.
+    assert torch._dynamo.config.recompile_limit >= COMPILED_VARIANTS == 64
 
 
 def test_a_run_goes_on_from_the_step_it_was_cut_off_in(world):
@@ -336,6 +342,30 @@ def test_labels_made_in_the_background_enter_the_next_update(world):
     with pytest.raises(ProtocolError, match="labelling of round 2 failed"):
         driver(world, failing).run(3)
     assert failing.calls == ["run", "run"]
+
+
+def test_a_request_to_stop_ends_the_step_under_way_and_what_it_started(world, monkeypatch):
+    started = []
+
+    def launch(command, log):
+        started.append(Command(command, log))
+        return started[-1]
+
+    monkeypatch.setattr(Driver, "label_command", lambda self, iteration: [
+        sys.executable, "-c", "import time; time.sleep(60)"])
+    threading.Timer(1.5, os.kill, (os.getpid(), signal.SIGTERM)).start()
+    before = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(KeyboardInterrupt):
+        driver(world, launch).run(1)
+    # The solver's command went with the step, and the output says where it stopped.
+    assert len(started) == 1 and started[0].process.poll() is not None
+    status = read(world.output / "status.json")
+    assert (status["state"], status["round"], status["step"]) == ("interrupted", 0, "labels")
+    assert signal.getsignal(signal.SIGTERM) is before
+    # The round it had sampled stands for the run that goes on.
+    assert set(read(world.output / "state.json")["iterations"]["0"]) == {"settings", "sample"}
+    monkeypatch.undo()
+    assert driver(world).run(1)["iterations"]["0"]["complete"]
 
 
 def test_the_command_line_runs_the_iterations(world, monkeypatch, capsys):
