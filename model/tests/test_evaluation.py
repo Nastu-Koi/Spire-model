@@ -1,18 +1,24 @@
-"""Difficulty, evaluation reports and the train/validation boundary."""
+"""Difficulty, evaluation reports, paired comparisons and the held-out boundary."""
 
+import gzip
+import itertools
 import json
 
 import pytest
 
 from model.cli import main, vocabulary_for
 from model.config import ModelConfig, TrainConfig
+from model.data import HELDOUT_FRACTION, RunShards, extent, held_out, split_held_out
+from model.dataset_index import HEADER, index_row
+from model.evaluation import evaluate_runs, nll_report, sign_test, wilson_interval
+from model.loader import stream
 from model.model import PolicyNetwork
 from model.protocol import CHARACTERS
 from model.representation import observation
 from model.rollout import RolloutRunner, write_run
 from model.seeds import validate_evaluation_seeds
 from model.testing import SyntheticEngine, demonstration
-from model.trainer import evaluate_runs
+from model.trainer import Learner
 from spire_codex_data.sources import split_group
 
 
@@ -26,6 +32,13 @@ def test_unfinished_runs_are_not_wins():
     assert report["equal_character_completion_rate"] == pytest.approx(0.1)
     assert report["comparable"] is False and report["ascensions"] == [10]
     assert report["characters"]["Silent"]["errors_or_unresolved"] == 9
+    # The five characters pooled, with the uncertainty of the pooled rates.
+    pooled = report["pooled"]
+    assert (pooled["attempts"], pooled["wins"], pooled["win_rate"]) == (50, 5, 0.1)
+    assert pooled["wilson_95"] == wilson_interval(5, 50) == report["characters"]["Silent"]["wilson_95"] and 0.1 in [
+        round(x, 3) for x in pooled["wilson_95"]] or pooled["wilson_95"][0] < 0.1 < pooled["wilson_95"][1]
+    assert pooled["acts_passed"] == [0, 0, 5] and pooled["act_pass_wilson_95"][2] == pooled["wilson_95"]
+    assert report["characters"]["Silent"]["act_pass_wilson_95"] == [wilson_interval(0, 10)] * 2 + [wilson_interval(1, 10)]
     finished = evaluate_runs([dict(r, status="complete") for r in runs])
     assert finished["comparable"] is True
     assert finished["equal_character_win_rate"] == finished["equal_character_completed_win_rate"]
@@ -157,3 +170,160 @@ def test_an_evaluation_seed_is_refused_however_training_recorded_it():
     for known in ("SEED0", split_group("SEED0"), split_group("seedo")):
         with pytest.raises(ValueError, match="overlaps"):
             validate_evaluation_seeds(queue, {"training_seeds": [known]})
+
+
+def held_out_seed(prefix, start=0):
+    """A seed named `<prefix>-<n>` that the fixed rule holds out."""
+    return next(f"{prefix}-{n}" for n in itertools.count(start)
+                if held_out({"seed": f"{prefix}-{n}", "run_id": ""}))
+
+
+def test_the_held_out_side_is_a_function_of_the_seed_alone():
+    seed = held_out_seed("held")
+    # Every run and fragment of a seed falls on the same side, however it is stored.
+    assert held_out({"seed": seed, "run_id": "a"}) and held_out({"seed": seed, "run_id": "b"})
+    assert held_out({"run_id": seed})  # a run without a seed is keyed by its identity
+    assert not held_out({"seed": "kept", "run_id": "a"}) and held_out({"seed": "kept", "run_id": "a"}, 1.0)
+    # About one seed in fifty, whatever else the data set holds and in whatever order.
+    seeds = [f"seed-{i}" for i in range(20000)]
+    held = [s for s in seeds if held_out({"seed": s, "run_id": s})]
+    assert 330 < len(held) < 470 and HELDOUT_FRACTION == 0.02
+    assert held == [s for s in reversed(seeds) if held_out({"seed": s, "run_id": s})][::-1]
+    training, part = split_held_out([{"seed": s, "run_id": s} for s in seeds])
+    assert [r["seed"] for r in part] == held and len(training) + len(part) == len(seeds)
+
+
+def sharded(directory, runs, per_shard=2):
+    """`runs` written as gzip shards of `per_shard` runs with an index, as an import does."""
+    rows = []
+    for number, start in enumerate(range(0, len(runs), per_shard)):
+        name = f"{number}.jsonl.gz"
+        with gzip.open(directory / name, "wt") as out:
+            for line, run in enumerate(runs[start:start + per_shard]):
+                out.write(json.dumps(run) + "\n")
+                rows.append(index_row(run, name, line))
+    with gzip.open(directory / "index.jsonl.gz", "wt") as out:
+        out.write(json.dumps(HEADER) + "\n")
+        out.writelines(json.dumps(row) + "\n" for row in rows)
+    return RunShards(directory)
+
+
+def test_bootstrap_leaves_the_held_out_seeds_out_and_counts_them(tmp_path):
+    config = ModelConfig.tiny()
+    kept = [demonstration(c, "kept", 4, 2) for c in CHARACTERS]
+    held = [demonstration(c, held_out_seed("held"), 4, 2) for c in CHARACTERS]
+    runs = kept + held
+    vocabulary = vocabulary_for(runs, config)
+    training = TrainConfig(precision="no", loader_workers=0, logical_batch_size=4,
+                           token_buckets=[32, 64], action_buckets=[8, 16])
+    metrics = Learner(PolicyNetwork(config), vocabulary, training).bootstrap(runs, epochs=1)[0]
+    assert metrics["held_out"] == {"fraction": HELDOUT_FRACTION, **extent(held)}
+    assert metrics["training"] == extent(kept) and extent(held)["macros"] > 0
+    # The loader delivered the training part and nothing else.
+    assert metrics["samples"] == extent(kept)["macros"] == extent(runs)["macros"] - extent(held)["macros"]
+    everything = Learner(PolicyNetwork(config), vocabulary, training).bootstrap(
+        runs, epochs=1, include_held_out=True)[0]
+    assert everything["samples"] == extent(runs)["macros"]
+    assert everything["held_out"] == {"fraction": 0.0, "groups": 0, "macros": 0, "seeds": 0}
+    # Sharded data: a held-out run shares its shard with trained runs and is still skipped.
+    shards = sharded(tmp_path, [run for pair in zip(kept, held) for run in pair])
+    part, rest = shards.split()
+    assert len(part) == len(rest) == 5 and rest.seeds == {held[0]["seed"]} and not part.seeds & rest.seeds
+    assert {row["shard"] for row in part.rows} == {row["shard"] for row in rest.rows}
+    streamed = Learner(PolicyNetwork(config), vocabulary, training).bootstrap(shards, epochs=1, window_shards=2)[0]
+    assert streamed["samples"] == streamed["training"]["macros"] == part.macros == shards.macros - rest.macros
+    assert streamed["held_out"] == {"fraction": HELDOUT_FRACTION, **extent(rest)}
+    delivered = {item.run_id for logical in stream(part, vocabulary, training, window_shards=2, shuffle=False)
+                 for items, _ in logical for item in items}
+    assert delivered == part.identities and not delivered & rest.identities
+
+
+def test_held_out_nll_is_reported_by_character_and_phase(tmp_path, capsys):
+    data = tmp_path / "data"
+    for c in CHARACTERS:
+        write_run(data / f"{c}-kept.json", demonstration(c, "kept", 4, 2))
+        write_run(data / f"{c}-held.json", demonstration(c, held_out_seed("held"), 4, 2))
+    assert main(["bootstrap", "--data", str(data), "--output", str(tmp_path / "bc"),
+                 "--tiny", "--precision", "no", "--epochs", "1"]) == 0
+    capsys.readouterr()
+    record = json.loads((tmp_path / "bc" / "history.jsonl").read_text())
+    assert record["training_runs"] == 5 and record["metrics"]["held_out"]["groups"] == 5
+    assert record["metrics"]["samples"] == record["metrics"]["training"]["macros"]
+    progress = json.loads((tmp_path / "bc" / "current" / "manifest.json").read_text())["progress"]
+    assert progress["held_out"] == record["metrics"]["held_out"]
+    assert main(["heldout-nll", "--data", str(data), "--checkpoint", str(tmp_path / "bc" / "current")]) == 0
+    report = json.loads(capsys.readouterr().out)
+    held = [demonstration(c, held_out_seed("held"), 4, 2) for c in CHARACTERS]
+    assert report["held_out"] == {"fraction": HELDOUT_FRACTION, **extent(held), "of": {"groups": 10, "macros": 2 * extent(held)["macros"], "seeds": 2}}
+    assert report["all"]["macros"] == extent(held)["macros"] and set(report["characters"]) == set(CHARACTERS)
+    for name, group in report["groups"].items():
+        assert name.split("/")[0] in CHARACTERS and group["nll_per_branch"] == pytest.approx(group["nll"] / group["branches"])
+        assert group["nll_per_macro"] == pytest.approx(group["nll"] / group["macros"])
+    assert report["equal_group_nll_per_macro"] == pytest.approx(
+        sum(g["nll_per_macro"] for g in report["groups"].values()) / len(report["groups"]))
+    assert "a0" not in report and report["policy_version"] == 1
+
+
+def test_nll_tables_follow_the_training_weighting():
+    groups = {"Ironclad/combat": {"nll": 4.0, "branches": 8, "macros": 2, "nll_per_branch": 0.5},
+              "Ironclad/map": {"nll": 1.0, "branches": 1, "macros": 1, "nll_per_branch": 1.0},
+              "Silent/combat": {"nll": 6.0, "branches": 3, "macros": 3, "nll_per_branch": 2.0},
+              "A0/Silent/combat": {"nll": 2.0, "branches": 1, "macros": 1, "nll_per_branch": 2.0}}
+    report = nll_report(groups)
+    assert report["all"] == {"nll": 11.0, "macros": 6, "branches": 12, "nll_per_macro": 11 / 6, "nll_per_branch": 11 / 12}
+    assert report["characters"]["Ironclad"]["nll_per_macro"] == 5 / 3 and report["phases"]["combat"]["macros"] == 5
+    # Every group weighs the same, as in the training loss.
+    assert report["equal_group_nll_per_macro"] == pytest.approx((2.0 + 1.0 + 2.0) / 3)
+    assert report["equal_group_nll_per_branch"] == pytest.approx((0.5 + 1.0 + 2.0) / 3)
+    assert set(report["a0"]["groups"]) == {"Silent/combat"} and report["a0"]["all"]["macros"] == 1
+
+
+def test_sign_test_counts_only_the_pairs_that_disagree():
+    assert sign_test([1] * 8, [0] * 8) == {"pairs": 8, "first": 8, "second": 0, "only_first": 8,
+                                           "only_second": 0, "p_value": 2 / 256}
+    assert sign_test([0] * 8, [1] * 8)["p_value"] == sign_test([1] * 8, [0] * 8)["p_value"]
+    assert sign_test([1, 0, 1], [1, 0, 1]) == {"pairs": 3, "first": 2, "second": 2, "only_first": 0,
+                                               "only_second": 0, "p_value": 1.0}
+    assert sign_test([1, 1, 0, 0, 1], [0, 1, 1, 0, 1])["p_value"] == 1.0  # one each way
+    assert sign_test([1] * 5 + [0] * 300, [0] * 305)["p_value"] == pytest.approx(0.0625)
+
+
+def test_compare_pairs_two_evaluations_seed_by_seed(tmp_path, capsys):
+    seeds = {c: [f"{c}-{i}" for i in range(3)] for c in CHARACTERS}
+
+    def evaluation(name, won, reached_act_3, unfinished=()):
+        directory = tmp_path / name
+        write_run(directory / "metadata" / "seeds.json", seeds)
+        for c in CHARACTERS:
+            for i in range(3):
+                stops = [(1, 17), (2, 16), (3, 15)] if i in reached_act_3 else [(1, 17), (2, 5)]
+                run = climbing_run(c, stops, victory=i in won)
+                if (c, i) in unfinished:
+                    run = dict(run, status="unresolved", victory=None)
+                write_run(directory / f"{c}-{i}.json", run)
+        return directory
+
+    first = evaluation("first", won={0}, reached_act_3={0, 1})
+    second = evaluation("second", won={0, 1}, reached_act_3={0, 1, 2}, unfinished={("Silent", 2)})
+    assert main(["compare", str(first), str(second), "--head", "1"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    whole, head = report["evaluations"][1]["report"], report["evaluations"][1]["head"]
+    assert whole["pooled"]["wins"] == 10 and whole["comparable"] is False
+    assert head["seeds_per_character"] == 1 and head["report"]["pooled"] == dict(
+        attempts=5, wins=5, win_rate=1.0, wilson_95=wilson_interval(5, 5), acts_passed=[5, 5, 5],
+        act_pass_rates=[1.0, 1.0, 1.0], act_pass_wilson_95=[wilson_interval(5, 5)] * 3)
+    paired = report["paired"]
+    assert paired["pairs"] == 15 and paired["unpaired"] == {"first": 0, "second": 0}
+    assert paired["win"] == {"pairs": 15, "first": 5, "second": 10, "only_first": 0, "only_second": 5, "p_value": 0.0625}
+    # The unfinished run passed nothing: act 1 is lost there, act 2 gained on the other four thirds.
+    assert paired["act_1_passed"] == {"pairs": 15, "first": 15, "second": 14, "only_first": 1, "only_second": 0, "p_value": 1.0}
+    assert paired["act_2_passed"] == {"pairs": 15, "first": 10, "second": 14, "only_first": 0, "only_second": 4, "p_value": 0.125}
+    assert paired["head"]["seeds_per_character"] == 1 and paired["head"]["win"]["pairs"] == 5
+    assert paired["head"]["win"]["p_value"] == 1.0 and paired["head"]["act_2_passed"]["only_second"] == 0
+    # One evaluation reports alone; a missing run is an error, not a silent gap.
+    assert main(["compare", str(first)]) == 0
+    alone = json.loads(capsys.readouterr().out)
+    assert "paired" not in alone and alone["evaluations"][0]["runs"] == 15
+    (first / "Defect-1.json").unlink()
+    assert main(["compare", str(first)]) == 1
+    assert "missing" in capsys.readouterr().err

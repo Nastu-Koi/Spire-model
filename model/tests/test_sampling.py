@@ -21,7 +21,8 @@ from model.rollout import RolloutRunner, collect_round
 from model.sampling import Samplers, _without_frames
 from model.testing import SyntheticEngine, demonstration
 from model.tests.test_encoding import build, duel, logits, map_frame
-from model.trainer import Learner, climb, evaluate_runs
+from model.evaluation import climb, evaluate_runs
+from model.trainer import Learner
 from model.wire import GROUPED, pack, size, unpack
 
 
