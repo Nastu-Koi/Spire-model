@@ -196,7 +196,7 @@ def test_a_sampled_round_is_shards_the_trainer_reads(tmp_path):
     played.reset("Ironclad", "contract", 0)
     assert shards.metadata()["training_engine_contracts"] == [played.contract]
     (window,) = shards.windows(shards=8)
-    items = samples(window, counts=shards.counts)
+    items = samples(window, weights=shards.weights)
     assert len(items) == 20 and {item.source for item in items} == {"rollout"}
     assert all(item.weight == pytest.approx(1 / 20) and item.phase == "combat_play" and item.branches == 1 for item in items)
     # Each stored run is the sampled run: its fights counted, its other decisions scored as stored.

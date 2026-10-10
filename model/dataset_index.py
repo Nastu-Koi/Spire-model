@@ -19,8 +19,32 @@ HEADER = dict(kind="policy_index", control_version=CONTROL_VERSION)
 # What the index says of a sampled run beyond its identity: the buffer keeps the
 # rounds of the last few iterations, and reports count by policy and outcome.
 ROLLOUT_FIELDS = ("policy_version", "policy_digest", "iteration", "victory")
+# The solver's labels on the fights the policy itself walked into are imported as
+# independent samples like the demonstrations, and told apart by their anchor kind:
+# the trainer gives them a share of their groups' weight (`data.group_weights`). The
+# index names the policy whose fights they are, as it names a sampled run's.
+STUDENT_BATTLE = "student_battle"
+STUDENT_FIELDS = ("policy_version", "policy_digest", "iteration")
 # Level 6 packs runs within a few percent of level 9 in a third of the time.
 COMPRESSION = 6
+
+
+def sample_source(run):
+    """What the trainer weighs a run's samples as: `student_battle` for the solver's
+    labels on the policy's own fights, otherwise the run's source (demonstrations are
+    `independent`, sampled runs `rollout`)."""
+    if (run.get("provenance") or {}).get("anchor_kind") == STUDENT_BATTLE:
+        return STUDENT_BATTLE
+    return run.get("source")
+
+
+def row_source(row):
+    """The source of an index row. An index written before sources were recorded
+    holds demonstrations, or a sampled round, which carries its policy fields."""
+    source = row.get("source")
+    if source is None:
+        return "rollout" if "victory" in row else "independent"
+    return source
 
 
 def read_index(directory):
@@ -47,10 +71,13 @@ def index_row(run, shard=None, line=None, phases=None):
     shard and line are left out when the caller does not know them yet."""
     if phases is None:
         phases = Counter(m["phase"] for m in policy_macros(run))
+    source = sample_source(run)
     row = dict(run_id=run["run_id"], seed=run["seed"], character=run["character"],
-               phases=dict(phases), contract=fingerprint(run["contract"]))
+               phases=dict(phases), contract=fingerprint(run["contract"]), source=source)
     if run.get("source") == "rollout":
         row.update({name: run.get(name) for name in ROLLOUT_FIELDS})
+    if source == STUDENT_BATTLE:
+        row.update({name: run["provenance"].get(name) for name in STUDENT_FIELDS})
     if shard is not None:
         row.update(shard=shard, line=line)
     return row

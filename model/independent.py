@@ -15,8 +15,8 @@ from pathlib import Path
 
 from .control import controller_for
 from .data import validate_run
-from .dataset_index import ShardWriter, member
-from .protocol import CHARACTERS, SCHEMA, ProtocolError, clean_frame, fingerprint, segment_key, validate_frame
+from .dataset_index import STUDENT_BATTLE, STUDENT_FIELDS, ShardWriter, index_row, member
+from .protocol import CHARACTERS, SCHEMA, ProtocolError, clean_frame, segment_key, validate_frame
 
 SAMPLE_SCHEMA = "spire-independent-decisions-v1"
 IMPORT_VERSION = "independent-import-v6"
@@ -62,12 +62,20 @@ def step_for(row):
 def convert_group(rows):
     """One supervised run from the ordered samples of a group."""
     metadata = rows[0]["metadata"]
-    for key in ("character", "ascension", "teacher_visibility", "split_group", "contract"):
+    for key in ("character", "ascension", "teacher_visibility", "split_group", "contract", "anchor_kind"):
         require(
             all(r["metadata"].get(key) == metadata.get(key) for r in rows),
             f"Sample group mixes {key}",
         )
     character = {c.upper(): c for c in CHARACTERS}.get(str(metadata["character"]).upper())
+    # A student battle is the solver's play from a fight entry of the policy's own run:
+    # the samples name that policy, which the index and the weights read.
+    student = {}
+    if metadata.get("anchor_kind") == STUDENT_BATTLE:
+        student = {name: metadata.get(name) for name in STUDENT_FIELDS}
+        require(type(student["policy_version"]) is int and type(student["iteration"]) is int
+                and isinstance(student["policy_digest"], str) and student["policy_digest"],
+                "A student battle names the policy version, digest and iteration of its run")
     macros, automatic, environment = [], 0, []
     entries = ((row, step_for(row)) for row in rows)
     for _, members in groupby(entries, key=lambda pair: segment_key(pair[1]["frame"])):
@@ -110,6 +118,8 @@ def convert_group(rows):
                 # rather than recorded. Kept for reports, never a model input.
                 "source_integrity": metadata.get("source_integrity"),
                 "initialization": metadata.get("initialization"),
+                "anchor_kind": metadata.get("anchor_kind"),
+                **student,
                 "label_sources": dict(Counter(r["metadata"].get("label_source") for r in rows)),
                 "verified_by": dict(Counter(
                     "native_replay" if r["metadata"].get("native_replay_verified") is True
@@ -130,12 +140,11 @@ def convert_lines(batch):
     for group, lines in batch:
         try:
             run = convert_group([json.loads(line) for line in lines])
+            row = index_row(run, phases=Counter(m["phase"] for m in run["macros"]))
             results.append((group, len(lines), {
-                "member": member(run),
-                "run_id": run["run_id"], "seed": run["seed"], "character": run["character"],
-                "phases": dict(Counter(m["phase"] for m in run["macros"])),
-                "contract": run["contract"], "contract_key": fingerprint(run["contract"]),
-                "automatic_steps": run["automatic_steps"]}, None))
+                "member": member(run), "row": row,
+                "run_id": run["run_id"], "character": run["character"], "phases": row["phases"],
+                "contract": run["contract"], "automatic_steps": run["automatic_steps"]}, None))
         except (ProtocolError, ValueError, KeyError, TypeError) as exc:
             results.append((group, len(lines), None, str(exc)))
     return results
@@ -202,9 +211,7 @@ def import_samples(path, output, shard_samples=2000, workers=1):
                     reason = "Duplicate sample group"
                 if reason is None:
                     identities.add(group)
-                    writer.write(run["member"], {
-                        "run_id": run["run_id"], "seed": run["seed"], "character": run["character"],
-                        "phases": run["phases"], "contract": run["contract_key"]}, samples, run["contract"])
+                    writer.write(run["member"], run["row"], samples, run["contract"])
                     counts["accepted_runs"] += 1
                     counts["macros"] += sum(run["phases"].values())
                     counts["automatic_steps"] += run["automatic_steps"]

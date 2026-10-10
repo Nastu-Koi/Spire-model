@@ -225,10 +225,12 @@ class Learner:
             if not counts:
                 raise ValueError("No accepted behavior-cloning samples")
             total = sum(counts.values())
+            # The weights of the whole training part, by (character, phase, source).
+            weights = training.weights
 
             def logicals():
                 return stream(training, self.vocabulary, self.config, window_shards=window_shards,
-                              shuffle=True, counts=counts)
+                              shuffle=True, weights=weights)
         else:
             items = samples(training)
             if not items:
