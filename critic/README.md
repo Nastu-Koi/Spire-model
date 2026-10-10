@@ -6,16 +6,17 @@
 
 一行是策略在战斗以外做的一个决策（`critic-decisions-v1`，`data.py`）：
 
-- 帧：阶段不是 `combat` 的宏动作里第一个有选择的步骤的决策帧；它前面的强制步骤和控制器步骤（宝箱、水晶球、单选事件）不是决策。帧只保留 `public` 与 `legal`，压缩放在内存里，由加载进程按批解析。
+- 帧：战斗之外的宏动作里第一个有选择的步骤的决策帧；它前面的强制步骤和控制器步骤（宝箱、水晶球、单选事件）不是决策。对局标了战斗（宏动作的 `fight`，按引擎的遭遇事件划界）时以它为准，战斗中的选牌属于战斗；更早写出的对局没有这个标记，只把 `combat` 阶段当作战斗。帧只保留 `public` 与 `legal`，压缩放在内存里，由加载进程按批解析。
 - 标签：`win`（这一局是否通关）；`act_passed`（帧所在的幕是否通过：账本 `ledger.bosses` 含该幕，或整局通关）。幕和楼层取自玩家实体。
 - 元信息：seed、角色、幕、楼层、阶段、决策编号、打出这局的策略版本与权重 digest，以及一份状态摘要（HP、最大 HP、金币、卡组／遗物／药水数），后者只给表格基线用。
 
-来源是完整对局（`spire-trajectory-v1`）：每局一个 JSON（`evaluate`／`collect` 写出的目录，`metadata/` 与报告、流水账会被跳过），或每行一局的 `.jsonl`／`.jsonl.gz`。未完成的对局不进数据。以后换成 [工单 15](../.scratch/a0-training-baseline/issues/15-rollout-storage.md) 的采样分片时只改 `data.py` 的读取部分。
+来源是完整对局（`spire-trajectory-v1`），四种写法都读：采样轮（`collect`／`iterate` 写出的 `round-N/`，经索引逐分片读，校验与策略的加载器相同）；缓冲目录（其下已写完的各轮，`--buffer-iterations N` 只取最近 N 次迭代的）；每局一个 JSON 的目录（`evaluate` 写出的，`metadata/` 与报告、流水账会被跳过）；每行一局的 `.jsonl`／`.jsonl.gz`。未完成的对局不进数据。采样轮只保存局外决策的帧，它的行与策略按优势加权的样本一一对应，行里另记宏动作在对局里的序号和迭代号。
 
 划分按 seed 分组，用策略的留出规则（`model.data.held_out`）：一个 seed 的全部决策在同一侧，加数据不改变已有 seed 的归属，留出的 seed 与策略验证集的留出 seed 相同。
 
 ```bash
 python -m critic.data runs/bootstrap-20261008/eval-a0/dev-v8      # 对局数、决策数、按幕／角色／阶段的通关率与过幕率
+python -m critic.data runs/iterate-v1/buffer --buffer-iterations 10      # 缓冲里最近十次迭代的各轮
 ```
 
 ## 网络
@@ -34,6 +35,7 @@ python -m critic.train runs/buffer --pretrained runs/critic/v1 --save runs/criti
 
 - `--checkpoint`：策略检查点，提供词表和（默认）主体初始权重；结构须与配置的 `model` 节一致（`backend`、`compile_blocks` 等运行时项除外）。
 - `--pretrained`：从已保存的 critic 继续，沿用其词表与配置，版本号加一；与 `--checkpoint` 二选一。
+- 数据可以是采样轮、缓冲目录或对局目录；`--buffer-iterations N` 只用缓冲里最近 N 次迭代的各轮。
 - 训练范围：默认训练整个主体和头；`--train-blocks N` 只训练顶部 N 个全局层、最终 norm 和头，`--freeze-body` 只训练头（策略表示的线性探针）。不训练的参数不进优化器、不算梯度。
 - 批：按策略的桶与预算打包（`model.batch.collate`、`model.data.microbatches`），一个逻辑批 `logical_batch_size` 个决策，超出预算时拆成几份、梯度累加后更新一次；打包在 `loader_workers` 个 fork 出的进程里做。
 - 优化器照策略分组：Transformer 的 Attention／FFN 矩阵用 Muon，四张查找表（符号、字段名、两张关系偏置表）、头和其余张量用 AdamW，各有自己的学习率；线性预热 `warmup_updates` 次更新，之后线性衰减到最后一次更新为 0。
@@ -63,9 +65,32 @@ python -m critic.train runs/buffer --pretrained runs/critic/v1 --save runs/criti
 - Brier、log loss、AUC、预测均值与实际率。
 - 校准表：按幕、按角色（`n`、实际率、预测均值、差），以及按预测概率分十段的可靠性表。
 - 基线（同一划分）：常数基础率；只看幕与楼层的逻辑回归；幕、楼层、角色加状态摘要的逻辑回归。
-- `history`：每轮的训练损失、梯度范数与留出指标。
+- `history`：每轮的训练损失、梯度范数与留出指标；`train.constant_loss` 是只预测训练集基础率时的训练损失，门槛用它衡量训练损失降了多少。
+- 标签不变化的小数据（一轮里没有一局通关）上，逻辑回归基线退化为常数，解释方差与 AUC 为空。
 
-门槛（解释方差与校准的下限）由首次训练结果定，记在工单与规格里，低于门槛时不更新策略。
+## 门槛
+
+critic 在交给策略更新之前要过门槛（`gate.py`，`check(训练报告, Gate(...))`）；[迭代驱动](../model/README.md#迭代采样标签胜率模型与优势加权回归)在不过时跳过这次策略更新并记下没过的项。每一项都在留出 seed 上算，通关与过幕两个头分别算：
+
+| 设置（`Gate` 的字段） | 默认 | 含义 |
+| --- | --- | --- |
+| `min_heldout_seeds` | 200 | 留出对局数的下限；更少时解释方差的差别只是划分噪声 |
+| `min_explained_variance` | 0.10 | 解释方差的下限 |
+| `min_margin_over_baseline` | 0.05 | 解释方差须高出同一划分上“幕 + 楼层”逻辑回归这么多 |
+| `max_overall_gap` | 0.02 | 整体预测均值与实际率之差的上限 |
+| `max_act_gap`、`max_character_gap` | 0.05、0.10 | 按幕、按角色各组的同一差值的上限 |
+| `max_bin_gap`、`min_bin_share` | 0.15、0.05 | 按预测概率分十段，样本占比不低于 `min_bin_share` 的段的差值上限 |
+| `max_memorization_ratio` | 3.0 | 训练损失相对常数基线的下降，不得超过留出 Brier（两个头之和）相对常数基线的改善的这么多倍；训练损失没有下降时不算记忆 |
+
+默认值是首次训练后的建议值，依据与噪声水平记在[工单 18](../.scratch/a0-training-baseline/issues/18-win-probability-critic.md) 的 Comments，待第一轮完整采样数据训练后复核。报告缺少某项所需的量（没跑基线、留出集的结果不变化）时该项算不过。命令行里用 `python -m model iterate --gate min_heldout_seeds=100 --gate …` 逐项改，`--critic-gate off` 只记录不拦。
+
+## 优势
+
+```bash
+python -m critic.advantage runs/iterate-v1/buffer --buffer-iterations 10 --critic runs/iterate-v1/critic/iteration-0003
+```
+
+给每一轮的每个局外决策打分（打包在加载进程里做，与训练相同），V = 2·p_win − 1，沿每局算不折扣的 GAE（`model/advantage.py`：下一个状态是同一局的下一个局外决策，最后一个决策之后是 ±1 的回报），写到轮目录的 `advantages.json.gz`，带 critic 的版本、权重文件摘要与 λ；这个 critic 以这个 λ 打过的轮跳过。分片不改。
 
 ## 接口
 
@@ -90,5 +115,7 @@ scorer.version                                      # 迭代版本号
 | `batches.py` | 按策略的桶与预算打包决策帧 |
 | `model.py` | 网络、保存与加载、`Scorer` |
 | `baselines.py`、`metrics.py` | 同一划分下的基线；解释方差、Brier、AUC 与校准表 |
+| `gate.py` | 交给策略更新之前的门槛 |
+| `advantage.py` | 给缓冲的各轮打分并写优势 |
 | `train.py` | 训练入口 |
 | `tests/` | CPU 可跑的小样本测试 |

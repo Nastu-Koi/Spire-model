@@ -1,6 +1,6 @@
 # 主策略训练与运行
 
-主策略从玩家公开状态选择整局动作，覆盖战斗、地图、商店、事件和奖励。训练入口只有一个：对宏动作做加权 NLL 的行为克隆（BC／Bootstrap）；采样（`collect`）与评估（`evaluate`）共用同一个对局循环。学生状态的求解器战斗标签、胜率模型和优势加权回归按 [训练路线](../ARCHITECTURE.md#训练路线) 后续加入，用的仍是这同一个训练器和加载器。设计见 [ARCHITECTURE](../ARCHITECTURE.md)，数据生成见 [摘要锚点](../spire_codex_data/README.md)。以下命令均在仓库根目录运行。
+主策略从玩家公开状态选择整局动作，覆盖战斗、地图、商店、事件和奖励。训练器只有一个：对宏动作做加权 NLL。行为克隆（BC／Bootstrap，`bootstrap`）用它学示范与求解器标签；迭代（`iterate`）在同一个训练器上再加一路按优势加权的局外样本，并把采样、学生状态的求解器战斗标签、胜率模型续训和评估串起来（见[迭代](#迭代采样标签胜率模型与优势加权回归)）。采样（`collect`）与评估（`evaluate`）共用同一个对局循环。设计见 [ARCHITECTURE](../ARCHITECTURE.md)，数据生成见 [摘要锚点](../spire_codex_data/README.md)。以下命令均在仓库根目录运行。
 
 ## 当前训练安排
 
@@ -18,7 +18,7 @@
 | 读取进程×打包进程 | 4 × 6，共持一个 8 分片窗口 |
 | 全局层编译 | `compile_blocks: true`，每个进程首次前向约一分钟编译 |
 | 参数变化统计 | 每 100 次更新抽样 |
-| 采样温度 | `combat_temperature` 0.3、`other_temperature` 0.7：`collect` 里战斗阶段的决策和其它决策各按自己的温度抽样。温度是策略定义的一部分，记在对局文件和检查点里；评估取最可能动作，不受影响 |
+| 采样温度 | `combat_temperature` 0.3、`other_temperature` 0.7：`collect` 里战斗之内的决策（按引擎的遭遇事件划界，含战斗中的选牌）和其余决策各按自己的温度抽样。温度是策略定义的一部分，记在对局文件和检查点里；评估取最可能动作，不受影响 |
 | 留出集 | 按 seed 的哈希固定留出 2% 的样本组，`bootstrap` 默认跳过，只用 `heldout-nll` 打分；见 [固定留出集](#固定留出集) |
 
 查找表学习率的依据见 [优化器](../ARCHITECTURE.md#优化器与精度)，其余学习率未作筛选。分片窗口只控制内存占用；逻辑批次跨窗口补齐，每轮仅最后一批可不足 512。显存预算触发微批拆分时累积梯度，一个逻辑批次只更新一次。角色×阶段的权重与损失尺度见 [批次与加载](../ARCHITECTURE.md#批次整理与数据加载) 和 [优化器](../ARCHITECTURE.md#优化器与精度)。每个样本带来源（`source`：示范、求解器标签或采样对局）和由索引计数给出的权重；按来源分配份额是索引的事，训练器只按权重求和。
@@ -191,7 +191,7 @@ python -m model --device cuda collect --checkpoint runs/bootstrap/current \
 
 `evaluate` 每局写出对局文件 `<角色>-<序号>.json`（每个宏动作的帧、完整候选、所选动作、`old_log_prob`、阶段和随后支付的奖励，以及整局的账本、每幕结果 `acts`、到达楼层 `climb`、策略版本与权重摘要、数值后端和采样温度）、流水账 `.jsonl`（每个帧与奖励）和战斗记录；汇总时把对局逐局读回，内存里只留一局，评估多少局都不受内存限制。报告除通关率外，还列出各角色通过每一幕的对局数、奖励均值（`mean_score`，即通关率的两倍减一）、平均到达楼层和各次失败止步的楼层；楼层跨幕累计，只统计已完成的对局。
 
-`collect` 按检查点的 `combat_temperature`／`other_temperature` 抽样，每个决策按自己阶段的温度；`collect --config <profile>` 可换成 profile 里的温度，其余设置必须与检查点一致。greedy 的 `evaluate` 记 `temperature: null`，概率按温度 1 记。
+`collect` 按检查点的 `combat_temperature`／`other_temperature` 抽样：一场战斗从引擎的 `encounter_started` 到它打赢后的第一个决策之前，其中的出牌和战斗中的选牌（`card_select`：弃牌、消耗等）都按战斗温度，其余决策按局外温度；`collect --config <profile>` 可换成 profile 里的温度，其余设置必须与检查点一致。greedy 的 `evaluate` 记 `temperature: null`，概率按温度 1 记。
 
 `evaluate` 的报告除通关率外，还列出各角色通过每一幕的对局数、奖励均值（`mean_score`，即通关率的两倍减一）、平均到达楼层和各次失败止步的楼层；楼层跨幕累计，只统计已完成的对局。每角色的通关率和各幕通过率都带 Wilson 95% 区间（`wilson_95`、`act_pass_wilson_95`）；`pooled` 是五角色全部尝试合计的通关数、通关率、各幕通过数与通过率及各自的区间，每角色局数相同时合计率就是五角色平均率。
 
@@ -217,6 +217,7 @@ python -m model compare runs/eval-a runs/eval-b --head 60
 | `<角色>-<序号>.combats.jsonl.gz` | 战斗记录，照旧 |
 | `<角色>-<序号>.saves.jsonl.gz` | 每场战斗入场时的引擎存档，见下 |
 | `metadata/seeds.json` | 种子分配 |
+| `advantages.json.gz` | 局外决策的优势，由[迭代](#迭代采样标签胜率模型与优势加权回归)写在轮目录里；采样本身不产生，分片不因它改动 |
 | `quarantine/<角色>-<序号>.json.gz` | 没打完的对局（超时、引擎出错），`summary.json` 的 `quarantine` 记原因 |
 
 对局（`source: "rollout"`，`iteration` 默认取轮号 N，`--iteration` 可指定）只保留**战斗之外**的决策：每个策略宏动作的帧、完整候选、所选动作、`old_log_prob`、阶段、随后支付的奖励，`fight: null`。战斗里的宏动作——`combat` 阶段和战斗中的 `card_select`（弃牌、消耗等选择）——只记 `phase`、`fight`（这一局的第几场战斗，与 `encounter_id` 的编号相同）、`branches`（有选择的决策数）、`decisions`（决策数）、`old_log_prob` 与 `reward`，不保存帧；`policy_macros`／`samples()` 读到它们时不作训练样本，战斗的训练信号来自求解器标签。战斗的边界由引擎事件给出：`encounter_started` 开始，`encounter_completed` 之后的第一个决策在战斗之外。控制器步骤照旧记在 `environment_actions`。每局另记 `status`、`victory`、`acts`（每幕 `passed`／`died`，没打完时为空）、`ledger`、`climb`、`seed`、角色、难度、策略版本与 digest、按阶段的 `temperature`、`combats` 与 `saves` 的计数。`--journals` 时另写每局的流水账 `.jsonl`（每个帧与奖励，含战斗）。
@@ -224,6 +225,45 @@ python -m model compare runs/eval-a runs/eval-b --head 60
 入场存档：每场战斗的第一个决策（`events` 带 `encounter_started`）时，采样进程让引擎 `write_continue_save` 到临时文件再读回；在房间里时引擎存的是进房前的状态（`anchor_state` 序列化的是已进房的状态，不能用）。每行带 `run_id`、`seed`、角色、难度、`fight`、`combat_index`（`combats` 里对应行的序号）、`encounter_id`、`encounter`、`kind`（normal／elite／boss）、`act`、`floor`、`map_point_type`（normal→monster、elite→elite、boss→boss）、`second_boss`（本幕第二个 Boss）、`from_event`、`result` 和 `save`。`model.saves.anchor_commands(row)` 给出重新进入这场战斗的两条引擎命令（`enter_anchor` → `anchor_room`）：重入的战斗与原战斗的 HP、最大 HP、金币、幕、楼层、卡组（含升级）、遗物、药水和敌人种类相同，敌人的随机 HP 与开局手牌由战斗自己的随机数重抽，与摘要锚点的战斗一样是同一入场状态的另一次战斗。引擎拒绝存档时该行 `save` 为空并带 `error`，`summary.json` 计入 `saves_failed`。事件引发的战斗照存并标 `from_event`，是否可用由求解器标签一侧判断。
 
 内存：采样进程一局内只保留压缩后的帧与存档，一局结束把对局压成分片里的一行交给采集进程追加到当前分片；采集进程不持有对局，每局只留报告用的几个字段。
+
+## 迭代：采样、标签、胜率模型与优势加权回归
+
+`iterate` 把一次策略改进的各步串起来，反复执行；设计与各默认值的依据见 [策略改进](../ARCHITECTURE.md#策略改进)。
+
+```bash
+python -m model --device cuda iterate \
+  --checkpoint runs/bootstrap-20261008/trained-v9-student/current \
+  --demonstrations runs/bootstrap-20261008/imported-potions-1in8 \
+  --output runs/iterate-v1 --iterations 20 --runs-per-character 200 \
+  --workers 44 --engine-root runs/bootstrap-20261008/engine \
+  --exclude-seeds runs/bootstrap-20261008/eval-a0/seeds-*.json \
+  --solver-config runs/bootstrap-20261008/build-potions/config.json \
+  --eval-seeds runs/bootstrap-20261008/eval-a0/seeds-dev-2000.json --eval-runs-per-character 60
+```
+
+一次迭代（编号 N 从 0 起）依次做：
+
+| 步骤 | 做什么 | 写到 |
+| --- | --- | --- |
+| `sample` | 用当前策略按两个温度采样一轮（每角色 `--runs-per-character` 局），对局记本次迭代号与策略版本 | `buffer/round-N/`（[采样轮的格式](#采样轮的格式)），种子在 `seeds/iteration-NNNN.json` |
+| `labels` | 求解器给 `--label-fraction`（默认 0.25）的对局的全部战斗和败局的最后一场出标签，导出并导入（[学生状态的战斗](../spire_codex_data/README.md#学生状态的战斗) 的三条命令，各自作为子进程运行，输出在 `logs/labels-round-N.log`）；`--no-labels` 关掉 | `student/round-N/`、`student-import/round-N/` |
+| `critic` | 胜率模型在缓冲的各轮上续训一轮（第一次从 `--checkpoint` 的权重出发，或用 `--critic` 指定一个已保存的），版本号加一 | `critic/iteration-NNNN/`，训练输出在 `logs/critic-iteration-NNNN.log` |
+| `update` | 用这个 critic 给缓冲的每一轮算优势，再做一遍优势加权回归；critic 不过门槛时跳过并记下没过的项 | `buffer/round-*/advantages.json.gz`；`policy/current` 与 `policy/iteration-NNNN/` |
+| `evaluation` | 每 `--evaluate-every`（默认 5）次迭代，用 `--eval-seeds` 里每角色前 `--eval-runs-per-character` 个种子 greedy 评估，与 `evaluate` 写出同样的对局文件（每局约 30 MB），可交给 `compare`；不给 `--eval-seeds` 就不评估 | `evaluation/iteration-NNNN/`，报告在其中的 `report.json` |
+
+- **缓冲**是 `buffer/` 下最近 `--buffer-iterations`（默认 10）次迭代的各轮；更早的轮留在盘上、不再读。学生战斗的导入累计保留，不随缓冲淘汰：每次更新的监督数据是 `--demonstrations`（最大的放第一个）加此前每一轮的 `student-import/round-*`，份额规则见[多个数据目录与学生战斗的份额](#多个数据目录与学生战斗的份额)。
+- **采样种子**由 `--seed-root` 和迭代号派生（十六位十六进制，每角色等量，同一个根和迭代号总是同一组）；`--exclude-seeds` 列出的种子文件（开发集、测试集）、`--eval-seeds` 和检查点记下的训练种子都被避开，按原样、按游戏读法（O 作 0、I 作 1）和按示范的 `split_group` 三种写法核对。
+- **优势**：每个局外决策 δ = V(s′) − V(s)，最后一个决策 δ = ±1 − V(s)，V = 2·p_win − 1，GAE 的 `--lam`（默认 0.9）、不折扣；s′ 是同一局的下一个局外决策，跨过中间的战斗。文件 `advantages.json.gz` 记来源（critic 的版本与权重摘要、λ）、统计和每局各决策的（宏动作序号、V、A）；同一个 critic、同一个 λ 算过的轮不重算。也可单独运行：`python -m critic.advantage <缓冲或轮目录> --critic <critic 目录>`。
+- **权重与 β**：局外样本的权重 = 它在缓冲里的份额权重 × 批内归一的 exp(A/β)。份额权重是缓冲的每个角色×阶段组等权、组内平分，但单个决策不超过均匀份额的 `--weight-cap` 倍（默认 10，`0` 不设上限）：只出现几次的阶段按上限给，每次更新的摘要里 `capped_groups` 列出被封顶的组。`--beta auto`（默认）对每一批取使有效样本数 (Σw)²/Σw² 不低于 `--ess-share`（默认 0.3）× 这批局外样本数的最小 β，限制在 [`--beta-min`, `--beta-max`]（默认 0.1 到 100）；`--beta <数>` 固定 β；`--beta inf` 不加权。
+- **每次更新**一半是加权的局外样本、一半是示范与求解器标签，各 `logical_batch_size / 2` 个，学习率与日程严格续接检查点。`--updates round`（默认）做新一轮的样本过一遍那么多次更新，样本从整个缓冲里抽；`--updates buffer` 把缓冲过一遍；`--updates <N>` 固定次数。
+- **critic 的门槛**（`critic/gate.py`，数值的来历见 [胜率模型说明](../critic/README.md#门槛)）：`--critic-gate on`（默认）时不过门槛的迭代不更新策略，`state.json` 记下没过的项和各项的实测值；`--critic-gate off` 照常更新，仍记录结果；`--gate 名称=数值` 改单项（可重复）。数据少时（留出对局不足 200 局）默认门槛必然不过，试跑要关掉门槛。critic 的结构与训练设置取 `--critic-config` 指向的 profile 的 `model` 与 `critic` 两节（默认 `configs/rtxpro6000.json`）。
+- **对照**：`--beta inf`（对自己的局外决策做行为克隆）；`--advantage return`（不用 critic：优势 = 本局回报 − 缓冲里同角色对局的平均回报，这时不训练 critic、没有门槛）。
+- **求解器标签的时机**：默认在采样之后、critic 之前做完（本轮的标签进入本次更新）。`--labels-in-background` 让求解器与 critic 续训和策略更新并行，本轮的标签进入下一次迭代的更新；下一次采样或评估开始前会等它结束，求解器不与引擎同时运行。求解器失败时自动重跑一次（已打完的对局直接复用）；仍有对局失败且不超过入选对局的 5% 时继续，否则停下。
+- **记录**：每局对局带策略版本、权重 digest 和迭代号；`policy/` 下每个检查点的 `progress` 记 `iteration`、critic 的版本与目录、优势来源和这次更新的摘要；`state.json` 记每次迭代各步的结果与当时的设置。标准输出每完成一步打印一行 JSON。
+
+断点续跑：重新运行同一条命令（`--iterations` 可以加大）。每一步的结果落盘后才记入 `state.json`，已记入的步骤跳过；被打断的步骤留下的目录移到 `interrupted/`（不删除）后重做，求解器已打完的对局报告直接复用；策略更新已保存而未记入时不会再更新一次。`kill`（SIGTERM）与 Ctrl+C 一样会结束正在进行的步骤及其子进程，`status.json` 记下停在哪一步。除 `--checkpoint` 和 `--seed-root` 外的设置都可以在两次运行之间改，从尚未完成的步骤起生效；同一输出目录不能换起始检查点或种子根，也不能同时被两个进程写。
+
+资源：采样与评估时每对“引擎 + 采样进程”占 250–300 MB，采样进程只在这两步存在；求解器每 8 个并发约 3 GB；critic 训练把缓冲里全部局外帧压缩后放在内存（每千局约 0.3 GB）；策略更新的加载进程数与 BC 相同（读取进程在两路数据间对半分）。
 
 ## 训练监测网页
 
@@ -234,12 +274,14 @@ python3 -m model.monitor --runs runs --port 8765
 # 已安装本项目时也可用：spire-monitor --runs runs
 ```
 
-打开 [本地训练监测](http://127.0.0.1:8765)。`--runs` 可指向全部训练根目录或单个 `bootstrap` 的输出目录。网页递归发现 `status.json`、`updates.jsonl` 和 `history.jsonl`，每 5 秒刷新，可切换任务、查看曲线与原始记录、导出所选更新范围的 CSV。页面关闭或关闭自动刷新时不再请求数据。
+打开 [本地训练监测](http://127.0.0.1:8765)。`--runs` 可指向全部训练根目录或单个 `bootstrap`／`iterate` 的输出目录。网页递归发现 `status.json`、`updates.jsonl` 和 `history.jsonl`，每 5 秒刷新，可切换任务、查看曲线与原始记录、导出所选更新范围的 CSV。页面关闭或关闭自动刷新时不再请求数据。
 
 - 每次更新的损失、动作正确率、策略熵、裁剪前梯度范数、各参数组学习率、耗时和宏动作数。正确率是更新前同一次前向计算中，合法动作 Top-1 与示范动作一致的决策数除以策略决策总数；多步宏动作逐步统计，排除强制动作和控制器步骤，不使用损失的样本权重。日志同时保存 `accuracy`、`accuracy_correct` 和 `accuracy_decisions`，汇总正确率按决策总数计算。这是当前训练批的正确率；旧日志的验证 NLL 可以显示，新 BC 不产生验证指标。顶部数字是最近 200 次更新的均值，状态栏按上一轮的更新数和最近的墙钟速度估算本轮进度。
 - 轮次汇总表列出每个 epoch 结束时的整轮指标，更新记录表展开最近 200 条原始记录。
 
 横轴、悬停提示、历史表和 CSV 均使用优化器累计更新次数（Update），曲线按数值间距绘制；微批拆分和梯度累积只产生一个逻辑批更新点。跨 epoch 继续计数，恢复检查点沿用保存的更新次数；恢复后回退的更新和不同 session 之间不连线。默认显示全部历史，也可只看最近 N 次更新，按更新次数区间筛选，不把缺失点补成零；曲线和 CSV 保留所选范围的全部更新。
+
+`iterate` 的输出是另一种训练记录（侧栏“迭代”）：曲线是各次策略更新的逐更新指标，“优化指标”里多出 AWR 损失（加权局外样本）、示范与求解器标签损失、β 和有效样本占比；“迭代汇总”表每次迭代一行：采样通关率与平均楼层（按温度抽样的对局，不是评估）、胜率模型在留出对局上的解释方差、门槛是否通过、β 与有效样本占比（各更新批的均值）、两路损失和评估通关率；状态栏显示正在进行的迭代与步骤。critic 不过门槛而跳过更新的迭代在表里标“未过，未更新”，曲线上没有它的点。
 
 每个点都参与绘制：一个像素列里只连它的首点、最低点、最高点和末点，形状与逐点连线相同。点多时默认叠加滑动平均（同一段内最近 N 个点的均值，粗线），原值留作其后的细线。纵轴默认聚焦主体，少数远离主体的点落在范围外时，图下写明被略去的最高和最低值；两项都可以关掉。
 
@@ -258,6 +300,7 @@ Steam Mod 的安装和接管入口见 [steam_recorder](../steam_recorder/README.
 | `representation.py`、`public_history.py`、`rules.py`、`batch.py` | 公开输入、冻结词表、规则和张量打包 |
 | `model.py`、`attention.py`、`policy.py` | 网络、选择与可微重放 |
 | `loader.py`、`trainer.py`、`optim.py`、`checkpoint.py` | 数据供给、加权 NLL 更新、学习率日程与恢复 |
+| `advantage.py`、`awr.py`、`iterate.py` | 局外决策的优势及其文件、优势权重与混批、迭代驱动 |
 | `rollout.py`、`rewards.py`、`steam.py` | 对局、奖励账本与实机控制 |
 | `evaluation.py` | 评估报告、合计与配对符号检验、留出 NLL 的表格 |
 | `saves.py`、`buffer.py` | 战斗边界与入场存档、采样轮的分片与汇总 |
