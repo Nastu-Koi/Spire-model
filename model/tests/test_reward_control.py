@@ -50,7 +50,7 @@ class Policy:
     def reset(self):
         pass
 
-    def choose(self, frame, *, sample=True):
+    def choose(self, frame, *, sample=True, temperature=1.0):
         self.phases.append(frame["public"]["phase"])
         return SimpleNamespace(candidate_ref=frame["legal"]["candidates"][-1]["candidate_ref"],
                                log_prob=-0.7)
