@@ -247,6 +247,62 @@ def parser():
                  "tensors; this process then only runs the network. Default one per "
                  "engine, which is fastest",
         )
+    x = sub.add_parser(
+        "iterate",
+        help="Improve a policy by iterations: sample a round, label its fights with the "
+             "solver, continue the critic, update by advantage-weighted regression, evaluate")
+    x.add_argument("--checkpoint", required=True,
+                   help="The policy to start from, resumed strictly; a run under way goes on "
+                        "from its own last update")
+    x.add_argument("--demonstrations", required=True, nargs="+",
+                   help="Data directories of the supervised half of every update, the largest first")
+    x.add_argument("--output", required=True, help="Everything the iterations write; an existing one is continued")
+    x.add_argument("--iterations", type=int, required=True, help="Iterations the output is brought to")
+    x.add_argument("--runs-per-character", type=int, default=200, help="A round is five times this many runs")
+    x.add_argument("--seed-root", default="iterate", help="What every round's seeds are derived from")
+    x.add_argument("--exclude-seeds", nargs="*", default=[],
+                   help="Seed files (evaluation and test sets) no round may be played on")
+    x.add_argument("--buffer-iterations", type=int, default=10,
+                   help="The run buffer: the rounds of the last so many iterations")
+    x.add_argument("--workers", type=int, default=1, help="Engines of a sampled round")
+    x.add_argument("--processes", type=int, help="Sampling processes; one per engine by default")
+    x.add_argument("--max-steps", type=int, default=10000)
+    x.add_argument("--engine-root")
+    x.add_argument("--no-labels", action="store_true", help="Do not label fights with the solver")
+    x.add_argument("--label-fraction", type=float, default=0.25,
+                   help="The share of a round's runs whose every fight the solver labels")
+    x.add_argument("--label-workers", type=int, default=8, help="Runs the solver fights at once")
+    x.add_argument("--solver-config", help="Solver worker configuration for the labels")
+    x.add_argument("--labels-in-background", action="store_true",
+                   help="Let the solver label a round beside the critic's training and the "
+                        "update; its labels then enter the next iteration's update")
+    x.add_argument("--advantage", choices=["critic", "return"], default="critic",
+                   help="`return` is the control without a critic: the run's return minus the "
+                        "mean return of its character's runs")
+    x.add_argument("--lam", type=float, default=0.9, help="λ of the generalized advantage")
+    x.add_argument("--critic", help="A saved critic to continue from, instead of starting a new one")
+    x.add_argument("--critic-config", help="Profile whose model and critic sections make the critic")
+    x.add_argument("--critic-gate", choices=["on", "off"], default="on",
+                   help="Whether a critic that fails the gate leaves the policy as it is")
+    x.add_argument("--gate", action="append", default=[], metavar="NAME=VALUE",
+                   help="Override one of the gate's floors (critic/gate.py); may be repeated")
+    x.add_argument("--beta", default="auto",
+                   help="β of the weights exp(A/β): `auto` tunes it to every batch, `inf` is no "
+                        "weighting, or a number")
+    x.add_argument("--ess-share", type=float, default=0.3,
+                   help="The effective sample size a tuned β keeps, as a share of the batch")
+    x.add_argument("--beta-min", type=float, default=0.1)
+    x.add_argument("--beta-max", type=float, default=100.0)
+    x.add_argument("--updates", default="round",
+                   help="Updates per iteration: `round` (as many as a pass over the newest round "
+                        "makes, drawn from the whole buffer), `buffer` (a pass over the buffer) "
+                        "or a number")
+    x.add_argument("--window-shards", type=int, default=8)
+    x.add_argument("--evaluate-every", type=int, default=5, help="Iterations between evaluations")
+    x.add_argument("--eval-seeds", help="Seed file of the evaluations; without it none is made")
+    x.add_argument("--eval-runs-per-character", type=int,
+                   help="The leading seeds of each character an evaluation plays; all by default")
+    x.add_argument("--eval-workers", type=int, help="Engines of an evaluation; as a round's by default")
     x = sub.add_parser("infer")
     x.add_argument("--checkpoint", required=True)
     x.add_argument(
@@ -598,6 +654,25 @@ def main(argv=None):
             })
         elif args.command == "compare":
             emit(compare_evaluations(args.directories, head=args.head))
+        elif args.command == "iterate":
+            from .iterate import Driver, Settings
+
+            settings = Settings(
+                checkpoint=args.checkpoint, demonstrations=args.demonstrations,
+                runs_per_character=args.runs_per_character, seed_root=args.seed_root,
+                exclude_seeds=args.exclude_seeds, buffer_iterations=args.buffer_iterations,
+                workers=args.workers, processes=args.processes, max_steps=args.max_steps,
+                engine_root=args.engine_root, labels=not args.no_labels, label_fraction=args.label_fraction,
+                label_workers=args.label_workers, labels_in_background=args.labels_in_background,
+                solver_config=args.solver_config, advantage=args.advantage, lam=args.lam, critic=args.critic,
+                critic_config=args.critic_config, critic_gate=args.critic_gate == "on", gate=args.gate,
+                beta=args.beta, ess_share=args.ess_share, beta_min=args.beta_min, beta_max=args.beta_max,
+                updates=args.updates, window_shards=args.window_shards, evaluate_every=args.evaluate_every,
+                eval_seeds=args.eval_seeds, eval_runs_per_character=args.eval_runs_per_character,
+                eval_workers=args.eval_workers)
+            state = Driver(args.output, settings, args.device, runtime=runtime).run(args.iterations)
+            emit({"output": str(args.output), "iterations": sum(
+                bool(entry.get("complete")) for entry in state["iterations"].values())})
         elif args.command == "infer":
             model, vocabulary, manifest = load_model(args.checkpoint, args.device)
             model.eval()
