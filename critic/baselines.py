@@ -28,8 +28,13 @@ def state(row):
 
 
 def fit_logistic(x, y, l2=1e-2, iterations=100):
-    """Newton's method on standardized columns with a small ridge; returns a predictor."""
+    """Newton's method on standardized columns with a small ridge; returns a predictor.
+    Labels that do not vary (a small round without a single win) have no regression:
+    the predictor is their constant."""
     x, y = torch.tensor(x, dtype=torch.float64), torch.tensor(y, dtype=torch.float64)
+    if float(y.min()) == float(y.max()):
+        constant = float(y[0])
+        return lambda rows: [constant] * len(rows)
     mean, std = x.mean(0), x.std(0).clamp_min(1e-6)
     z = torch.cat([torch.ones(len(x), 1, dtype=torch.float64), (x - mean) / std], dim=1)
     w = torch.zeros(z.shape[1], dtype=torch.float64)
