@@ -2,7 +2,7 @@
 
 从 Spire Codex 公开的 `v0.111.0 / 单人 / 标准 / 胜利` 对局里生成独立监督样本。唯一的生成方法是**摘要锚点**：只用对局摘要（`.run`）逐节点重建状态，每个决策在原生引擎里从对应的节点边界单独开始。操作回放只用来审计来源和核对结果，不参与生成。
 
-流程：`fetch` 下载 → `sources` 筛选来源 → `anchor run` 生成 → `anchor export` 导出 → `model import-independent` 导入；`anchor_audit` 和 `map_ambiguity` 用回放核对。
+流程：`fetch` 下载 → `sources` 筛选来源 → `anchor run` 生成 → `anchor export` 导出 → `model import-independent` 导入；`anchor_audit` 和 `map_ambiguity` 用回放核对。策略自己采样的对局里的战斗由 `student_battles` 用同一套求解与重放出标签（见 [学生状态的战斗](#学生状态的战斗)）。
 
 局外规则和战斗数据分别使用缓存版本，并绑定原生程序集摘要。已有战斗可用 `anchor run --kinds battle --reuse-battles <旧锚点目录>` 刷新：先要求摘要校验和、求解预算及初始化快照一致，再执行已保存动作。除显式公开历史字段外，逐步观察和完整候选必须完全一致，胜负和结束 HP 也须匹配；当前格式的完整帧再由另一进程独立重放。不兼容或缺失的战斗重新求解，恢复方式写入 `recovery`。旧目录作为只读输入，新样本写入独立输出目录。
 
@@ -101,6 +101,29 @@ BC 使用全部可训练样本，不再接受 `--holdout`，默认持续到手�
 
 用不用药、用几瓶是随机指定的，不是玩家的记录。记录里的用药（`potion_used`）没有采用：它只说这个节点用了哪几瓶，而求解器在指定之下几乎总是开场就用，时机上并不比随机指定多出信息。生成版本为 `summary-potion-v1`，求解进程须支持 `potion_directives`。
 
+## 学生状态的战斗
+
+示范只来自人类胜局和求解器打过的人类卡组；策略自己走到的弱卡组、低血、满药水栏的状态在示范里没有。`student_battles` 从采样轮（`python -m model collect` 写出的 `round-N/`，格式见 [采样轮的格式](../model/README.md#采样轮的格式)）里每场战斗的入场存档出发，让求解器把同一场战斗再打一遍，产出与摘要锚点战斗格式相同的独立监督样本（[学生状态战斗样本](../CONTEXT.md)）。
+
+```bash
+python3 -m spire_codex_data.student_battles select --round runs/collect/round-3 --fraction 0.25      # 只看选了哪些
+python3 -m spire_codex_data.student_battles run --round runs/collect/round-3 --output data/student/round-3 \
+  --fraction 0.25 --workers 8
+python3 -m spire_codex_data.student_battles export --output data/student/round-3      # independent-training.jsonl.gz、combat-outcomes.jsonl.gz
+python3 -m model import-independent data/student/round-3/independent-training.jsonl.gz \
+  --output data/student-import/round-3 --shard-samples 250
+python3 -m model --device cuda bootstrap --data data/bootstrap data/student-import/round-3 \
+  --checkpoint runs/bootstrap/current --output runs/bootstrap      # 与示范合训，份额见 model/README.md
+```
+
+- **选择**：按 `run_id` 的指纹确定性地取固定比例（`--fraction`，默认四分之一）的对局，这些对局的全部战斗都标；此外每个败局死在战斗里的那场（存档行 `result=loss`）必标。比例变大时已选的对局不变、只增加。事件引发的战斗（`from_event`）跳过并计数（`skipped_from_event`），引擎拒绝过存档的跳过并计数（`skipped_no_save`），没打完的对局不在索引里、不选。计数里 `selected_by_fraction` 与 `selected_by_death`（只因败局入选的）之和等于 `selected`；`selected_deaths` 是入选战斗里败局最后一场的总数，含比例内对局的。`--max-runs` 只取选出的前几局，用于试跑。
+- **求解与核对**：每局两个原生进程（求解器打，另一进程逐步重放，与 `battle` 锚点相同，`anchor.play_battle`），`--workers` 局同时进行（默认 8；求解器按毫秒预算搜索，并发超过物理核数只会让搜索更浅）。进入方式就是 `model.saves.anchor_commands`：`enter_anchor`（存档、楼层、节点类型、是否第二 Boss，不传路线）再 `anchor_room`（遭遇）。预算与示范战斗相同：普通与精英 1000 ms、Boss 5000 ms（`--budget-ms`、`--elite-budget-ms`、`--boss-budget-ms`）。药水：入场时药水栏已满（排除自动触发的瓶中精灵）的精英或 Boss 战要求整场至少用一瓶（`potion_policy=RequireAtLeastOne`），用哪瓶、何时由求解器搜索；其余战斗用它自己的 `Smart`。求解器的 `RequireAtLeastOne` 只管一次搜索：每次搜索都带着它，求解器会每次再用一瓶，药水栏空了就求解失败；被预算截断的搜索还常常找不到带用药的路线（新进程的头一次搜索尤其如此）。所以 `play_battle` 把它落实到整场：还没用过药水时每次搜索都要求用药，找不到这样路线的那次搜索改按 `Smart` 重做，用过一瓶之后其余搜索都是 `Smart`。报告记请求的策略（`potion_policy`）、实际用药数（`potions_used`）和找不到用药路线的搜索次数（`potion_refusals`）；`summary.json` 计 `potion_required_met`／`potion_required_unmet`（被要求的战斗里用了／没用药水的场数）。没用上药水的战斗仍是求解器自己策略下的合法标签，照常导出。求解进程须认识 `potion_policy`／`potion_directives`：默认配置取 `runs/bootstrap-20261008/build-potions/config.json`（存在时），否则 `combat_solver_cli/lib/config.json`，可用 `--solver-config` 指定；隔离副本里这两个路径都不存在，必须显式指定。
+- **重入不是重放**：存档里的随机数状态是进房之后的，重入时敌人的随机 HP 与开局手牌重抽，与摘要锚点的战斗一样是“同一入场状态的另一次战斗”，不与学生原来那场对齐。在战斗开始时计数的遗物（如 `EMBER_TEA`）重入后可能少一；每场报告里 `relic_differences` 列出学生入场帧与求解器入场帧之间遗物公开字段的差异，`summary.json` 按遗物计数。
+- **产物**：`runs/<run_id>.json` 每局一份报告（身份：版本、原生程序集摘要、预算；每场的状态、胜负、行数、入场与结束 HP、用药数、耗时、失败原因），`samples/<run_id>.jsonl.gz` 每场战斗（胜负都有）的决策行，`selection.json`（这次选了哪些对局的哪些战斗），`summary.json`（选择计数、`verified`／`execution_failed`、失败原因分布、胜率、每类战斗平均秒数、用药计数）。
+- **续跑**：一局的报告在身份相同、入选的战斗也相同时直接复用，中断后重跑同一条命令即可。调大比例只重打入选战斗变了的对局（原先只标败场、现在全标的）和新入选的对局；换求解器构建或预算则全部重打。`summary.json` 与 `export` 只取 `selection.json` 里的对局：调小比例后不再入选的对局，报告留在盘上、不进这次导出。
+- **导出**：`export` 写 `independent-training.jsonl.gz`（只有打赢且至少有一个策略决策的战斗，`spire-independent-decisions-v1`）和 `combat-outcomes.jsonl.gz`（每场打过的战斗，胜负都有，`combat-outcomes-v2`，`source=student_battle`、`actor=combat_solver`，`frames` 指向 `samples/` 里的决策行，另带 `student`：对局、策略版本与 digest、迭代号、学生自己那场的结果、用药策略）。样本 `metadata`：`anchor_kind=student_battle`、`label_source=combat_solver`、`teacher_visibility=privileged`、`bc_only=true`、`native_replay_verified=true`、`initialization=summary-anchor-v1`、`run_hash`=对局 `run_id`、`sample_group`=`<run_id>:fight-NNN`、`split_group=split_group(对局 seed)`（与留出规则一致）、`policy_version`／`policy_digest`／`iteration`、`game_seed`、`fight`、`encounter`、`kind`、`act`、`floor`、`student_result`、`potion_policy`、`source_integrity=sampled_rollout`。
+- **导入与份额**：`import-independent` 照常导入成一个数据目录；索引行多记 `source=student_battle` 和策略字段。导入时用小分片（`--shard-samples 250`）：训练按分片成窗读取，一个读取进程的一窗只有两个分片，学生样本单个权重高、总量只有示范的百分之一，分片与示范一样大时它们会集中在少数几窗里成批出现，分片小则散到更多窗里。训练时把示范目录和若干学生目录一起传给 `--data`（示范在前），学生样本在各角色的战斗阶段组内按份额加权，规则见 [主策略训练](../model/README.md#多个数据目录与学生战斗的份额)。不足一次迭代的学生数据（试跑）不要并入正式训练。
+
 ## 商店
 
 摘要记录了一家商店卖什么（买走的，和离开时剩下的），没有价格，也没有购买顺序。
@@ -194,4 +217,4 @@ python3 -m pytest spire_codex_data/tests -q
 SPIRE_CODEX_DATA_NATIVE_TESTS=1 python3 -m pytest spire_codex_data/tests -q   # 需要已配置的引擎和求解器
 ```
 
-覆盖下载（分片与列表上限、失败记录、重试、续传、文档与列表行的一致性）、来源审计（mod、控制台、续局、非原版内容）、账本与状态规则、锚点规划与标签的歧义拒绝、商店的随机流位置、格位与顺序搜索、事件变量的核对、记录的选牌目标、留在奖励界面上的奖励、导出过滤、回放核对的取证方式、路线唯一性判定，以及原生锚点入口的契约（含商店库存的重抽、解锁状态的反推、事件的再生成和奖励界面）。
+覆盖下载（分片与列表上限、失败记录、重试、续传、文档与列表行的一致性）、来源审计（mod、控制台、续局、非原版内容）、账本与状态规则、锚点规划与标签的歧义拒绝、商店的随机流位置、格位与顺序搜索、事件变量的核对、记录的选牌目标、留在奖励界面上的奖励、导出过滤、回放核对的取证方式、路线唯一性判定、学生状态战斗的选择规则与导出行（求解与重放用脚本化的引擎，不启动原生进程），以及原生锚点入口的契约（含商店库存的重抽、解锁状态的反推、事件的再生成和奖励界面）。

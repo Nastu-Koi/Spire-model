@@ -24,7 +24,9 @@ from pathlib import Path
 SCHEMA = "combat-outcomes-v2"
 PATTERNS = ("*combats.jsonl", "*combats.jsonl.gz", "combat-outcomes.jsonl.gz")
 # Who fights in each source. A solver sees hidden state; its fights are never a policy's.
-ACTORS = {"summary_anchor": "combat_solver", "rollout": "policy"}
+# A student battle is the solver's fight from the entry state of a policy's own fight
+# (`spire_codex_data.student_battles`): the solver fought it, from where the policy stood.
+ACTORS = {"summary_anchor": "combat_solver", "student_battle": "combat_solver", "rollout": "policy"}
 
 
 def entities(row):

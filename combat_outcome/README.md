@@ -16,11 +16,12 @@
 - 其余结果字段：`turns`、`steps`、`potions_used`、`potions_discarded`（实际操作，可与帧里的动作逐一对上），策略的行另有战斗前后的 `start`／`end`（HP、最大 HP、金币、药水）和 `act_result`（这一局在这场战斗所在的幕 `passed`、`died`，或对局没有打完时为空）。
 - `seed` 是划分用的分组：同一个种子的所有战斗、一场战斗的所有帧都在划分的同一侧。
 
-两个来源，格式相同：
+三个来源，格式相同：
 
 | `source` | 写出者 | 内容 |
 |---|---|---|
 | `summary_anchor` | `python -m spire_codex_data.anchor export`，写到锚点目录的 `combat-outcomes.jsonl.gz` | 摘要锚点的每一场战斗：公开胜局里每个战斗节点的入场状态，由求解器另行打一遍。胜负都保留；`frames` 指向锚点样本文件里这场战斗的各行（`file`、`group`、`count`），打输的战斗也在其中 |
+| `student_battle` | `python -m spire_codex_data.student_battles export`，写到学生战斗目录的 `combat-outcomes.jsonl.gz` | 策略采样时走进的战斗，从入场存档由求解器另行打一遍（`actor` 仍是求解器）；`frames` 同上指向 `samples/`；另带 `student`（对局、策略版本与 digest、迭代号、学生自己那场的结果、用药策略） |
 | `rollout` | `online.CombatRecorder`，采样和评估时每局一个 `<对局>.combats.jsonl.gz` | 策略自己打完的每一场战斗，帧直接写在行里 |
 
 摘要锚点的战斗就是大模型 Bootstrap 克隆其动作的那一批战斗，不需要另外生成：战斗锚点跑完、`export` 之后，两份数据同时可用。

@@ -476,8 +476,10 @@ def installed_state(engine):
 
 
 def enter(engine, save, anchor):
+    # Without a recorded route the engine places the run on a stand-in point of the floor.
     reply = engine.send(dict(cmd='enter_anchor', save=save, act_floor=anchor['floor'],
-        map_point_type=anchor['map_point_type'], second_boss=anchor['second_boss'], route=anchor['route']))
+        map_point_type=anchor['map_point_type'], second_boss=anchor['second_boss'],
+        **({'route': anchor['route']} if anchor.get('route') is not None else {})))
     if reply.get('type') != 'anchor_installed':
         raise ValueError('enter_anchor:' + str(reply.get('message')))
     check_installed(installed_state(engine), save['players'][0])
@@ -591,12 +593,24 @@ def play_battle(shared, second, save, anchor, budgets):
     """The solver fights the battle on one process of the run; the other repeats it.
 
     A potion anchor names potions of the belt: the solver must use each of them at some
-    point of the fight and uses no other. When and on whom is its own choice."""
+    point of the fight and uses no other. When and on whom is its own choice.
+
+    An anchor with `potion_policy='RequireAtLeastOne'` asks for one potion of the
+    solver's choosing in the fight. The solver's policy of that name holds for one
+    search: asked at every search it would spend a potion each time and refuse once the
+    belt is empty, and a search cut off by its budget often finds no route with a potion
+    at all. So until a potion has been used every search is asked for a route that uses
+    one, a search that finds none is made again on the solver's own policy, and after
+    the first potion the rest of the fight is the solver's own. The fight tells how many
+    searches found no such route (`potion_refusals`); whether a potion was used is in
+    its records."""
     records = []
     budget_ms = budgets['elite_budget_ms' if anchor['room_type'] == 'elite' else 'budget_ms']
     engine, frame = shared.enter(save, anchor)
     contract, entry_hp = deepcopy(frame['contract']), player(frame)['hp']
     forced = Counter(anchor.get('forced', []))
+    required = anchor.get('potion_policy') == 'RequireAtLeastOne'
+    owes_potion, refusals = required, 0
     while in_combat(engine, frame):
         if len(records) >= 1000:
             raise TimeoutError('solver_step_limit')
@@ -610,8 +624,14 @@ def play_battle(shared, second, save, anchor, budgets):
                     owed[e['content_id']] -= 1
                     slots.append(dict(slot=e['slot'], potion=e['content_id'].split('.', 1)[1], directive='Force'))
             potions = dict(potion_policy='Disabled', potion_directives=slots)
-        reply = engine.step(frame, budget_ms=budget_ms, boss_budget_ms=budgets['boss_budget_ms'],
-                            reuse_turn_plan=True, **potions)
+
+        def search(**options):
+            return engine.step(before, budget_ms=budget_ms, boss_budget_ms=budgets['boss_budget_ms'],
+                               reuse_turn_plan=True, **options)
+        reply = search(potions=True, potion_policy='RequireAtLeastOne') if owes_potion else search(**potions)
+        if owes_potion and reply.get('type') not in ('solver_step', 'solver_selection_required'):
+            refusals += 1
+            reply = search(**potions)
         if reply.get('type') == 'solver_step':
             chosen = next(c for c in before['legal']['candidates'] if c['candidate_ref'] == reply['candidate_ref'])
             frame, actor = settle(engine, reply['frame']), 'combat_solver'
@@ -625,6 +645,7 @@ def play_battle(shared, second, save, anchor, budgets):
         if chosen['verb'] == 'USE_POTION':
             used = {e['ref']: e['content_id'] for e in before['public']['entities'] if e.get('entity_type') == 'potion'}
             forced[used.get(chosen['source_refs'][0])] -= 1
+            owes_potion = False
     error = shared.native_error()
     if error:
         raise ValueError(error)
@@ -640,7 +661,7 @@ def play_battle(shared, second, save, anchor, budgets):
         raise ValueError('forced_potion_not_used:' + ','.join(sorted((+forced).elements())))
     replay(second, save, anchor, records, final)
     return dict(records=records, contract=contract, outcome='loss' if lost else 'win', entry_hp=entry_hp,
-                exit_hp=exit_hp)
+                exit_hp=exit_hp, **({'potion_refusals': refusals} if required else {}))
 
 
 def entity(frame, candidate):
@@ -1323,16 +1344,17 @@ def summarize(directory):
     return result
 
 
-def outcome_row(report, anchor, rows, samples):
+def outcome_row(report, anchor, rows, samples, source='summary_anchor'):
     """One solver fight as a combat-outcome label: the state it was entered with and how
-    it ended. Its decision frames are the fight's rows in `samples`, won or lost."""
+    it ended. Its decision frames are the fight's rows in `samples`, won or lost.
+    `source` names where the entry state came from; the solver fought it either way."""
     first = rows[0]
     hero, meta = player(dict(public=first['observation'])), first['metadata']
     refs = {e.get('ref'): e for row in rows if row['label']['verb'] == 'USE_POTION'
             for e in row['observation']['entities']}
     lost = anchor['outcome'] == 'loss'
     end_hp = 0 if lost else anchor['exit_hp']
-    return dict(schema=OUTCOME_SCHEMA, source='summary_anchor', actor='combat_solver', seed=meta['split_group'],
+    return dict(schema=OUTCOME_SCHEMA, source=source, actor='combat_solver', seed=meta['split_group'],
         run_hash=meta['run_hash'], contract=meta.get('contract'),
         anchor=anchor['id'], character=meta['character'], ascension=meta['ascension'], act=anchor['act'],
         floor=anchor['floor'], encounter=anchor['encounter'].split('.')[-1],
