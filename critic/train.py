@@ -31,6 +31,7 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 
 from model.checkpoint import load_model as load_policy
+from model.config import ModelConfig
 from model.loader import _stream
 from model.optim import HybridOptimizer
 
@@ -41,15 +42,17 @@ from .data import coverage, frame_of, load as load_rows, split
 from .metrics import calibration, reliability, summary
 from .model import Critic, autocast, load as load_critic, save
 
-OVERRIDES = ("epochs", "init", "muon_lr", "backbone_lr", "embedding_lr", "head_lr", "logical_batch_size",
-             "token_budget", "holdout", "seed", "loader_workers", "precision")
+OVERRIDES = ("epochs", "init", "train_body", "train_blocks", "muon_lr", "backbone_lr", "embedding_lr", "head_lr",
+             "logical_batch_size", "token_budget", "holdout", "seed", "loader_workers", "precision")
 # Settings of a ModelConfig that do not change the weights: a critic may differ from
 # the policy it starts from in these.
 RUNTIME = {"backend", "encoder_precision", "checkpoint_layers", "compile_blocks"}
 
 
 def architecture(model):
-    return {key: value for key, value in model.items() if key not in RUNTIME}
+    """The weight-determining fields of a `model` section, with the defaults an older
+    manifest leaves out."""
+    return {key: value for key, value in asdict(ModelConfig(**model)).items() if key not in RUNTIME}
 
 
 class Logicals(Dataset):
@@ -77,9 +80,26 @@ def batches(rows, vocabulary, config):
         yield parts
 
 
+def trainable(net, training):
+    """(name, parameter) of what the settings let train: the head, and of the body all of
+    it, its top `train_blocks` global layers with the final norm, or nothing."""
+    layers = len(net.body.blocks)
+
+    def wanted(name):
+        if name.startswith("head.") or (training.train_body and training.train_blocks is None):
+            return True
+        if not training.train_body:
+            return False
+        return name.startswith("body.final_norm.") or (
+            name.startswith("body.blocks.") and int(name.split(".")[2]) >= layers - training.train_blocks)
+
+    return [(name, parameter) for name, parameter in net.trainable() if wanted(name)]
+
+
 def build_optimizer(net, training):
     """Muon for the body's Transformer matrices; AdamW with the policy's groups for the
-    rest: the lookup tables, the head, and the backbone's remaining tensors."""
+    rest: the lookup tables, the head, and the backbone's remaining tensors. Settings
+    that train no matrices get AdamW alone."""
     muon_ids = {
         id(module.weight) for name, module in net.body.named_modules()
         if isinstance(module, nn.Linear) and (".attention." in name or ".ffn." in name)
@@ -87,25 +107,26 @@ def build_optimizer(net, training):
     }
     tables = {id(module.weight) for module in net.body.modules() if isinstance(module, nn.Embedding)}
     matrices, groups = [], {}
-    for name, parameter in net.trainable():
+    for name, parameter in trainable(net, training):
         if id(parameter) in muon_ids:
             matrices.append(parameter)
             continue
         family = "embedding" if id(parameter) in tables else "head" if name.startswith("head.") else "backbone"
         decay = family != "embedding" and parameter.ndim >= 2 and "norm" not in name
         groups.setdefault((family, decay), []).append(parameter)
-    if not matrices:
-        raise ValueError("No Transformer attention or FFN matrices were found for Muon")
     rates = dict(embedding=training.embedding_lr, head=training.head_lr, backbone=training.backbone_lr)
     adamw = torch.optim.AdamW(
         [dict(params=parameters, name=family + ("_decay" if decay else "_no_decay"), lr=rates[family],
               weight_decay=training.weight_decay if decay else 0.0)
          for (family, decay), parameters in groups.items()],
         betas=(0.9, 0.999), eps=1e-8, fused=net.device.type == "cuda")
-    muon = torch.optim.Muon(
-        [dict(params=matrices, name="muon", lr=training.muon_lr, weight_decay=training.weight_decay)],
-        momentum=training.muon_momentum, ns_steps=training.muon_ns_steps)
-    optimizer = HybridOptimizer(adamw, muon)
+    if matrices:
+        muon = torch.optim.Muon(
+            [dict(params=matrices, name="muon", lr=training.muon_lr, weight_decay=training.weight_decay)],
+            momentum=training.muon_momentum, ns_steps=training.muon_ns_steps)
+        optimizer = HybridOptimizer(adamw, muon)
+    else:
+        optimizer = adamw
     for group in optimizer.param_groups:
         group["initial_lr"] = group["lr"]
     return optimizer
@@ -163,7 +184,10 @@ def fit(net, vocabulary, train, test, training, device):
     """Train on `train` for the configured epochs, reporting on `test` after each.
     Returns (history, held-out evaluation)."""
     optimizer = build_optimizer(net, training)
-    parameters = [parameter for _, parameter in net.trainable()]
+    parameters = [parameter for _, parameter in trainable(net, training)]
+    chosen = {id(parameter) for parameter in parameters}
+    for parameter in net.parameters():
+        parameter.requires_grad_(id(parameter) in chosen)
     total = training.epochs * math.ceil(len(train) / training.logical_batch_size)
     history, update, started = [], 0, time.monotonic()
     for epoch in range(1, training.epochs + 1):
@@ -197,6 +221,8 @@ def fit(net, vocabulary, train, test, training, device):
             win=dict(explained_variance=held_out["win"]["explained_variance"], brier=held_out["win"]["brier"]),
             act=dict(explained_variance=held_out["act"]["explained_variance"], brier=held_out["act"]["brier"]),
             seconds=round(time.monotonic() - started)))
+        if device.type == "cuda":
+            history[-1]["peak_memory_gb"] = round(torch.cuda.max_memory_allocated(device) / 2**30, 2)
         print(json.dumps(history[-1]), flush=True)
     return history, held_out
 
@@ -212,6 +238,10 @@ def main(argv=None):
     parser.add_argument("--report", type=Path, help="also write the report here (default: console and manifest only)")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--init", choices=("checkpoint", "random"))
+    parser.add_argument("--freeze-body", action="store_false", dest="train_body", default=None,
+                        help="train the head only: a linear probe of the policy's representation")
+    parser.add_argument("--train-blocks", type=int, dest="train_blocks",
+                        help="train only this many global layers from the top, with the final norm and the head")
     parser.add_argument("--muon-lr", type=float, dest="muon_lr")
     parser.add_argument("--backbone-lr", type=float, dest="backbone_lr")
     parser.add_argument("--embedding-lr", type=float, dest="embedding_lr")
@@ -270,7 +300,8 @@ def main(argv=None):
         del policy_net
     net.to(device)
     report["model"] = dict(version=version, pretrained=pretrained, init=training.init if not pretrained else "pretrained",
-                           parameters=sum(p.numel() for _, p in net.trainable()), policy=policy)
+                           parameters=sum(p.numel() for _, p in net.trainable()),
+                           trained=sum(p.numel() for _, p in trainable(net, training)), policy=policy)
     if not args.no_baselines:
         report["baselines"] = fit_baselines(train, test)
         print(json.dumps(dict(baselines=report["baselines"]), indent=1), flush=True)
