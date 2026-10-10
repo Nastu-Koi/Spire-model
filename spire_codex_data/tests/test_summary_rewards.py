@@ -88,6 +88,71 @@ def test_positive_gold_does_not_prove_that_all_gold_rewards_were_taken(relic):
     assert found.get('error') == 'gold_reward_multiple_sources'
 
 
+def fight(room='elite', kind='claim', **extra):
+    cards = [choice(dict(id='CARD.ANGER'), True), choice(dict(id='CARD.HAVOC')), choice(dict(id='CARD.CLASH'))]
+    record = dict(card_choices=cards, cards_gained=[dict(id='CARD.ANGER')], current_gold=129, gold_gained=30,
+                  relic_choices=[dict(choice='RELIC.ANCHOR', was_picked=True)],
+                  potion_choices=[dict(choice='POTION.FIRE_POTION', was_picked=True)])
+    record.update(extra)
+    run = summary([node(room, **{k: v for k, v in record.items() if v is not None})])
+    if any(c['was_picked'] for c in record['card_choices']):
+        run['players'][0]['deck'].append(dict(id='CARD.ANGER', floor_added_to_deck=2))
+    return anchors(run, (kind,)).get(f'a01f01-{kind}')
+
+
+def test_claims_start_with_nothing_taken_and_end_where_the_card_choice_starts():
+    found = fight()
+    assert found['claims'] == dict(relics=['RELIC.ANCHOR'], gold=30, potions=['POTION.FIRE_POTION'])
+    assert {k: found['room'][k] for k in ('type', 'gold', 'relics', 'potions')} == dict(
+        type='rewards', gold=30, relics=['RELIC.ANCHOR'], potions=['POTION.FIRE_POTION'])
+    assert [c['id'] for c in found['room']['cards']] == ['CARD.ANGER', 'CARD.HAVOC', 'CARD.CLASH']
+    before, after = found['ledger'], found['expected']
+    assert (before['gold'], before['potions']) == (99, []) and not any(r['id'] == 'RELIC.ANCHOR' for r in before['relics'])
+    assert (after['gold'], after['potions']) == (129, ['POTION.FIRE_POTION']) and 'RELIC.ANCHOR' in after['relics']
+    # The card is taken afterwards, from the state the reward anchor starts in.
+    assert not any(c['id'] == 'CARD.ANGER' for c in before['deck']) and not any('ANGER' in c for c in after['deck'])
+    # A potion left behind stays on the screen and is not claimed.
+    left = fight(potion_choices=[dict(choice='POTION.FIRE_POTION', was_picked=False)])
+    assert left['claims']['potions'] == [] and left['room']['potions'] == ['POTION.FIRE_POTION']
+
+
+def test_pick_shows_the_card_offer_with_the_potion_and_what_was_left():
+    found = fight(kind='pick')
+    # The relic and the gold are taken already; the potion is taken after the card.
+    assert {k: found['room'][k] for k in ('type', 'relics', 'potions')} == dict(
+        type='rewards', relics=[], potions=['POTION.FIRE_POTION'])
+    assert 'gold' not in found['room'] and found['later'] == ['POTION.FIRE_POTION']
+    assert [c['id'] for c in found['room']['cards']] == ['CARD.ANGER', 'CARD.HAVOC', 'CARD.CLASH']
+    before, after = found['ledger'], found['expected']
+    assert (before['gold'], before['potions']) == (129, []) and any(r['id'] == 'RELIC.ANCHOR' for r in before['relics'])
+    assert not any(c['id'] == 'CARD.ANGER' for c in before['deck'])
+    assert after['potions'] == ['POTION.FIRE_POTION'] and sum('ANGER' in c for c in after['deck']) == 1
+    # What was left stays on the screen, and nothing is taken after the card.
+    left = fight(kind='pick', potion_choices=[dict(choice='POTION.FIRE_POTION', was_picked=False)],
+                 relic_choices=[dict(choice='RELIC.ANCHOR', was_picked=False)])
+    assert (left['room']['relics'], left['room']['potions'], left['later']) == (
+        ['RELIC.ANCHOR'], ['POTION.FIRE_POTION'], [])
+    assert left['ledger']['potions'] == [] and left['expected']['potions'] == []
+    # A screen with the card offer alone is the reward anchor's; no card taken is a leave.
+    assert fight(kind='pick', potion_choices=None) is None
+    skipped = [choice(dict(id='CARD.' + c)) for c in ('ANGER', 'HAVOC', 'CLASH')]
+    assert fight(kind='pick', card_choices=skipped, cards_gained=None) is None
+    assert fight(kind='pick', potion_discarded=['POTION.FIRE_POTION'])['error'] == 'reward_potion_timing_unknown'
+
+
+@pytest.mark.parametrize('extra,reason', [
+    (dict(potion_discarded=['POTION.FIRE_POTION']), 'reward_potion_timing_unknown'),
+    (dict(potion_choices=[dict(choice='POTION.FIRE_POTION', was_picked=True),
+                          dict(choice='POTION.BLOCK_POTION', was_picked=True)]), 'reward_potion_source_unknown'),
+    (dict(room='monster'), 'reward_relic_source_unknown'),
+    (dict(gold_gained=None), 'gold_reward_unsettled'),
+    (dict(gold_stolen=5), 'gold_reward_multiple_sources'),
+    (dict(relic_choices=[dict(choice='RELIC.CAULDRON', was_picked=True)]), 'reward_potion_source_unknown'),
+])
+def test_claims_the_record_cannot_place_on_the_reward_screen_are_isolated(extra, reason):
+    assert fight(**extra).get('error', '').split(':')[0] == reason
+
+
 @pytest.fixture
 def native():
     if os.environ.get('SPIRE_CODEX_DATA_NATIVE_TESTS') != '1':
@@ -195,3 +260,107 @@ def test_native_chest_a10_rounding_has_one_public_result(native):
         rolls = result['recovery']['matching_gold_rolls']
         assert rolls == [48, 49]  # floor(raw * 0.75) == 36 for both native rolls.
         assert all(r['label'] in r['options'] for r in result['records'])
+
+
+def claim_spot(base, state, expected, **claims):
+    spot, save = spot_and_save(base, 'elite', state=state, type='rewards', gold=claims['gold'],
+                               relics=claims['relics'], potions=claims['potions'],
+                               cards=[dict(id='CARD.' + c) for c in ('ANGER', 'HAVOC', 'CLASH')])
+    spot.update(kind='claim', expected=expected,
+                claims=dict(relics=claims['relics'], gold=claims['gold'], potions=claims['potions']))
+    return spot, save
+
+
+def test_native_claims_take_relic_gold_and_potion_with_the_whole_screen_shown(native):
+    config, base = native
+    p = base['players'][0]
+    state = dict(deck=p['deck'], relics=p['relics'], potions=[], hp=50, max_hp=p['max_hp'], gold=99)
+    expected = recorded.expected_end(dict(state, gold=129, relics=p['relics'] + [dict(id='RELIC.ANCHOR')],
+                                          potions=['POTION.FIRE_POTION']))
+    spot, save = claim_spot(base, state, expected, relics=['RELIC.ANCHOR'], gold=30, potions=['POTION.FIRE_POTION'])
+    with anchor.RunProcess(config) as shared:
+        result = anchor.play_claim(shared, save, deepcopy(spot))
+        rows = result['records']
+        content = lambda r: next(e['content_id'] for e in r['observation']['entities']
+                                 if e.get('ref') == r['label']['source_refs'][0])
+        assert [content(r) for r in rows] == ['RELIC.ANCHOR', 'GoldReward', 'POTION.FIRE_POTION']
+        assert all(r['label']['verb'] == 'TAKE_REWARD' and r['coverage']['label'] == 'reconstructed_order' for r in rows)
+        # Every claim is chosen with the card offer and the way out still on the screen.
+        for r in rows:
+            verbs = [o['verb'] for o in r['options']]
+            assert verbs.count('TAKE_CARD_REWARD') == 3 and 'LEAVE_REWARDS' in verbs
+        shown = [sorted(e['content_id'] for e in r['observation']['entities'] if e.get('entity_type') == 'reward')
+                 for r in rows]
+        assert shown[0] == ['CardReward', 'GoldReward', 'POTION.FIRE_POTION', 'RELIC.ANCHOR']
+        assert shown[2] == ['CardReward', 'POTION.FIRE_POTION']
+        assert result['recovery'] == dict(order='relic_gold_potion', claims=spot['claims'])
+        # A relic whose pickup changes the state again does not reproduce the record.
+        berry = dict(state, hp=57, max_hp=p['max_hp'] + 7)
+        spot2, save2 = claim_spot(base, berry, recorded.expected_end(dict(berry, gold=129,
+                                  relics=p['relics'] + [dict(id='RELIC.STRAWBERRY')])),
+                                  relics=['RELIC.STRAWBERRY'], gold=30, potions=[])
+        with pytest.raises(ValueError, match='outcome_differs_from_record'):
+            anchor.play_claim(shared, save2, deepcopy(spot2))
+        # A full belt cannot take the potion: the record of taking it is not this screen's.
+        full = dict(state, potions=['POTION.BLOCK_POTION'] * p['max_potion_slot_count'])
+        spot3, save3 = claim_spot(base, full, expected, relics=[], gold=30, potions=['POTION.FIRE_POTION'])
+        with pytest.raises(ValueError, match='recorded_reward_not_legal'):
+            anchor.play_claim(shared, save3, deepcopy(spot3))
+
+
+def test_native_claim_pays_the_shown_gold_at_ascension_ten(native):
+    # Ascension lowers what a fight offers, not what a claim pays: shown and paid agree.
+    config, base = native
+    base = deepcopy(base)
+    base['ascension'] = 10
+    p = base['players'][0]
+    state = dict(deck=p['deck'], relics=p['relics'], potions=[], hp=50, max_hp=p['max_hp'], gold=99)
+    spot, save = claim_spot(base, state, recorded.expected_end(dict(state, gold=135)), relics=[], gold=36, potions=[])
+    with anchor.RunProcess(config) as shared:
+        result = anchor.play_claim(shared, save, deepcopy(spot))
+        gold = next(e for e in result['records'][0]['observation']['entities'] if e.get('content_id') == 'GoldReward')
+        assert gold['gold'] == 36 and len(result['records']) == 1
+
+
+def pick_spot(base, state, expected, later, **shown):
+    cards = [dict(id='CARD.' + c) for c in ('ANGER', 'HAVOC', 'CLASH')]
+    spot, save = spot_and_save(base, 'elite', state=state, type='rewards', cards=cards, **shown)
+    spot.update(kind='pick', expected=expected, picked=cards[:1], later=later)
+    return spot, save
+
+
+def test_native_pick_takes_the_card_with_the_potion_on_the_screen_then_the_potion(native):
+    config, base = native
+    p = base['players'][0]
+    state = dict(deck=p['deck'], relics=p['relics'], potions=[], hp=50, max_hp=p['max_hp'], gold=99)
+    deck = p['deck'] + [dict(id='CARD.ANGER', floor_added_to_deck=2)]
+    content = lambda r: next(e['content_id'] for e in r['observation']['entities']
+                             if e.get('ref') == r['label']['source_refs'][0])
+    shown = lambda r: sorted(e['content_id'] for e in r['observation']['entities'] if e.get('entity_type') == 'reward')
+    with anchor.RunProcess(config) as shared:
+        spot, save = pick_spot(base, state, recorded.expected_end(dict(state, deck=deck, potions=['POTION.FIRE_POTION'])),
+                               ['POTION.FIRE_POTION'], potions=['POTION.FIRE_POTION'], relics=[])
+        result = anchor.play_choice(shared, save, deepcopy(spot))
+        rows = result['records']
+        assert [(r['label']['verb'], content(r)) for r in rows] == [
+            ('TAKE_CARD_REWARD', 'CARD.ANGER'), ('TAKE_REWARD', 'POTION.FIRE_POTION')]
+        assert shown(rows[0]) == ['CardReward', 'POTION.FIRE_POTION'] and shown(rows[1]) == ['POTION.FIRE_POTION']
+        assert all(r['coverage']['label'] == 'reconstructed_order' for r in rows)
+        assert result['recovery'] == dict(order='card_potion', claims=dict(potions=['POTION.FIRE_POTION']))
+        # A potion and a relic that were left: the card is the only step, with both in view
+        # and, the belt being full, the potion out of reach.
+        full = dict(state, potions=['POTION.BLOCK_POTION'] * p['max_potion_slot_count'])
+        spot2, save2 = pick_spot(base, full, recorded.expected_end(dict(full, deck=deck)), [],
+                                 potions=['POTION.FIRE_POTION'], relics=['RELIC.ANCHOR'])
+        result = anchor.play_choice(shared, save2, deepcopy(spot2))
+        (row,) = result['records']
+        assert (row['label']['verb'], content(row)) == ('TAKE_CARD_REWARD', 'CARD.ANGER')
+        assert shown(row) == ['CardReward', 'POTION.FIRE_POTION', 'RELIC.ANCHOR']
+        assert row['coverage']['label'] == 'historical_choice'
+        takes = [content(dict(row, label=o)) for o in row['options'] if o['verb'] == 'TAKE_REWARD']
+        assert takes == ['RELIC.ANCHOR'] and any(o['verb'] == 'LEAVE_REWARDS' for o in row['options'])
+        # A potion the record has taken into a full belt is not this screen's.
+        spot3, save3 = pick_spot(base, full, recorded.expected_end(dict(full, deck=deck)),
+                                 ['POTION.FIRE_POTION'], potions=['POTION.FIRE_POTION'], relics=[])
+        with pytest.raises(ValueError, match='recorded_reward_not_legal'):
+            anchor.play_choice(shared, save3, deepcopy(spot3))

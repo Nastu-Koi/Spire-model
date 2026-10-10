@@ -44,18 +44,14 @@ python -m model reindex --data data/bootstrap --workers 6
 
 ### 当前工作区的数据
 
-截至 2026-10-08，`runs/bootstrap-20261008/imported` 是当前导入（`independent-import-v6`，索引为当前控制版本），可直接用于 BC，无需运行 `reindex`。导出与导入时已排除宝箱和单选事件的控制器步骤。
+截至 2026-10-10，`runs/bootstrap-20261008/` 下保留最新的一份导入（`independent-import-v6`，索引为当前控制版本），可直接用于 BC，无需运行 `reindex`：
 
-| 项目 | 数量 |
-| --- | ---: |
-| gzip 分片 | 2,944 |
-| 可训练宏动作 | 5,439,028 |
-| 可训练样本组 | 1,080,061 |
-| 角色×阶段组 | 35 |
-| 每轮更新次数（批大小 512） | 10,624 |
-| 最后一批 | 52 |
+| 目录 | 内容 | 样本组 | 可训练宏动作 | 每轮更新次数 |
+| --- | --- | ---: | ---: | ---: |
+| `imported-potions` | 全部类型：领取样本（[`claim`](../spire_codex_data/README.md#领取战后奖励)）、界面上还有药水或遗物时的选牌（`pick`）、必须用药的战斗（[`potion`](../spire_codex_data/README.md#必须用药的战斗)） | 1,416,761 | 6,360,448 | 12,423 |
+| `imported-potions-1in8` | 训练用的子集，与上一行共用分片、只换索引 | 1,131,109 | 5,501,424 | 10,745 |
 
-生成过程与各阶段计数见本地 [训练工单](../.scratch/summary-ledger/issues/04-refresh-and-bootstrap.md)。这些路径是本工作区产物，不包含在 Git 中。
+子集的规则（`runs/bootstrap-20261008/subset_rewards.py`）：顺序由本项目重建的奖励样本组——`claim` 和“先选牌后领药水”的 `pick`——按 id 的 SHA-256 保留八分之一（47,494 和 18,390 个宏动作）；“界面上留着药水或遗物时选牌”的 `pick` 是历史选择，全部保留（12,181 个）；`potion` 战斗只保留已有战斗样本的局里的（20,103 场、452,404 个宏动作，各自取代原来那一场），其余局里的会是凭空多出来、且每一场都强制用药的战斗，不进子集（17,610 场）。角色×阶段均为 35 组。第 1–7 轮训练用的是不含领取样本的导入（1,080,061 组、5,439,028 个宏动作），第 8–12 轮再加八分之一的领取样本（5,486,522 个宏动作）；这两份导入已删除，可从 `anchors/` 重新导出。生成过程与各阶段计数见本地 [训练工单](../.scratch/summary-ledger/issues/04-refresh-and-bootstrap.md)。这些路径是本工作区产物，不包含在 Git 中。
 
 ## 开始与继续 BC
 
@@ -70,14 +66,14 @@ python -m model --device cuda bootstrap --data data/bootstrap --checkpoint runs/
 
 分片数据不会自行重建词表，必须提供检查点。`init` 从引擎公开内容目录建立冻结词表并随机初始化权重。
 
-本工作区的训练在 `runs/bootstrap-20261008/`：`init-v5/` 是当前输入编码的初始化，`trained-v6/` 是 6 轮主训练（每轮一个检查点），`trained-v6-decay/current` 是其后用 10,624 次更新线性衰减收尾得到的最终检查点，不能再续训。`trained-v5/` 是已删除的均衡重采样方案下的一轮，`init/` 与 `trained/` 是 `public-encoding-v2` 下的旧初始化和第 1 轮，都仅作对照。
+本工作区的训练在 `runs/bootstrap-20261008/`，是一条从头到尾严格续训的主线：`init-v5/` 是当前输入编码的初始化；`trained-v6/` 是第 1–7 轮（不含领取样本的数据）；`trained-v7-claims/` 是第 8–12 轮（加入八分之一的领取样本）；`trained-v8-potions/` 从第 12 轮起在 `imported-potions-1in8` 上继续。换数据时用新的输出目录，优化器、调度进度和轮次计数都延续。
 
 ```bash
 python -m model --device cuda init --config configs/rtxpro6000.json \
   --engine-root runs/bootstrap-20261008/engine --output runs/bootstrap-20261008/init-v5
-python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported \
+python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-potions-1in8 \
   --checkpoint runs/bootstrap-20261008/init-v5 --weights-only \
-  --config configs/rtxpro6000.json --output runs/bootstrap-20261008/trained-v6 --epochs 6
+  --config configs/rtxpro6000.json --output runs/bootstrap-20261008/trained-new --epochs 6
 ```
 
 已有训练目录须通过其 `current` 续训，不能用新初始化覆盖。
@@ -91,17 +87,17 @@ python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported 
 续训示例：
 
 ```bash
-python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported \
-  --checkpoint runs/bootstrap-20261008/trained-v6/current \
-  --output runs/bootstrap-20261008/trained-v6
+python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-potions-1in8 \
+  --checkpoint runs/bootstrap-20261008/trained-v8-potions/current \
+  --output runs/bootstrap-20261008/trained-v8-potions
 ```
 
-收尾衰减示例（本工作区在 63,744 次更新后用一轮的更新数衰减）：
+收尾衰减示例（用一轮的更新数衰减）：
 
 ```bash
-python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported \
-  --checkpoint runs/bootstrap-20261008/trained-v6/current --decay-updates 10624 \
-  --output runs/bootstrap-20261008/trained-v6-decay
+python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-potions-1in8 \
+  --checkpoint runs/bootstrap-20261008/trained-v8-potions/current --decay-updates 10745 \
+  --output runs/bootstrap-20261008/trained-v8-decay
 ```
 
 衰减跑完的检查点是最终检查点，不能再续训；中途中断可用同一 `--decay-updates` 从其 `current` 续接。

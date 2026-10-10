@@ -130,7 +130,9 @@ internal static class SelectionCapture
 
 	internal static SelectionScope? Enter(MethodBase method, object[] args, object? source = null)
 	{
-		Player player = args.OfType<Player>().FirstOrDefault() ?? (source as Reward)?.Player;
+		// An entry given its cards instead of a player (Royal Stamp, Sapphire Seed) selects for their owner.
+		Player player = args.OfType<Player>().FirstOrDefault() ?? (source as Reward)?.Player
+			?? args.OfType<IReadOnlyList<CardModel>>().FirstOrDefault()?.FirstOrDefault()?.Owner;
 		if (!Prepare(player))
 		{
 			return null;

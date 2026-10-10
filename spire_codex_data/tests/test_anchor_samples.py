@@ -49,8 +49,10 @@ def test_every_kind_starts_from_the_right_side_of_its_node():
         node('rest_site', rest_site_choices=['SMITH'], upgraded_cards=['CARD.BASH']),
         node('boss')])
     found = anchors(run)
-    assert set(found) == {'a01f01-map', 'a01f02r0', 'a01f02-reward', 'a01f02-map', 'a01f03-rest', 'a01f03-map',
-                          'a01f04r0'}
+    assert set(found) == {'a01f01-map', 'a01f02r0', 'a01f02-reward', 'a01f02-claim', 'a01f02-map', 'a01f03-rest',
+                          'a01f03-map', 'a01f04r0', 'a01f04-claim'}
+    # A fight whose record shows no gold gained leaves the claims of its reward screen open.
+    assert found['a01f02-claim']['error'] == 'gold_reward_unsettled'
     deck = lambda a: sorted(c['id'] for c in a['ledger']['deck'])
     # A battle starts before its node; its reward after the fight but before the pick.
     assert 'CARD.ANGER' not in deck(found['a01f02r0']) and 'CARD.ANGER' not in deck(found['a01f02-reward'])
@@ -60,6 +62,28 @@ def test_every_kind_starts_from_the_right_side_of_its_node():
     assert found['a01f03-rest']['expected']['deck'] != sorted(map(anchor.signature, found['a01f03-rest']['ledger']['deck']))
     assert found['a01f02r0']['route'] == ['ancient', 'monster', 'rest_site', 'boss']
     assert 'a01f04-map' not in found  # nothing to travel to after the act boss
+
+
+def test_one_fight_in_two_is_fought_again_with_potions_it_must_use(monkeypatch):
+    belt = ['POTION.FIRE_POTION', 'POTION.BLOCK_POTION', 'POTION.FAIRY_IN_A_BOTTLE']
+    drawn = [anchor.forced_potions(f'fight-{i}', dict(potions=belt)) for i in range(2000)]
+    assert drawn == [anchor.forced_potions(f'fight-{i}', dict(potions=belt)) for i in range(2000)]
+    assert 900 < sum(map(bool, drawn)) < 1100
+    # At least one, any number of those held, and never the potion the game uses by itself.
+    assert {len(d) for d in drawn} == {0, 1, 2} and all(set(d) <= set(belt[:2]) for d in drawn)
+    assert 400 < sum(len(d) == 2 for d in drawn) < 600
+    assert not any(anchor.forced_potions(f'fight-{i}', dict(potions=belt[2:])) for i in range(50))
+    assert anchor.forced_potions('fight', None) == []
+    # The potion anchor starts where the fight does and repeats it.
+    monkeypatch.setattr(anchor, 'forced_potions', lambda fight, state: list(state['potions']))
+    nodes = [node('ancient', 'event'),
+             node('monster', potion_choices=[dict(choice='POTION.FIRE_POTION', was_picked=True)]), node('elite')]
+    run = dict(seed='SEED', ascension=0, map_point_history=[nodes], players=[dict(deck=[STRIKE, DEFEND, BASH], relics=[])])
+    found = anchors(run, ('battle', 'potion'))
+    assert set(found) == {'a01f02r0', 'a01f03r0', 'a01f03r0-potion'}
+    fight, again = found['a01f03r0'], found['a01f03r0-potion']
+    assert again['forced'] == ['POTION.FIRE_POTION'] and again['ledger'] == fight['ledger']
+    assert (again['room'], again['room_type'], again['state']) == (fight['room'], 'elite', 'start')
 
 
 @pytest.mark.parametrize('extra,reason', [
@@ -194,14 +218,15 @@ def test_export_keeps_winning_actions_and_every_fight_outcome(tmp_path):
     rests = dict(run_hash='h', kind='rest', identity={}, anchors=[
         dict(id='rest', kind='rest', status='verified', outcome='matched_record')])
     use = dict(verb='USE_POTION', source_refs=['potion:0'])
-    for name, report, rows in (
-            ('h.battle', battles, [item('won', 'battle', 'combat_solver', use), item('won', 'battle', 'combat_solver', round=2),
-                                   item('lost', 'battle', 'combat_solver'), item('bad', 'battle', 'combat_solver'),
-                                   item('idle', 'battle', 'combat_solver', forced=True)]),
-            ('h.rest', rests, [item('rest', 'rest', 'historical_noncombat')])):
+
+    def write(name, report, rows):
         (tmp_path / 'runs' / f'{name}.json').write_text(json.dumps(report))
         with gzip.open(tmp_path / 'samples' / f'{name}.jsonl.gz', 'wt') as stream:
             stream.write(''.join(json.dumps(row) + '\n' for row in rows))
+    write('h.battle', battles, [item('won', 'battle', 'combat_solver', use), item('won', 'battle', 'combat_solver', round=2),
+                                item('lost', 'battle', 'combat_solver'), item('bad', 'battle', 'combat_solver'),
+                                item('idle', 'battle', 'combat_solver', forced=True)])
+    write('h.rest', rests, [item('rest', 'rest', 'historical_noncombat')])
     (tmp_path / 'h.run.json').write_text(json.dumps(dict(map_point_history=[])))
     (tmp_path / 'manifest.json').write_text(json.dumps(dict(selected=[dict(run_hash='h', path=str(tmp_path / 'h.run.json'))])))
     summary = anchor.export(tmp_path, tmp_path / 'manifest.json')
@@ -233,6 +258,16 @@ def test_export_keeps_winning_actions_and_every_fight_outcome(tmp_path):
     assert (again['counts'], again['combat_outcomes']['counts']) == (summary['counts'], summary['combat_outcomes']['counts'])
     for one, several in (('independent-training', 'again'), ('combat-outcomes', 'again-outcomes')):
         assert gzip.open(tmp_path / f'{one}.jsonl.gz').read() == gzip.open(tmp_path / f'{several}.jsonl.gz').read()
+    # A fight won again with potions forced gives its actions in place of the fight it
+    # repeats; one lost again does not, and the outcomes are those of the first fights.
+    potions = dict(run_hash='h', kind='potion', identity=dict(anchor.BUDGETS), anchors=[
+        dict(fight, kind='potion', id='won-potion', room_type='monster', outcome='win', exit_hp=60),
+        dict(fight, kind='potion', id='idle-potion', room_type='elite', outcome='loss', exit_hp=None)])
+    write('h.potion', potions, [item('won-potion', 'potion', 'combat_solver', use),
+                                item('idle-potion', 'potion', 'combat_solver', use)])
+    forced = anchor.export(tmp_path, tmp_path / 'manifest.json')
+    assert forced['counts'] == {'potion/combat_solver': 1, 'rest/historical_noncombat': 1}
+    assert forced['combat_outcomes'] == summary['combat_outcomes']
 
 
 def grid(edges, kinds):
@@ -560,6 +595,39 @@ def test_native_battles_of_a_run_share_the_solver_and_the_replay_process():
         assert fight['outcome'] == 'win' and fight['exit_hp'] > 0 and len(fight['records']) > 2
     # The same entry state gives the same first decision, whatever the process did before.
     assert first['records'][0]['before_hash'] == again['records'][0]['before_hash']
+
+
+def test_native_potion_anchor_uses_the_named_potions_and_no_other():
+    if os.environ.get('SPIRE_CODEX_DATA_NATIVE_TESTS') != '1':
+        pytest.skip('Set SPIRE_CODEX_DATA_NATIVE_TESTS=1 with the local solver configured')
+    from pathlib import Path
+    from combat_solver_cli.client import DEFAULT_CONFIG, SolverEngine
+    config = Path(os.environ.get('COMBAT_SOLVER_CONFIG', DEFAULT_CONFIG))
+    with SolverEngine(config) as engine:
+        anchor.settle(engine, engine.send(dict(cmd='start_run', character='Ironclad', seed='anchor-potion-check',
+                                               ascension=0, decision_protocol=True)))
+        base = engine.send(dict(cmd='anchor_state'))['save']
+    player = base['players'][0]
+    nodes = [node('ancient', 'event'), node('monster')]
+    run = dict(seed='anchor-potion-check', ascension=0, map_point_history=[nodes],
+               players=[dict(deck=player['deck'], relics=player['relics'])])
+    belt = ['POTION.BLOCK_POTION', 'POTION.FIRE_POTION', 'POTION.FIRE_POTION']
+    state = dict(deck=player['deck'], relics=player['relics'], potions=belt, hp=player['max_hp'],
+                 max_hp=player['max_hp'], gold=99)
+    save = anchor.build_save(base, state, run, 1, 2, nodes[1], 'potion-check')
+    spot = dict(floor=2, map_point_type='monster', second_boss=False, route=['ancient', 'monster'],
+                room_type='monster', room=dict(type='combat', encounter='TOADPOLES_WEAK'))
+    budgets = dict(budget_ms=200, elite_budget_ms=200, boss_budget_ms=200)
+
+    def used(fight):
+        return sorted(next(e['content_id'] for e in r['observation']['entities'] if e.get('ref') == r['label']['source_refs'][0])
+                      for r in fight['records'] if r['label']['verb'] == 'USE_POTION')
+    with anchor.RunProcess(config) as shared, anchor.RunProcess(config) as second:
+        # A fight this easy is not worth a potion to the solver.
+        assert used(anchor.play_battle(shared, second, save, dict(spot), budgets)) == []
+        for forced in (['POTION.FIRE_POTION'], ['POTION.BLOCK_POTION', 'POTION.FIRE_POTION', 'POTION.FIRE_POTION']):
+            fight = anchor.play_battle(shared, second, save, dict(spot, forced=forced), budgets)
+            assert fight['outcome'] == 'win' and used(fight) == forced
 
 
 def test_replay_audit_reads_old_and_new_replays_alike():

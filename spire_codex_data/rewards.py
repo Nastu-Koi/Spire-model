@@ -10,7 +10,9 @@ UNRECOVERED = {'treasure_offer_unknown', 'treasure_mixed_rewards', 'treasure_gol
               'treasure_observation_ambiguous', 'treasure_potion_timing_unknown',
               'reward_order_unknown', 'reward_offer_unrecorded', 'reward_offer_differs_from_record',
               'reward_potion_timing_unknown', 'recorded_reward_not_legal',
-              'covered_by_unclaimed_reward_group', 'gold_reward_multiple_sources'}
+              'covered_by_unclaimed_reward_group', 'gold_reward_multiple_sources',
+              'reward_potion_source_unknown', 'reward_relic_source_unknown', 'claimed_reward_not_held',
+              'claim_opens_another_choice'}
 
 # Native 0.111 gold sources besides the base combat reward. Some are deliberately
 # conservative (an inactive Maw Bank is also rejected); the summary is not a
@@ -34,6 +36,39 @@ def settled_gold(node, before, after):
             or stats.get('gold_stolen') or stats.get('stolen_loot')
             or any(r.get('model_id') == 'ENCOUNTER.GREMLIN_MERC_NORMAL' for r in node['rooms'])):
         raise ValueError('gold_reward_multiple_sources')
+
+
+# A potion a fight leaves in the belt without a reward: procured while it is fought,
+# or by the relic the fight's reward gave. The record lists it like a claimed reward.
+POTION_CARDS = {'CARD.ALCHEMIZE'}
+POTION_RELICS = {'RELIC.DELICATE_FROND', 'RELIC.PETRIFIED_TOAD'}
+POTION_PICKUPS = {'RELIC.ALCHEMICAL_COFFER', 'RELIC.CAULDRON', 'RELIC.LOST_COFFER', 'RELIC.PHIAL_HOLSTER'}
+
+
+def claimed(node, before, after):
+    """The free rewards taken from a fight's reward screen, and the screen they were on:
+    (relics, gold, potions taken; relics and potions shown).
+
+    The record says what was taken at the node, not from where or in which order. It is
+    read as the reward screen only where nothing else at the node gives the same thing:
+    one gold source, at most one potion and no other way to a potion, a relic only after
+    an elite. A discarded potion has no time within the node; a used one is taken to
+    have been used in the fight.
+    """
+    stats = node['player_stats'][0]
+    settled_gold(node, before, after)
+    if stats.get('potion_discarded'):
+        raise ValueError('reward_potion_timing_unknown')
+    potions, relics = stats.get('potion_choices', []), stats.get('relic_choices', [])
+    taken = [x['choice'] for x in relics if x.get('was_picked')], [x['choice'] for x in potions if x.get('was_picked')]
+    held = {r['id'] for state in (before, after) for r in state['relics']}
+    cards = {c['id'] for state in (before, after) for c in state['deck']}
+    if len(potions) > 1 or taken[1] and (held & POTION_RELICS or set(taken[0]) & POTION_PICKUPS or cards & POTION_CARDS):
+        raise ValueError('reward_potion_source_unknown')
+    if len(relics) > 1 or relics and node['rooms'][0]['room_type'] != 'elite':
+        raise ValueError('reward_relic_source_unknown')
+    return dict(relics=taken[0], gold=stats['gold_gained'], potions=taken[1]), dict(
+        relics=[x['choice'] for x in relics], potions=[x['choice'] for x in potions])
 
 
 def evidence(stats):

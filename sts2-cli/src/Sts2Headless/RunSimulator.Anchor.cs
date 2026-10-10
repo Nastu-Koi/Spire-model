@@ -138,7 +138,7 @@ public partial class RunSimulator
     /// offer in its recorded order), shop (cards: the recorded character card of
     /// each slot, relics: the recorded relic of each slot), event (event: the
     /// event entered as the game generates it for this run and state), or rewards
-    /// (potions, relics, cards: a reward screen holding exactly these), treasure
+    /// (gold, potions, relics, cards: a reward screen holding exactly these), treasure
     /// (relic: the recorded single-player offer, gold_roll: one possible raw chest
     /// roll, 42..52, to be constrained by the caller against the node outcome).
     public Dictionary<string, object?> AnchorRoom(JsonElement cmd)
@@ -232,6 +232,9 @@ public partial class RunSimulator
                     // order the game lists them. Nothing is generated, so no relic or
                     // stream changes what the record shows.
                     var rewards = new List<Reward>();
+                    // The amount the screen shows; what claiming it pays is the game's to modify.
+                    if (room.TryGetProperty("gold", out var gold))
+                        rewards.Add(new GoldReward(gold.GetInt32(), player));
                     if (room.TryGetProperty("potions", out var potions))
                         rewards.AddRange(potions.EnumerateArray().Select(id =>
                             new PotionReward(ModelDb.GetById<PotionModel>(AnchorId(id.GetString())).ToMutable(), player)));

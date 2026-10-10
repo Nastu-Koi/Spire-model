@@ -117,7 +117,8 @@ internal static class LiveBridge
             foreach (var task in Pending.Where(t => t.IsCompleted).ToArray())
             {
                 Pending.Remove(task);
-                task.GetAwaiter().GetResult();
+                // A hand closing the screen cancels the task: it has ended, nothing failed.
+                if (!task.IsCanceled) task.GetAwaiter().GetResult();
             }
             if (_rewardError is { } rewardError)
             {

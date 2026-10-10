@@ -225,7 +225,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 			}
 			bool reuse = request.TryGetProperty("reuse_turn_plan", out var reuseValue) && reuseValue.GetBoolean();
 			int turn = player.PlayerCombatState.TurnNumber;
-			string policy = string.Join("|", new[] { "budget_ms", "boss_budget_ms", "potions", "potion_policy", "beam_width", "beam_portfolio" }
+			string policy = string.Join("|", new[] { "budget_ms", "boss_budget_ms", "potions", "potion_policy", "potion_directives", "beam_width", "beam_portfolio" }
 				.Select(k => request.TryGetProperty(k, out var v) ? v.GetRawText() : ""));
 			if (!reuse || _planTurn != turn || _planPolicy != policy) _turnPlan.Clear();
 			object obj2;
@@ -453,7 +453,14 @@ internal sealed class SolverAdapter(Assembly assembly)
 				throw new ArgumentException("potion_policy must be Smart, Disabled or RequireAtLeastOne");
 			}
 			object obj6 = Enum("SolverPotionPolicy", text);
-			object obj7 = New("PotionStrategySnapshot", obj6, Array.CreateInstance(Type("PotionSlotDirective"), 0));
+			// A directive names a belt slot and the potion in it: Force (the route must use it), Disabled or Smart.
+			List<JsonElement> given = request.TryGetProperty("potion_directives", out var directivesValue) ? directivesValue.EnumerateArray().ToList() : new List<JsonElement>();
+			Array directives = Array.CreateInstance(Type("PotionSlotDirective"), given.Count);
+			for (int i = 0; i < given.Count; i++)
+			{
+				directives.SetValue(New("PotionSlotDirective", given[i].GetProperty("slot").GetInt32(), given[i].GetProperty("potion").GetString(), Enum("SolverPotionDirective", given[i].GetProperty("directive").GetString()!)), i);
+			}
+			object obj7 = New("PotionStrategySnapshot", obj6, directives);
 			Action<string> action = delegate(string s)
 			{
 				Console.Error.WriteLine(s);
