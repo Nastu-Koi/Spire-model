@@ -38,18 +38,21 @@ class Budgets:
 
 @dataclass
 class TrainingConfig(Budgets):
-    epochs: int = 4
+    # One pass per iteration: a run's decisions share its outcome, and more passes
+    # over few runs fit the runs' identities before anything that transfers.
+    epochs: int = 1
     # "checkpoint": the encoder and global layers start from the policy checkpoint
     # that also supplies the vocabulary; "random": only the vocabulary is taken.
     init: str = "checkpoint"
     # Muon for the Transformer matrices; AdamW for the lookup tables (`embedding_lr`,
     # zero keeps them frozen), the two-logit head (`head_lr`) and the rest
-    # (`backbone_lr`), as for the policy.
+    # (`backbone_lr`), as for the policy. The tables stay frozen by default: they are
+    # trained already, and card identities are where a few hundred runs are memorized first.
     muon_lr: float = 2e-4
     muon_momentum: float = 0.95
     muon_ns_steps: int = 5
     backbone_lr: float = 1e-5
-    embedding_lr: float = 1e-3
+    embedding_lr: float = 0.0
     head_lr: float = 1e-3
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0

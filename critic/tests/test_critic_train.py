@@ -72,6 +72,7 @@ def test_the_profile_gives_the_model_and_the_critic_section(profile):
     config = CriticConfig.load(profile)
     assert config.model == ModelConfig.tiny()
     assert (config.training.epochs, config.training.logical_batch_size, config.training.init) == (2, 4, "checkpoint")
+    assert (TrainingConfig().epochs, TrainingConfig().embedding_lr) == (1, 0.0)
     with pytest.raises(ValueError):
         TrainingConfig(init="policy")
     with pytest.raises(ValueError):
@@ -94,15 +95,19 @@ def test_the_body_is_the_policy_weights_and_the_optimizer_groups_are_the_policy_
 
     optimizer = build_optimizer(net, TrainingConfig(precision="no"))
     names = {group["name"] for group in optimizer.param_groups}
-    assert names == {"muon", "embedding_no_decay", "head_decay", "head_no_decay", "backbone_decay", "backbone_no_decay"}
+    assert names == {"muon", "head_decay", "head_no_decay", "backbone_decay", "backbone_no_decay"}
     grouped = {id(p) for group in optimizer.param_groups for p in group["params"]}
-    assert grouped == {id(p) for _, p in net.trainable()}
+    assert grouped == {id(p) for _, p in trainable(net, TrainingConfig(precision="no"))}
+    assert len(grouped) == len(net.trainable()) - 4
     assert not any(id(p) in grouped for p in (net.body.query.weight, net.body.key.weight))
     muon = next(group for group in optimizer.param_groups if group["name"] == "muon")
     linears = [m for n, m in net.body.named_modules() if isinstance(m, torch.nn.Linear)
                and (".attention." in n or ".ffn." in n) and n.startswith(("blocks.", "encoder.local_blocks."))]
     assert len(muon["params"]) == len(linears) and all(p.ndim == 2 for p in muon["params"])
-    tables = next(group for group in optimizer.param_groups if group["name"] == "embedding_no_decay")
+    # Frozen by default; a positive rate puts the four tables in a group of their own.
+    assert "embedding_no_decay" not in names
+    tables = next(group for group in build_optimizer(net, TrainingConfig(precision="no", embedding_lr=1e-3)).param_groups
+                  if group["name"] == "embedding_no_decay")
     assert len(tables["params"]) == 4 and tables["lr"] == 1e-3 and tables["weight_decay"] == 0.0
 
     # A linear probe trains the head alone, with AdamW alone; `train_blocks` adds the top layers.
@@ -115,8 +120,8 @@ def test_the_body_is_the_policy_weights_and_the_optimizer_groups_are_the_policy_
     with pytest.raises(ValueError):
         TrainingConfig(train_blocks=0)
     frozen = trainable(net, TrainingConfig(precision="no", embedding_lr=0.0))
-    assert len(frozen) == len(net.trainable()) - 4 and not any(name.endswith(("symbol.weight", "relation.weight")) for name, _ in frozen)
-    assert "embedding_no_decay" not in {g["name"] for g in build_optimizer(net, TrainingConfig(precision="no", embedding_lr=0.0)).param_groups}
+    assert not any(name.endswith(("symbol.weight", "relation.weight")) for name, _ in frozen)
+    assert len(trainable(net, TrainingConfig(precision="no", embedding_lr=1e-3))) == len(net.trainable())
 
 
 def test_the_untrained_head_predicts_the_base_rates(runs):
