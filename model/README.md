@@ -4,7 +4,7 @@
 
 ## 当前训练安排
 
-当前配置为 [configs/rtxpro6000.json](../configs/rtxpro6000.json)：约 20M 共享策略，默认 A0，BC 可使用 A0–A10 混合示范。[configs/rtxpro6000-200m.json](../configs/rtxpro6000-200m.json) 是约 196M 的目标配置，取舍见 [ARCHITECTURE](../ARCHITECTURE.md)。BC 使用全部传入的可训练宏动作，默认持续至手动中断；不划分验证集、不自动评估、不按表现降学习率或早停。可用 `--epochs N` 指定本次追加轮数，表现由使用者自行验证。
+当前配置为 [configs/rtxpro6000.json](../configs/rtxpro6000.json)：约 20M 共享策略，默认 A0，BC 可使用 A0–A10 混合示范。[configs/rtxpro6000-200m.json](../configs/rtxpro6000-200m.json) 是约 196M 的目标配置，取舍见 [ARCHITECTURE](../ARCHITECTURE.md)。BC 使用传入数据里除固定留出组以外的全部可训练宏动作（规则见 [固定留出集](#固定留出集)），默认持续至手动中断；不自动评估、不按表现降学习率或早停。可用 `--epochs N` 指定本次追加轮数，表现由使用者自行验证。
 
 | 设置 | 当前值 |
 | --- | --- |
@@ -19,6 +19,7 @@
 | 全局层编译 | `compile_blocks: true`，每个进程首次前向约一分钟编译 |
 | 参数变化统计 | 每 100 次更新抽样 |
 | 采样温度 | `combat_temperature` 0.3、`other_temperature` 0.7：`collect` 里战斗阶段的决策和其它决策各按自己的温度抽样。温度是策略定义的一部分，记在对局文件和检查点里；评估取最可能动作，不受影响 |
+| 留出集 | 按 seed 的哈希固定留出 2% 的样本组，`bootstrap` 默认跳过，只用 `heldout-nll` 打分；见 [固定留出集](#固定留出集) |
 
 查找表学习率的依据见 [优化器](../ARCHITECTURE.md#优化器与精度)，其余学习率未作筛选。分片窗口只控制内存占用；逻辑批次跨窗口补齐，每轮仅最后一批可不足 512。显存预算触发微批拆分时累积梯度，一个逻辑批次只更新一次。角色×阶段的权重与损失尺度见 [批次与加载](../ARCHITECTURE.md#批次整理与数据加载) 和 [优化器](../ARCHITECTURE.md#优化器与精度)。每个样本带来源（`source`：示范、求解器标签或采样对局）和由索引计数给出的权重；按来源分配份额是索引的事，训练器只按权重求和。
 
@@ -108,6 +109,21 @@ python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-
 
 删除整局 PPO 之前保存的检查点仍能载入：权重里的价值头张量（`value.*`）和它在优化器里的参数组被忽略，其余权重、优化器动量和调度进度照常严格续训；manifest 里已经退役的设置项（`clip_ratio`、`sampling_temperature` 等）读入时丢弃，温度取当前默认值。做过 PPO 采样轮、或调度状态停在 PPO 的检查点不能严格续训，只能 `--weights-only` 重新开始，或者用于采样和评估。
 
+## 固定留出集
+
+训练数据按 seed 分组固定留出约 2%，永不训练，只用来比较 NLL。规则是 `model/data.py` 的 `held_out`：取索引行的 `seed`（独立监督样本的 seed 是来源对局 seed 的 `split_group` 哈希，采样对局的是游戏 seed），其 `fingerprint` 的前 32 位作为 [0, 1) 里的小数小于 `HELDOUT_FRACTION`（0.02）即留出。它只是 seed 的函数：同一 seed 的全部片段落在同一侧，与分片边界、导入批次和子集无关，所以同一个 seed 在 `imported-potions` 和它的 1in8 子集里都在同一侧，数据重新导入或增长也不改变已有 seed 的归属。依据见 [评估](../ARCHITECTURE.md#评估)。
+
+`bootstrap` 默认跳过留出组（`--include-heldout` 关掉跳过）：加载器只读训练部分的索引行，留出组的行连解析都不做，样本权重按训练部分归一。每轮记录（`history.jsonl` 的 `metrics`）带 `held_out`（留出的组数、宏动作数、seed 数）、`training`（训练部分的同样计数）和 `samples`（加载器这一轮交给训练器的宏动作数）：`samples` 等于 `training.macros`，与 `held_out.macros` 相加等于索引总数，这就是留出组没进训练窗口的证据；检查点的 `progress.held_out` 保存同样的计数，`training_seeds` 仍记录整个数据集的 seed。
+
+留出 NLL：
+
+```bash
+python -m model --device cuda heldout-nll --data runs/bootstrap-20261008/imported-potions-1in8 \
+  --checkpoint runs/bootstrap-20261008/trained-v8-potions/epoch-000017
+```
+
+报告留出部分每个角色×阶段组的 NLL 总和、每宏动作 NLL（`nll_per_macro`）、每决策 NLL（`nll_per_branch`）及宏动作数与决策数，再按角色、按阶段和全体汇总；`equal_group_nll_per_macro` 是各组每宏动作 NLL 的平均，与训练损失的组等权定义一致，可直接与训练日志的 `loss` 对照；`a0` 下是其中 A0 样本的同样表格；`held_out.of` 是整个数据集的计数。它只报告，不选模型、不早停。
+
 ## 策略与控制器
 
 | 决策 | 处理方式 |
@@ -152,7 +168,15 @@ python -m model --device cuda collect --checkpoint runs/bootstrap/current \
 
 对局文件记录每个宏动作的 `old_log_prob`（采样时的对数概率）、阶段、随后支付的奖励，以及整局的账本、策略版本与权重摘要、数值后端和采样温度。`collect` 按检查点的 `combat_temperature`／`other_temperature` 抽样，每个决策按自己阶段的温度；`collect --config <profile>` 可换成 profile 里的温度，其余设置必须与检查点一致。greedy 的 `evaluate` 记 `temperature: null`，概率按温度 1 记。
 
-`evaluate` 的报告除通关率外，还列出各角色通过每一幕的对局数、奖励均值（`mean_score`，即通关率的两倍减一）、平均到达楼层和各次失败止步的楼层；楼层跨幕累计，只统计已完成的对局。
+`evaluate` 的报告除通关率外，还列出各角色通过每一幕的对局数、奖励均值（`mean_score`，即通关率的两倍减一）、平均到达楼层和各次失败止步的楼层；楼层跨幕累计，只统计已完成的对局。每角色的通关率和各幕通过率都带 Wilson 95% 区间（`wilson_95`、`act_pass_wilson_95`）；`pooled` 是五角色全部尝试合计的通关数、通关率、各幕通过数与通过率及各自的区间，每角色局数相同时合计率就是五角色平均率。
+
+汇总与配对比较读已写出的评估目录（`metadata/seeds.json` 和各局文件，逐局读回）：
+
+```bash
+python -m model compare runs/eval-a runs/eval-b --head 60
+```
+
+对每个目录给出整个目录的报告和每角色前 `--head` 个种子（默认 60，即前 300 局）的子表，格式与 `evaluate` 相同；给两个目录时按（角色，seed）配对，对通关、过第一幕、过第二幕各做精确符号检验：只数两边不一致的配对（`only_first`、`only_second`），p 值双侧；整个目录和前 `--head` 个种子各报一次，只有一方跑过的种子计入 `unpaired`、不参与检验。未完成的对局算没通关、没过幕。一个目录也可以单独汇总。
 
 奖励只在一局结束时给：通关 +1，没有通关 −1，过幕不给分。未完成或出错的对局不伪造为正常死亡；采样轮里有这样的对局时 `collect` 报错，对局仍写出供检查。
 
@@ -185,11 +209,12 @@ Steam Mod 的安装和接管入口见 [steam_recorder](../steam_recorder/README.
 | 模块 | 职责 |
 | --- | --- |
 | `control.py`、`treasure_rule.py`、`crystal_rule.py` | 控制分工、宝箱流程、水晶球规划 |
-| `independent.py`、`recorder.py`、`dataset_index.py`、`data.py` | 导入、版本化索引、策略样本与权重 |
+| `independent.py`、`recorder.py`、`dataset_index.py`、`data.py` | 导入、版本化索引、策略样本与权重、留出规则 |
 | `representation.py`、`public_history.py`、`rules.py`、`batch.py` | 公开输入、冻结词表、规则和张量打包 |
 | `model.py`、`attention.py`、`policy.py` | 网络、选择与可微重放 |
 | `loader.py`、`trainer.py`、`optim.py`、`checkpoint.py` | 数据供给、加权 NLL 更新、学习率日程与恢复 |
 | `rollout.py`、`rewards.py`、`steam.py` | 对局、奖励账本与实机控制 |
+| `evaluation.py` | 评估报告、合计与配对符号检验、留出 NLL 的表格 |
 | `sampling.py`、`wire.py`、`processes.py` | 多进程采样、打包决策的跨进程格式、随父进程结束的子进程 |
 | `monitor.py`、`monitor_web/` | 只读日志监测 |
 
