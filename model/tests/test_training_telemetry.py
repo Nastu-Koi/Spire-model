@@ -139,3 +139,30 @@ def test_update_counter_survives_epoch_boundaries():
     assert events[0] == (31, 1)
     assert {epoch for _, epoch in events} == {1, 2}
     assert [step for step, _ in events] == list(range(31, learner.updates + 1))
+
+
+def test_an_update_limit_stops_in_the_middle_of_an_epoch_and_reports_it():
+    learner, runs = setup_learner()
+    random.seed(2)
+    whole = learner.bootstrap(runs, epochs=1)[-1]["updates"]
+    assert whole > 2 and "update_limit" not in learner.bootstrap(runs, epochs=1)[-1]
+
+    learner, runs = setup_learner()
+    events, epochs = [], []
+    random.seed(2)
+    # Without an epoch budget the limit is what ends the run, one update into the second epoch.
+    metrics = learner.bootstrap(
+        runs, epochs=None, max_updates=whole + 1,
+        on_update=lambda metrics, **context: events.append((metrics["updates"], context["epoch"])),
+        on_epoch=lambda epoch, metrics: epochs.append((epoch, metrics["updates"], metrics.get("update_limit"))))
+    assert learner.updates == whole + 1
+    assert [step for step, _ in events] == list(range(1, whole + 2))
+    assert epochs == [(1, whole, None), (2, whole + 1, whole + 1)]
+    assert metrics[-1]["update_limit"] == whole + 1 and learner.policy_version == 2
+
+    # A limit an epoch reaches exactly ends the run there, whatever epochs were asked for.
+    learner, runs = setup_learner()
+    random.seed(2)
+    assert len(learner.bootstrap(runs, epochs=3, max_updates=whole)) == 1 and learner.updates == whole
+    with pytest.raises(ValueError, match="at least one update"):
+        learner.bootstrap(runs, max_updates=0)

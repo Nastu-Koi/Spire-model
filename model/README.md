@@ -109,6 +109,7 @@ python -m model --device cuda bootstrap \
 | `--checkpoint <输出目录>/current` | 严格续训，恢复优化器、随机状态和调度进度；训练配置与版本必须一致 |
 | `--checkpoint <输出目录>/current --config <profile>` | 严格续训，只把采样温度换成 profile 里的；其余设置必须与检查点一致 |
 | `--checkpoint <输出目录>/current --decay-updates N --output <新目录>` | 收尾：严格续训并在 N 次更新内把所有学习率线性降到 0，然后停止并保存；N 取已完成更新数的 10%–20% |
+| 任一启动方式加 `--max-updates N` | 做满 N 次更新就保存并停止，可以停在一轮中途（这一段按一轮记入历史并存 `epoch-*`，记录带 `update_limit`）。用于按固定更新数比较设置的探针：两条探针各用自己的输出目录，之后用 `heldout-nll` 比较 |
 
 续训示例：
 
