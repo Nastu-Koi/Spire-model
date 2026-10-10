@@ -262,7 +262,8 @@ def update(learner, rounds, supervised, *, temperature=None, updates=None, windo
     """One advantage-weighted pass of `learner`: half of every update the sampled
     decisions of `rounds` (the buffer's round directories, each with its advantages),
     half the supervised data of the `supervised` directories (demonstrations first,
-    then imports of student battles). The held-out seeds of both are left out. Returns
+    then imports of student battles). The held-out seeds of both are left out.
+    `window_shards` shards are in memory at a time, between the two streams. Returns
     the pass's metrics, with `awr`: β, the effective share, both losses and how much
     data each half drew from."""
     config = learner.config
@@ -285,8 +286,12 @@ def update(learner, rounds, supervised, *, temperature=None, updates=None, windo
     capped = sorted("/".join(key[:2]) for key, weight in group_weights(ours.source_counts).items()
                     if shares[key] < weight)
 
+    # The two streams share what one stream of behavior cloning has: half of the
+    # feeders each, and half of the shards held in memory at a time.
+    window = max(1, window_shards // 2)
+
     def batches(shards, weights):
-        return lambda: stream(shards, learner.vocabulary, halves, window_shards=window_shards, shuffle=True,
+        return lambda: stream(shards, learner.vocabulary, halves, window_shards=window, shuffle=True,
                               weights=weights)
 
     mixed = Mixed(batches(ours, shares), batches(theirs, theirs.weights),
