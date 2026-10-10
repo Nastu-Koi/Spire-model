@@ -297,6 +297,9 @@ def parser():
                    help="Updates per iteration: `round` (as many as a pass over the newest round "
                         "makes, drawn from the whole buffer), `buffer` (a pass over the buffer) "
                         "or a number")
+    x.add_argument("--weight-cap", type=float, default=10.0,
+                   help="What one sampled decision of a small character and phase group may weigh "
+                        "before its advantage, in even shares of the buffer; 0 for no cap")
     x.add_argument("--window-shards", type=int, default=8)
     x.add_argument("--evaluate-every", type=int, default=5, help="Iterations between evaluations")
     x.add_argument("--eval-seeds", help="Seed file of the evaluations; without it none is made")
@@ -667,7 +670,8 @@ def main(argv=None):
                 solver_config=args.solver_config, advantage=args.advantage, lam=args.lam, critic=args.critic,
                 critic_config=args.critic_config, critic_gate=args.critic_gate == "on", gate=args.gate,
                 beta=args.beta, ess_share=args.ess_share, beta_min=args.beta_min, beta_max=args.beta_max,
-                updates=args.updates, window_shards=args.window_shards, evaluate_every=args.evaluate_every,
+                updates=args.updates, weight_cap=args.weight_cap, window_shards=args.window_shards,
+                evaluate_every=args.evaluate_every,
                 eval_seeds=args.eval_seeds, eval_runs_per_character=args.eval_runs_per_character,
                 eval_workers=args.eval_workers)
             state = Driver(args.output, settings, args.device, runtime=runtime).run(args.iterations)

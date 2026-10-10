@@ -321,8 +321,9 @@ def test_the_controls_run_without_a_critic_and_without_weighting(world):
     state = driver(world, advantage="return", labels=False, updates="buffer", eval_seeds=None).run(3)
     done = state["iterations"]["2"]["update"]
     assert done["pass_updates"] > 3 and done["rounds"] == ["round-1", "round-2"] and done["temperature"]["rule"] == "tuned"
+    assert done["capped_groups"] == [] and state["iterations"]["2"]["settings"]["weight_cap"] == awr.WEIGHT_CAP
     for wrong in (dict(advantage="ppo"), dict(updates="none"), dict(updates="0"), dict(beta="-1"),
-                  dict(label_fraction=2.0), dict(runs_per_character=0)):
+                  dict(label_fraction=2.0), dict(runs_per_character=0), dict(weight_cap=0.5)):
         with pytest.raises(ValueError):
             settings(world, **wrong)
 
@@ -376,6 +377,7 @@ def test_the_command_line_runs_the_iterations(world, monkeypatch, capsys):
     assert (arguments.runs_per_character, arguments.buffer_iterations, arguments.evaluate_every) == (200, 10, 5)
     assert (arguments.label_fraction, arguments.lam, arguments.beta, arguments.updates) == (0.25, 0.9, "auto", "round")
     assert (arguments.advantage, arguments.critic_gate, arguments.ess_share) == ("critic", "on", 0.3)
+    assert arguments.weight_cap == awr.WEIGHT_CAP == Settings(checkpoint="c", demonstrations=["d"]).weight_cap
     monkeypatch.setattr(model.engine, "CliEngine", lambda root=None: journeys.engine())
     common = ["iterate", "--checkpoint", str(world.checkpoint), "--demonstrations", str(world.demonstrations),
               "--output", str(world.output), "--iterations", "1"]
