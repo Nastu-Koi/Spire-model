@@ -187,21 +187,35 @@ def load_runs(path):
     return runs
 
 
-def held_out(run, validation_fraction):
-    """Whether a run's seed falls in the validation part. Every run and fragment of
-    one seed lands on the same side."""
+# The share of seeds whose runs are never trained on: about one in fifty, which of the
+# imported demonstrations is about a hundred thousand macro-actions, hundreds in every
+# (character, phase) group. They are only ever scored (`Learner.evaluate_bootstrap`).
+HELDOUT_FRACTION = 0.02
+
+
+def held_out(run, fraction=HELDOUT_FRACTION):
+    """Whether a run's seed falls in the held-out part. The side is a function of the
+    seed alone (the first 32 bits of its fingerprint, as a fraction of 2**32, under
+    `fraction`): every run and fragment of one seed lands on the same side, in whatever
+    shard it is stored, whatever else the data set holds and however it was imported."""
     from .protocol import fingerprint
 
     key = str(run.get("seed", run["run_id"]))
-    return int(fingerprint(key)[:8], 16) / 2**32 < validation_fraction
+    return int(fingerprint(key)[:8], 16) / 2**32 < fraction
 
 
-def split_runs(runs, validation_fraction=0.2):
-    """Group every seed across characters/fragments; never split adjacent decisions."""
-    train, validation = [], []
+def split_runs(runs, fraction=HELDOUT_FRACTION):
+    """(training, held-out) runs in memory: every seed goes whole to one side, and
+    adjacent decisions are never split."""
+    train, held = [], []
     for run in runs:
-        (validation if held_out(run, validation_fraction) else train).append(run)
-    return train, validation
+        (held if held_out(run, fraction) else train).append(run)
+    return train, held
+
+
+def macro_count(runs):
+    """The policy macro-actions of runs in memory."""
+    return sum(1 for run in runs for _ in policy_macros(run))
 
 
 class RunShards:
@@ -224,10 +238,11 @@ class RunShards:
     def __len__(self):
         return len(self.rows)
 
-    def split(self, validation_fraction):
+    def split(self, fraction=HELDOUT_FRACTION):
+        """(training, held-out) parts, by seed (`held_out`), over the same shards."""
         parts = [], []
         for row in self.rows:
-            parts[held_out(row, validation_fraction)].append(row)
+            parts[held_out(row, fraction)].append(row)
         return RunShards(self.directory, parts[0]), RunShards(self.directory, parts[1])
 
     @property
@@ -238,6 +253,10 @@ class RunShards:
             for phase, macros in row["phases"].items():
                 counts[row["character"], phase] += macros
         return counts
+
+    @property
+    def macros(self):
+        return sum(self.counts.values())
 
     @property
     def seeds(self):
@@ -296,6 +315,22 @@ class RunShards:
         """Lists of validated runs, each from `shards` shard files."""
         for names in self.window_names(shards, shuffle):
             yield self.read(names)
+
+
+def split_held_out(runs, fraction=HELDOUT_FRACTION):
+    """(training part, held-out part) of `runs`, a list in memory or RunShards: the
+    one rule, `held_out`, whatever form the data takes."""
+    if isinstance(runs, RunShards):
+        return runs.split(fraction)
+    return split_runs(runs, fraction)
+
+
+def extent(runs):
+    """How much data `runs` is: its sample groups, policy macro-actions and seeds."""
+    if isinstance(runs, RunShards):
+        return {"groups": len(runs), "macros": runs.macros, "seeds": len(runs.seeds)}
+    return {"groups": len(runs), "macros": macro_count(runs),
+            "seeds": len({str(run["seed"]) for run in runs})}
 
 
 @dataclass
