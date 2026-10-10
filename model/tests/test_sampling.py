@@ -17,7 +17,7 @@ from model.model import PolicyNetwork
 from model.policy import prepare_decisions
 from model.protocol import CHARACTERS, ProtocolError
 from model.representation import observation
-from model.rollout import RolloutRunner, collect_round
+from model.rollout import RolloutRunner, climbed, collect_round, stand
 from model.sampling import Samplers, _without_frames
 from model.testing import SyntheticEngine, demonstration
 from model.tests.test_encoding import build, duel, logits, map_frame
@@ -176,11 +176,11 @@ def test_a_round_sampled_in_processes_replays_as_it_was_stored(tmp_path):
     done = []
     with samplers(runner, engines=5, processes=3) as pool:
         paths = collect_round(pool, runner, seeds, tmp_path / "round",
-                              on_run=lambda *progress: done.append(progress))
+                              on_run=lambda index, run: done.append((index, run["character"], run["status"])))
     runs = read(paths)
     assert [run["status"] for run in runs] == ["complete"] * 20
-    assert [(completed, total) for _, completed, total in done] == [(n, 20) for n in range(1, 21)]
-    assert sorted(character for character, _, _ in done) == sorted(list(CHARACTERS) * 4)
+    # Every job is announced once as it ends, by its index, with the run's summary.
+    assert sorted(done) == [(index, run["character"], "complete") for index, run in enumerate(runs)]
     # Every run beside its journal and its fights; the assignment before any of them.
     assert all(path.with_suffix(".jsonl").exists() and path.with_suffix(".combats.jsonl.gz").exists()
                for path in paths)
@@ -251,10 +251,12 @@ def test_a_run_handed_over_without_its_frames_still_says_where_it_stood():
     run = runner.run(Climbing(4, 2), "Ironclad", "climb", sample=False)
     handed = _without_frames(run)
     assert "environment_actions" not in handed and all("steps" not in macro for macro in handed["macros"])
-    assert [macro["branches"] for macro in handed["macros"]] \
-        == [sum(not step["forced"] for step in macro["steps"]) for macro in run["macros"]]
-    assert handed["climb"] == climb(run) == ({1: max(handed["climb"][0].values())}, {1: 17})
-    assert handed["climb"][0][1] > 1
+    assert [(macro["branches"], macro["decisions"]) for macro in handed["macros"]] \
+        == [(sum(not step["forced"] for step in macro["steps"]), len(macro["steps"])) for macro in run["macros"]]
+    # A run records where it stood as it is played; the record reads back as the frames do.
+    assert climb(handed) == climb(run) == ({1: max(run["climb"]["reached"].values())}, {1: 17})
+    assert climb(run) == climbed(stand(step["frame"]) for macro in run["macros"] for step in macro["steps"])
+    assert climb(run)[0][1] > 1 and climb(json.loads(json.dumps(run))) == climb(run)
     assert evaluate_runs([handed]) == evaluate_runs([run])
 
 

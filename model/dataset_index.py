@@ -1,4 +1,5 @@
-"""Versioned policy counts over immutable demonstration shards."""
+"""Versioned policy counts over immutable shards of runs: imported demonstrations and
+sampled rounds alike."""
 
 import gzip
 import json
@@ -15,6 +16,11 @@ from .protocol import ProtocolError, fingerprint
 
 INDEX = "index.jsonl.gz"
 HEADER = dict(kind="policy_index", control_version=CONTROL_VERSION)
+# What the index says of a sampled run beyond its identity: the buffer keeps the
+# rounds of the last few iterations, and reports count by policy and outcome.
+ROLLOUT_FIELDS = ("policy_version", "policy_digest", "iteration", "victory")
+# Level 6 packs runs within a few percent of level 9 in a third of the time.
+COMPRESSION = 6
 
 
 def read_index(directory):
@@ -28,10 +34,71 @@ def read_index(directory):
         return [json.loads(line) for line in stream if line.strip()]
 
 
-def index_row(run, shard, line):
-    return dict(run_id=run["run_id"], seed=run["seed"], character=run["character"],
-                phases=dict(Counter(m["phase"] for m in policy_macros(run))),
-                contract=fingerprint(run["contract"]), shard=shard, line=line)
+def member(run):
+    """A run as one line of a shard, as a gzip member of its own: a shard is the
+    members of its runs one after another, which reads as one stream."""
+    text = json.dumps(run, ensure_ascii=False, allow_nan=False) + "\n"
+    return gzip.compress(text.encode("utf-8"), COMPRESSION)
+
+
+def index_row(run, shard=None, line=None, phases=None):
+    """The index's row of a run. `phases` is the count of its policy macro-actions by
+    phase, counted here from its frames unless the caller counted them already. The
+    shard and line are left out when the caller does not know them yet."""
+    if phases is None:
+        phases = Counter(m["phase"] for m in policy_macros(run))
+    row = dict(run_id=run["run_id"], seed=run["seed"], character=run["character"],
+               phases=dict(phases), contract=fingerprint(run["contract"]))
+    if run.get("source") == "rollout":
+        row.update({name: run.get(name) for name in ROLLOUT_FIELDS})
+    if shard is not None:
+        row.update(shard=shard, line=line)
+    return row
+
+
+class ShardWriter:
+    """Accepted runs as gzip shards of bounded size, with one index row per run."""
+
+    def __init__(self, directory, shard_samples, *, flush=False):
+        """With `flush`, every row reaches the index file as it is written: a round
+        that is killed keeps the index of what it finished. An import of a million
+        runs is better off buffering."""
+        if type(shard_samples) is not int or shard_samples < 1:
+            raise ValueError("Shard size must be a positive number of samples")
+        self.directory, self.limit = Path(directory), shard_samples
+        (self.directory / "accepted").mkdir()
+        self.index = gzip.open(self.directory / INDEX, "xt", encoding="utf-8")
+        self.index.write(json.dumps(HEADER) + "\n")
+        self.flush = flush
+        self.stream, self.filled, self.shards, self.contracts = None, 0, [], {}
+        self.line = 0
+
+    def write(self, member, row, samples, contract):
+        """A run: its gzip member, its index row without shard and line, how many
+        samples (decision steps) it holds, and the engine contract it names."""
+        if self.stream is None or self.filled >= self.limit:
+            self.close_shard()
+            self.shards.append(f"accepted/{len(self.shards):05}.jsonl.gz")
+            self.stream = (self.directory / self.shards[-1]).open("xb")
+        self.stream.write(member)
+        self.filled += samples
+        self.contracts[row["contract"]] = contract
+        self.index.write(json.dumps(dict(row, shard=self.shards[-1], line=self.line), ensure_ascii=False) + "\n")
+        self.line += 1
+        if self.flush:
+            self.stream.flush()
+            self.index.flush()
+
+    def close_shard(self):
+        if self.stream is not None:
+            self.stream.close()
+        self.stream, self.filled = None, 0
+        self.line = 0
+
+    def close(self):
+        self.close_shard()
+        if not self.index.closed:
+            self.index.close()
 
 
 def _index_shard(task):

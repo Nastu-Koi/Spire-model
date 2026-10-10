@@ -17,7 +17,8 @@ Sampling processes are forked: they share the vocabulary with the collecting pro
 without copying, and never touch its CUDA state. What they pack crosses in the flat
 form of `wire`, each decision with the temperature of its phase. They stay from round
 to round with their engines: an engine process begins its next run without loading
-the game again. Every run is written where it was played; nothing of a round stays in
+the game again. Every run is written where it was played, or handed over compressed
+for the round's shards (`model/buffer.py`) as it ends; nothing of a round stays in
 memory for whatever learns from it.
 """
 
@@ -27,16 +28,18 @@ import os
 import queue
 import threading
 import traceback
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing.connection import wait
 
 import torch
 
+from .control import policy_macros
+from .dataset_index import member
 from .policy import Choice, SessionPolicy, prepare_decisions
 from .processes import end, end_with, release_memory
 from .representation import forget
-from .rollout import RolloutRunner, play, precision_context
-from .trainer import climb
+from .rollout import FULL_RUNS, RolloutRunner, play, precision_context
 from .wire import pack, unpack
 
 # A sampling process says something whenever a decision or a run is ready. Silence
@@ -100,15 +103,28 @@ class _Waiting:
 
 
 def _without_frames(run):
-    """A run as its sampling process hands it over: everything but its frames, which
-    were written with it. Each macro-action says how many decisions it holds."""
+    """A run as its sampling process hands it over: everything but its frames. Each
+    macro-action says how many decisions it holds, as the fights of a sampled run do
+    already."""
     handed = {key: value for key, value in run.items() if key not in ("macros", "environment_actions")}
-    handed["climb"] = climb(run)
     handed["macros"] = [
+        macro if "steps" not in macro else
         dict({key: value for key, value in macro.items() if key != "steps"},
-             branches=sum(not step["forced"] for step in macro["steps"]))
+             branches=sum(not step["forced"] for step in macro["steps"]), decisions=len(macro["steps"]))
         for macro in run["macros"]
     ]
+    return handed
+
+
+def _handed(run, layout):
+    """What crosses to the collecting process of a run: its summary and, where the
+    round keeps the run for training rather than in a file of its own, the run
+    compressed as the line it makes in a shard, with what its index row counts."""
+    handed = _without_frames(run)
+    if not layout["trajectory"]:
+        handed["member"] = member(run)
+        handed["phases"] = dict(Counter(macro["phase"] for macro in policy_macros(run)))
+        handed["stored_steps"] = sum(len(macro["steps"]) for macro in run["macros"] if "steps" in macro)
     return handed
 
 
@@ -135,7 +151,7 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
         torch.set_num_threads(1)
         while True:
             try:
-                settings, digest, jobs, sample = connection.recv()
+                settings, digest, jobs, sample, layout = connection.recv()
             except EOFError:
                 # The collecting process has no more rounds.
                 break
@@ -156,8 +172,8 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
                     if engines[slot] is None:
                         engines[slot] = engine_factory()
                     run = play(engines[slot], runner, jobs[index], sample=sample,
-                               policy=waiting.policy(index))
-                    send(("run", (index, _without_frames(run))))
+                               policy=waiting.policy(index), **layout)
+                    send(("run", (index, _handed(run, layout))))
                     finished.append(index)
 
             # No `with`: after a failure the engine threads wait for choices that will
@@ -240,28 +256,30 @@ class Samplers:
         end(self.samplers)
         self.samplers, self.connections = [], []
 
-    def collect(self, runner, jobs, *, sample=True, on_run=None):
-        """Play `jobs`, each written where and as `rollout.play` writes it. Returns the
-        runs without their frames, in the order of the jobs. A failure ends the
-        processes: there is no telling what their engines are in the middle of."""
+    def collect(self, runner, jobs, *, sample=True, on_run=None, layout=None):
+        """Play `jobs`, each written where and as `rollout.play` writes it under
+        `layout` (`rollout.FULL_RUNS` unless told otherwise). Returns the runs without
+        their frames, in the order of the jobs; `on_run(job index, run)` is told of
+        each as it arrives. A failure ends the processes: there is no telling what
+        their engines are in the middle of."""
         if runner.model is not self.model or runner.vocabulary is not self.vocabulary:
             raise ValueError("The round's model and vocabulary differ from the sampling processes'")
         if not self.samplers:
             raise RuntimeError("The sampling processes have ended")
         try:
-            return self._collect(runner, jobs, sample, on_run)
+            return self._collect(runner, jobs, sample, on_run, FULL_RUNS if layout is None else dict(layout))
         except BaseException:
             self.close()
             raise
 
-    def _collect(self, runner, jobs, sample, on_run):
+    def _collect(self, runner, jobs, sample, on_run, layout):
         self.model.eval()
         self.taken.value = 0
         settings = {name: getattr(runner, name) for name in (
             "precision", "version", "max_steps", "timeout", "ascension", "claim_rewards",
-            "temperatures")}
+            "temperatures", "iteration")}
         for connection in self.connections:
-            connection.send((settings, runner.digest, jobs, sample))
+            connection.send((settings, runner.digest, jobs, sample, layout))
         active = dict(enumerate(self.connections))
         completed = 0
         summaries = [None] * len(jobs)
@@ -287,7 +305,7 @@ class Samplers:
                             job, summaries[job] = value
                             completed += 1
                             if on_run:
-                                on_run(summaries[job]["character"], completed, len(jobs))
+                                on_run(job, summaries[job])
                         elif kind == "error":
                             raise RuntimeError("Sampling process failed:\n" + value)
                         else:

@@ -276,12 +276,17 @@ def _wilson(wins, n, z=1.96):
 
 
 def climb(run):
-    """Where a run stood, read from the decisions it recorded: the furthest floor of
-    each act it entered, and how many floors those acts have. Both are empty when the
-    frames do not say. A run that kept no frames brings the answer with it."""
+    """Where a run stood: the furthest floor of each act it entered, and how many
+    floors those acts have. A run records it over every decision it played (`climb`,
+    with the acts as JSON keys); one from before that is read from the frames it
+    kept. Both are empty when the frames do not say."""
     if "climb" in run:
-        return run["climb"]
-    frames = [step["frame"] for macro in run.get("macros", ()) for step in macro["steps"]]
+        stored = run["climb"]
+        if isinstance(stored, dict):
+            return ({int(act): floor for act, floor in stored["reached"].items()},
+                    {int(act): length for act, length in stored["lengths"].items()})
+        return stored
+    frames = [step["frame"] for macro in run.get("macros", ()) for step in macro.get("steps", ())]
     frames += [action["frame"] for action in run.get("environment_actions", ())]
     return climbed(map(stand, frames))
 
