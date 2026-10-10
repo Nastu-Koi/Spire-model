@@ -1,5 +1,4 @@
 import argparse
-import gc
 import json
 import os
 import random
@@ -16,7 +15,7 @@ from .control import environment_action
 from .data import RunShards, audit_files, load_runs, policy_macros
 from .engine import CliEngine
 from .history import TrainingHistory
-from .model import PolicyValue
+from .model import PolicyNetwork
 from .policy import SessionPolicy
 from .protocol import (
     CHARACTERS,
@@ -26,11 +25,11 @@ from .protocol import (
     validate_frame,
 )
 from .representation import Vocabulary
-from .rewards import MilestoneLedger, require_reward_version
+from .rewards import MilestoneLedger
 from .rollout import RolloutRunner, collect_round, precision_context, write_run
 from .sampling import Samplers
 from .runtime import configure_runtime
-from .seeds import RandomSeedSchedule, validate_evaluation_seeds
+from .seeds import validate_evaluation_seeds
 from .trainer import Learner, evaluate_runs
 
 
@@ -55,19 +54,19 @@ def smoke(output):
     )
     runs = [demonstration(c, "smoke-demo", 4, 2) for c in CHARACTERS]
     vocabulary = vocabulary_for(runs, config)
-    model = PolicyValue(config)
+    model = PolicyNetwork(config)
     learner = Learner(model, vocabulary, training)
     result = {
         "domain": "synthetic_test_only",
         "parameters": model.parameter_report(),
         "bootstrap": learner.bootstrap(runs),
     }
-    rollout = RolloutRunner(model, vocabulary, version=learner.policy_version)
+    rollout = RolloutRunner(model, vocabulary, version=learner.policy_version,
+                            temperatures=training.temperatures)
     sampled = [
         rollout.run(SyntheticEngine(4, 2), c, "smoke-rollout") for c in CHARACTERS
     ]
     result["evaluation"] = evaluate_runs(sampled)
-    result["ppo"] = learner.ppo(sampled)
     result["policy_version"] = learner.policy_version
     path = Path(output)
     path.mkdir(parents=True, exist_ok=True)
@@ -95,14 +94,14 @@ def smoke(output):
 
 def parser():
     p = argparse.ArgumentParser(
-        description="STS2 Full Attention policy: data → Bootstrap → PPO → Steam"
+        description="STS2 Full Attention policy: data → Bootstrap → sampling and evaluation → Steam"
     )
     p.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     p.add_argument("--threads", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     sub = p.add_subparsers(dest="command", required=True)
     x = sub.add_parser(
-        "smoke", help="Synthetic Bootstrap/rollout/PPO/checkpoint end-to-end check"
+        "smoke", help="Synthetic Bootstrap/rollout/checkpoint end-to-end check"
     )
     x.add_argument("--output", required=True)
     x = sub.add_parser("parameters")
@@ -169,7 +168,9 @@ def parser():
                    help="Sharded data only: shards read into memory and shuffled together")
     x.add_argument("--tiny", action="store_true")
     x.add_argument("--architecture")
-    x.add_argument("--config", help="Native model/training JSON profile")
+    x.add_argument("--config", help="Native model/training JSON profile; with a strict resume, "
+                                    "its sampling temperatures replace the checkpoint's and it "
+                                    "must agree with the checkpoint on the rest")
     x.add_argument("--checkpoint")
     x.add_argument("--weights-only", action="store_true",
                    help="Start new BC from checkpoint weights with fresh optimizer, warmup and RNG")
@@ -178,38 +179,27 @@ def parser():
                         "to zero over this many updates, then stop")
     x.add_argument("--precision", choices=["no", "bf16"], default="bf16")
     x.add_argument("--output", required=True)
-    for command in ("collect", "evaluate", "train"):
+    for command in ("collect", "evaluate"):
         x = sub.add_parser(command)
         x.add_argument("--checkpoint", required=True)
-        if command == "train":
-            source = x.add_mutually_exclusive_group()
-            source.add_argument(
-                "--seeds",
-                help="Use a fixed JSON seed queue instead of random generation",
-            )
-            source.add_argument(
-                "--random-seeds",
-                action="store_true",
-                help="Generate fresh game seeds every round (default)",
-            )
+        x.add_argument(
+            "--seeds",
+            required=True,
+            help="JSON mapping all five characters to disjoint seeds",
+        )
+        if command == "evaluate":
             x.add_argument(
-                "--runs-per-character",
-                type=int,
-                help="Random-mode games per character per round (default 4, or restored schedule)",
+                "--claim-rewards",
+                action="store_true",
+                help="Take gold, relics and potions the belt has room for from reward "
+                     "screens for the policy, as the demonstrations assume",
             )
         else:
             x.add_argument(
-                "--seeds",
-                required=True,
-                help="JSON mapping all five characters to disjoint seeds",
+                "--config",
+                help="Native profile whose sampling temperatures replace the checkpoint's "
+                     "for this round; it must agree with the checkpoint on the rest",
             )
-            if command == "evaluate":
-                x.add_argument(
-                    "--claim-rewards",
-                    action="store_true",
-                    help="Take gold, relics and potions the belt has room for from reward "
-                         "screens for the policy, as the demonstrations assume",
-                )
         x.add_argument("--engine-root")
         x.add_argument("--output", required=True)
         x.add_argument("--max-steps", type=int, default=10000)
@@ -222,42 +212,10 @@ def parser():
         x.add_argument(
             "--processes",
             type=int,
-            default=0,
             help="Sampling processes that hold the engines, parse their frames and pack "
-                 "tensors; this process then only runs the network. Fastest with one "
-                 "engine each, --processes equal to --workers (default 0: threads of "
-                 "this process)",
+                 "tensors; this process then only runs the network. Default one per "
+                 "engine, which is fastest",
         )
-        if command == "train":
-            x.add_argument(
-                "--rounds",
-                type=int,
-                default=160,
-                help="Additional sampling/update rounds in this invocation (default 160)",
-            )
-            x.add_argument(
-                "--demonstrations",
-                help="Imported demonstrations that PPO updates also learn from, where "
-                     "bootstrap_coef is positive",
-            )
-            x.add_argument(
-                "--config",
-                help="Native profile whose PPO settings (clip, KL budget, passes, Muon rate, "
-                     "loss coefficients, demonstrations) replace the checkpoint's; it must "
-                     "agree with the checkpoint on the rest",
-            )
-            x.add_argument("--value-warmup", action="store_true")
-            x.add_argument(
-                "--save-runs",
-                action="store_true",
-                help="Write every run and its journal to the round's directory. With "
-                     "--processes the update takes the round from memory and nothing "
-                     "reads them again; without it they are always written",
-            )
-    x = sub.add_parser("ppo")
-    x.add_argument("--checkpoint", required=True)
-    x.add_argument("--data", required=True)
-    x.add_argument("--output", required=True)
     x = sub.add_parser("infer")
     x.add_argument("--checkpoint", required=True)
     x.add_argument(
@@ -281,45 +239,47 @@ def parser():
     return p
 
 
-def _learner(checkpoint, device, *, require_current_rewards=False, weights_only=False, training=None,
-             decay_updates=0, inference=False):
+def _learner(checkpoint, device, *, weights_only=False, training=None, decay_updates=0, inference=False):
     """A checkpoint's policy with its training state. `inference` loads it to play only:
     nothing is resumed, so a checkpoint whose training has ended, a finished decay among
     them, is accepted."""
     model, vocab, manifest = load_model(checkpoint, device, allow_legacy_encoding=weights_only)
     progress = manifest.get("progress", {})
-    # Until its first round a checkpoint has learned from no reward: its policy comes from
-    # demonstrations and its value head is as initialized, whatever version it names.
-    if require_current_rewards and ("sampling_round" in progress or progress.get("completed_ppo_rounds")):
-        require_reward_version(progress.get("reward_version"))
     saved_training = TrainConfig.from_dict(manifest["training"])
     if not weights_only and training is not None:
-        # The PPO settings are the profile's; it may differ from the checkpoint in nothing else.
-        training = saved_training.with_ppo(training)
+        # The sampling settings are the profile's; it may differ from the checkpoint in nothing else.
+        training = saved_training.with_sampling(training)
     if weights_only:
         vocab = vocab.expanded()
     learner = Learner(
         model,
         vocab,
         training or saved_training,
-        policy_version=0 if weights_only else manifest["progress"].get("policy_version", 0),
+        policy_version=0 if weights_only else progress.get("policy_version", 0),
         decay_updates=decay_updates,
     )
     if weights_only:
         learner.checkpoint_metadata = {
-            "training_seeds": manifest["progress"].get("training_seeds", []),
+            "training_seeds": progress.get("training_seeds", []),
             "initialization": "weights-only",
             "source_checkpoint": str(Path(checkpoint).resolve()),
-            "source_updates": manifest["progress"].get("updates", 0),
+            "source_updates": progress.get("updates", 0),
         }
         return learner, manifest
     if inference:
-        learner.updates = manifest["progress"].get("updates", 0)
-    elif "optimizer" in manifest:
-        progress = restore_training(checkpoint, learner.optimizer, learner.scheduler)
         learner.updates = progress.get("updates", 0)
     else:
-        raise ValueError("Checkpoint has no optimizer state; use --weights-only")
+        # Whole-run PPO, which has been removed, left its rounds in the progress: such
+        # a policy was not shaped by demonstrations alone, and its optimizer moments are
+        # not those of a BC run.
+        if "sampling_round" in progress or progress.get("completed_ppo_rounds"):
+            raise ValueError("Checkpoint was trained with PPO, which has been removed; it cannot "
+                             "be resumed. Start new training from its weights with --weights-only, "
+                             "or play it as it is")
+        if "optimizer" not in manifest:
+            raise ValueError("Checkpoint has no optimizer state; use --weights-only")
+        progress = restore_training(checkpoint, learner.optimizer, learner.scheduler)
+        learner.updates = progress.get("updates", 0)
     learner.checkpoint_metadata = {
         k: v
         for k, v in manifest["progress"].items()
@@ -353,38 +313,6 @@ def _save(path, learner, extra=None):
     learner.checkpoint_metadata = metadata
 
 
-def _read_runs(paths):
-    """The runs of a round, read back from where they were written. The cyclic
-    collector is off meanwhile: with the round before still in memory it walks the
-    whole heap again and again as the new one is built, for several times the time
-    the reading takes."""
-    enabled = gc.isenabled()
-    gc.disable()
-    try:
-        return [json.loads(path.read_text()) for path in paths]
-    finally:
-        if enabled:
-            gc.enable()
-
-
-def _round_metadata(runs, demonstrations):
-    """Seeds and contracts of a round's rollouts and of the demonstrations it drew on."""
-    if not isinstance(demonstrations, RunShards):
-        return _data_metadata(runs + list(demonstrations))
-    ours, theirs = _data_metadata(runs), demonstrations.metadata()
-    contracts = {
-        fingerprint(c): c
-        for c in ours["training_engine_contracts"] + theirs["training_engine_contracts"]
-    }
-    return {
-        "training_engine_contracts": list(contracts.values()),
-        "training_seeds": sorted(set(ours["training_seeds"]) | set(theirs["training_seeds"])),
-        "training_seed_pool_hash": fingerprint(
-            sorted([ours["training_seed_pool_hash"], theirs["training_seed_pool_hash"]])
-        ),
-    }
-
-
 def _data_metadata(runs):
     contracts = {fingerprint(r["contract"]): r["contract"] for r in runs}
     return {
@@ -394,6 +322,11 @@ def _data_metadata(runs):
             sorted((r["character"], str(r["seed"])) for r in runs)
         ),
     }
+
+
+def _profile(path):
+    """The training section of a native profile, or None without a path."""
+    return TrainConfig.from_dict(json.loads(Path(path).read_text())["training"]) if path else None
 
 
 def main(argv=None):
@@ -424,7 +357,7 @@ def main(argv=None):
                 else ModelConfig()
             )
             with torch.device("meta"):
-                model = PolicyValue(config)
+                model = PolicyNetwork(config)
             emit(model.parameter_report())
         elif args.command == "smoke":
             emit(smoke(args.output))
@@ -451,7 +384,7 @@ def main(argv=None):
                         frames.append(catalog)
             vocabulary = Vocabulary.from_frames(frames, config)
             with torch.device(args.device):
-                model = PolicyValue(config)
+                model = PolicyNetwork(config)
             learner = Learner(model, vocabulary, training)
             _save(
                 args.output,
@@ -535,7 +468,7 @@ def main(argv=None):
                 )
             profile = json.loads(Path(args.config).read_text()) if args.config else None
             if args.checkpoint:
-                learner, _ = _learner(args.checkpoint, args.device, require_current_rewards=True,
+                learner, _ = _learner(args.checkpoint, args.device,
                                       weights_only=args.weights_only,
                                       training=TrainConfig.from_dict(profile["training"]) if profile else None,
                                       decay_updates=args.decay_updates)
@@ -553,7 +486,7 @@ def main(argv=None):
                 )
                 vocab = vocabulary_for(runs, config)
                 with torch.device(args.device):
-                    model = PolicyValue(config)
+                    model = PolicyNetwork(config)
                 learner = Learner(
                     model,
                     vocab,
@@ -635,224 +568,45 @@ def main(argv=None):
                             "ranking": choice.ranking,
                         }
                     )
-        elif args.command == "ppo":
-            learner, _ = _learner(args.checkpoint, args.device, require_current_rewards=True)
-            runs = load_runs(args.data)
-            history = TrainingHistory(args.output, "ppo", asdict(learner.config))
-            number = learner.checkpoint_metadata.get("completed_ppo_rounds", 0) + 1
-            history.status("updating", round=number, updates=learner.updates)
-
-            def update_done(metrics, *, epoch, stage):
-                history.append_update(metrics, round=number, stage=stage,
-                                      optimization_epoch=epoch, policy_version=learner.policy_version)
-
-            metrics = learner.ppo(runs, on_update=update_done)
-            record = history.append(
-                number,
-                metrics,
-                evaluation=evaluate_runs(runs),
-                policy_version=learner.policy_version,
-            )
-            _save(
-                Path(args.output) / "current",
-                learner,
-                {
-                    "runtime": runtime,
-                    **_data_metadata(runs),
-                    "completed_ppo_rounds": number,
-                    "last_training_record": record,
-                },
-            )
-            history.status("completed", round=number)
-            emit(record)
         else:
-            if args.command == "train":
-                if args.rounds < 1:
-                    raise ValueError("Training needs at least one round")
-                if args.runs_per_character is not None and (
-                    args.runs_per_character < 1 or args.seeds
-                ):
-                    raise ValueError(
-                        "--runs-per-character requires random seeds and a positive count"
-                    )
+            # collect and evaluate: the policy plays, in the engines of sampling processes.
+            if args.workers < 1 or (args.processes is not None and args.processes < 1):
+                raise ValueError("Sampling needs positive numbers of engines and processes")
             learner, manifest = _learner(
-                args.checkpoint, args.device,
-                require_current_rewards=args.command in {"collect", "train"},
-                inference=args.command == "evaluate",
-                training=(
-                    TrainConfig.from_dict(json.loads(Path(args.config).read_text())["training"])
-                    if args.command == "train" and args.config else None),
+                args.checkpoint, args.device, inference=True,
+                training=_profile(args.config) if args.command == "collect" else None,
             )
-            if args.command == "train" and learner.config.bootstrap_coef and not args.demonstrations:
-                raise ValueError("A positive bootstrap_coef needs --demonstrations")
-            auxiliary_runs = (
-                (RunShards(args.demonstrations) if RunShards.is_at(args.demonstrations)
-                 else load_runs(args.demonstrations))
-                if args.command == "train"
-                and args.demonstrations
-                and learner.config.bootstrap_coef
-                else None
-            )
-            seeds = json.loads(Path(args.seeds).read_text()) if args.seeds else None
-            schedule = None
-            if args.command == "train" and seeds is None:
-                state = manifest["progress"].get("random_seed_schedule")
-                count = (
-                    args.runs_per_character
-                    if args.runs_per_character is not None
-                    else (state or {}).get("runs_per_character", 4)
-                )
-                schedule = RandomSeedSchedule(count, state=state)
-            completed_ppo_rounds = manifest["progress"].get("completed_ppo_rounds", 0)
-            directory = Path(args.output)
-            directory.mkdir(parents=True, exist_ok=True)
-            factory = lambda: CliEngine(root=args.engine_root)
-            if args.processes < 0:
-                raise ValueError("Sampling processes must not be negative")
-            if args.processes:
-                # Training keeps the decisions the processes pack: its update needs them.
-                samplers = Samplers(factory, learner.model, learner.vocabulary, engines=args.workers,
-                                    processes=args.processes, keep=args.command == "train")
+            seeds = json.loads(Path(args.seeds).read_text())
             if args.command == "evaluate":
                 validate_evaluation_seeds(seeds, manifest["progress"])
-                runner = RolloutRunner(
-                    learner.model,
-                    learner.vocabulary,
-                    precision=learner.config.precision,
-                    version=learner.policy_version,
-                    max_steps=args.max_steps,
-                    ascension=learner.config.ascension,
-                    claim_rewards=args.claim_rewards,
-                )
-                paths = collect_round(
-                    factory,
-                    runner,
-                    seeds,
-                    directory,
-                    workers=args.workers,
-                    samplers=samplers,
-                    sample=False,
-                )
+            directory = Path(args.output)
+            directory.mkdir(parents=True, exist_ok=True)
+            runner = RolloutRunner(
+                learner.model,
+                learner.vocabulary,
+                precision=learner.config.precision,
+                version=learner.policy_version,
+                max_steps=args.max_steps,
+                ascension=learner.config.ascension,
+                claim_rewards=args.command == "evaluate" and args.claim_rewards,
+                temperatures=learner.config.temperatures,
+            )
+            samplers = Samplers(lambda: CliEngine(root=args.engine_root), learner.model,
+                                learner.vocabulary, engines=args.workers, processes=args.processes)
+            if args.command == "evaluate":
+                paths = collect_round(samplers, runner, seeds, directory, sample=False)
                 # One run in memory at a time: together they are tens of gigabytes.
                 emit(evaluate_runs(json.loads(p.read_text()) for p in paths))
             else:
-                rounds = args.rounds if args.command == "train" else 1
-                history = (
-                    TrainingHistory(directory, "ppo", asdict(learner.config))
-                    if args.command == "train"
-                    else None
-                )
-                start_round = manifest["progress"].get("sampling_round", -1) + 1
-                # Never overwrite a trajectory from an interrupted or previous invocation.
+                # Never overwrite a round from an interrupted or previous invocation.
                 existing = [
                     int(p.name[6:])
                     for p in directory.glob("round-*")
                     if p.name[6:].isdigit()
                 ]
-                start_round = max(start_round, max(existing, default=-1) + 1)
-                for local_index in range(rounds):
-                    round_index = start_round + local_index
-                    if history:
-                        history.status("collecting", round=round_index + 1, updates=learner.updates)
-                    round_started = time.monotonic()
-                    runner = RolloutRunner(
-                        learner.model,
-                        learner.vocabulary,
-                        precision=learner.config.precision,
-                        version=learner.policy_version,
-                        max_steps=args.max_steps,
-                        ascension=learner.config.ascension,
-                        temperature=learner.config.sampling_temperature,
-                    )
-                    if schedule:
-                        assigned = schedule.next()
-                    elif rounds > 1:
-                        assigned = {
-                            c: [f"{s}-round-{round_index}" for s in seeds[c]]
-                            for c in CHARACTERS
-                        }
-                    else:
-                        assigned = seeds
-
-                    def game_done(character, completed, total):
-                        if history:
-                            history.status(
-                                "collecting",
-                                round=round_index + 1,
-                                character=character,
-                                games_completed=completed,
-                                games_total=total,
-                            )
-
-                    paths = collect_round(
-                        factory,
-                        runner,
-                        assigned,
-                        directory / f"round-{round_index}",
-                        on_run=game_done,
-                        workers=args.workers,
-                        samplers=samplers,
-                        # Runs go to the update through files unless sampling
-                        # processes hand them over.
-                        save=not samplers or args.command != "train" or args.save_runs,
-                    )
-                    if args.command == "train":
-                        runs = samplers.runs() if samplers else _read_runs(paths)
-                        used_demonstrations = []
-                        if history:
-                            history.status("updating", round=round_index + 1)
-
-                        def update_done(metrics, *, epoch, stage):
-                            history.append_update(metrics, round=round_index + 1, stage=stage,
-                                                  optimization_epoch=epoch, policy_version=learner.policy_version)
-
-                        if args.value_warmup and local_index == 0:
-                            metrics = learner.value_warmup(runs, on_update=update_done)
-                        else:
-                            metrics = learner.ppo(runs, auxiliary_runs, on_update=update_done)
-                            used_demonstrations = auxiliary_runs or []
-                            completed_ppo_rounds += 1
-                        seed_metadata = {"seed_mode": "random" if schedule else "fixed"}
-                        if schedule:
-                            seed_metadata["random_seed_schedule"] = (
-                                schedule.state_dict()
-                            )
-                        record = history.append(
-                            round_index + 1,
-                            metrics,
-                            completed_ppo_rounds=completed_ppo_rounds,
-                            stage="value"
-                            if args.value_warmup and local_index == 0
-                            else "ppo",
-                            duration_seconds=time.monotonic() - round_started,
-                            evaluation=evaluate_runs(runs),
-                            policy_version=learner.policy_version,
-                            seed_file=str(
-                                directory
-                                / f"round-{round_index}"
-                                / "metadata"
-                                / "seeds.json"
-                            ),
-                        )
-                        _save(
-                            directory / "current",
-                            learner,
-                            {
-                                "runtime": runtime,
-                                **_round_metadata(runs, used_demonstrations),
-                                **seed_metadata,
-                                "sampling_round": round_index,
-                                "completed_ppo_rounds": completed_ppo_rounds,
-                                "last_training_record": record,
-                            },
-                        )
-                        emit(record)
-                        # A round is gigabytes: it goes before the next one is sampled.
-                        runs = None
-                    else:
-                        emit({"runs": [str(p) for p in paths]})
-                if history:
-                    history.status("completed", round=round_index + 1)
+                paths = collect_round(samplers, runner, seeds,
+                                      directory / f"round-{max(existing, default=-1) + 1}")
+                emit({"runs": [str(p) for p in paths]})
     except KeyboardInterrupt:
         if history:
             history.status("interrupted")

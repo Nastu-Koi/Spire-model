@@ -15,7 +15,7 @@ import torch
 from combat_solver_cli.client import SolverEngine
 from model.cli import vocabulary_for
 from model.config import ModelConfig
-from model.model import PolicyValue
+from model.model import PolicyNetwork
 from model.policy import Choice
 from model.rollout import RolloutRunner
 from model.testing import demonstration
@@ -35,7 +35,7 @@ class Scripted:
     def choose(self, frame, *, sample=True):
         slot = next(self.records)["action"]["decoder_slot_ref"]
         (candidate,) = [c for c in frame["legal"]["candidates"] if c["decoder_slot_ref"] == slot]
-        return Choice(candidate["candidate_ref"], log_prob=torch.zeros(()), value=torch.zeros(()))
+        return Choice(candidate["candidate_ref"], log_prob=torch.zeros(()))
 
 
 @pytest.mark.engine
@@ -45,7 +45,7 @@ def test_native_run_labels_every_fight_the_engine_confirmed(tmp_path):
         pytest.skip("Pinned native configuration required")
     data = json.loads(FIXTURE.read_text())
     tiny = ModelConfig.tiny()
-    runner = RolloutRunner(PolicyValue(tiny), vocabulary_for([demonstration("Ironclad", "labels", 4, 2)], tiny))
+    runner = RolloutRunner(PolicyNetwork(tiny), vocabulary_for([demonstration("Ironclad", "labels", 4, 2)], tiny))
     path = tmp_path / "run.combats.jsonl.gz"
     with SolverEngine(config) as engine:
         trace = runner.run(engine, data["character"], data["seed"], sample=False, combats=path,
