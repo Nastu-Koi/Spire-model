@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from combat_outcome.data import fights as outcome_fights, labels as outcome_labels
 from model.data import RunShards, samples
 from model.dataset_index import HEADER, INDEX, STUDENT_BATTLE
 from model.independent import import_samples
@@ -44,13 +43,13 @@ def save(potions=(), slots=3):
 def fight(number, kind="normal", result="win", from_event=False, saved=True, potions=(), act=1, floor=3):
     return dict(fight=number, encounter_id=f"e{number}", encounter="ENCOUNTER.SYNTHETIC", kind=kind, act=act,
                 floor=floor, map_point_type={"normal": "monster"}.get(kind, kind), second_boss=False,
-                from_event=from_event, combat_index=number, result=result, save=save(potions) if saved else None,
+                from_event=from_event, relics=[], result=result, save=save(potions) if saved else None,
                 **({} if saved else dict(error="refused")))
 
 
 def write_round(directory, runs, quarantined=()):
-    """A sampled round with the files the selection reads: index, summary, saves and
-    combat labels (entities only) of every run."""
+    """A sampled round with the files the selection reads: index, summary and the saves
+    of every run."""
     directory = Path(directory)
     (directory / "accepted").mkdir(parents=True)
     with gzip.open(directory / INDEX, "wt") as index:
@@ -68,10 +67,6 @@ def write_round(directory, runs, quarantined=()):
             for row in run["fights"]:
                 stream.write(json.dumps(dict(schema=SAVES_SCHEMA, seed=run["seed"], run_id=run["run_id"],
                                              character=run["character"], ascension=0, **row)) + "\n")
-        with gzip.open(directory / (name + ".combats.jsonl.gz"), "wt") as stream:
-            for row in run["fights"]:
-                stream.write(json.dumps(dict(combat_index=row["combat_index"],
-                                             entities=run.get("entities") or [dict(entity_type="player")])) + "\n")
     return directory
 
 
@@ -113,7 +108,7 @@ def test_selection_takes_the_fraction_whole_and_the_fight_each_lost_run_died_in(
                           selected_elite=2, selected_normal=3, skipped_from_event=1, skipped_no_save=1)
     # What a run carries to its worker: its files, its policy and its outcome.
     whole = chosen[ids["whole"]]
-    assert (whole["saves"], whole["combats"]) == ("Ironclad-0.saves.jsonl.gz", "Ironclad-0.combats.jsonl.gz")
+    assert whole["saves"] == "Ironclad-0.saves.jsonl.gz"
     assert (whole["seed"], whole["character"], whole["victory"], whole["round"]) == ("S1", "Ironclad", True, str(directory))
     assert {k: whole[k] for k in POLICY} == POLICY
     # The fraction picks runs by their id alone: a larger fraction keeps the same runs and adds.
@@ -155,17 +150,17 @@ def test_the_anchor_enters_as_the_saves_row_does_and_asks_for_a_potion_only_with
 
 
 def test_relic_differences_name_the_fields_that_changed_on_entering_again():
-    student = [dict(entity_type="player", hp=1), dict(ref="r1", entity_type="relic", content_id="RELIC.EMBER_TEA",
-                                                      stats=dict(Combats=4)),
+    student = [dict(ref="r1", entity_type="relic", content_id="RELIC.EMBER_TEA", stats=dict(Combats=4)),
                dict(ref="r2", entity_type="relic", content_id="RELIC.ANCHOR")]
     observation = dict(phase="combat", entities=[
         dict(ref="x1", entity_type="relic", content_id="RELIC.EMBER_TEA", stats=dict(Combats=3)),
         dict(ref="x2", entity_type="relic", content_id="RELIC.ANCHOR"), dict(ref="c", entity_type="card", zone="hand")])
     assert relic_differences(student, dict(observation=observation)) == [
         dict(relic="RELIC.EMBER_TEA", field="stats", student=dict(Combats=4), solver=dict(Combats=3))]
-    assert relic_differences(student[:2], dict(observation=observation))[0]["relic"] == "*"
+    assert relic_differences(student[:1], dict(observation=observation))[0]["relic"] == "*"
+    # A saves row without the entry relics says nothing; one entered without relics does.
     assert relic_differences(None, dict(observation=observation)) is None
-    assert relic_differences([dict(entity_type="player")], dict(observation=dict(entities=[]))) == []
+    assert relic_differences([], dict(observation=dict(entities=[]))) == []
 
 
 class Fighting(SyntheticEngine):
@@ -245,8 +240,7 @@ def test_fights_are_solved_exported_and_imported_with_their_policy(tmp_path, mon
 
     exported = export(output)
     assert exported["anchor_kind"] == STUDENT_BATTLE and exported["counts"]["lost_fights"] == 1
-    assert exported["counts"]["fights"] == exported["combat_outcomes"]["counts"]["elite/win"] + exported[
-        "combat_outcomes"]["counts"]["regular/win"]
+    assert exported["counts"]["fights"] == 5 and not (output / "combat-outcomes.jsonl.gz").exists()
     with gzip.open(output / "independent-training.jsonl.gz", "rt") as stream:
         rows = [json.loads(line) for line in stream]
     assert rows and {r["metadata"]["sample_group"] for r in rows} == {
@@ -263,15 +257,6 @@ def test_fights_are_solved_exported_and_imported_with_their_policy(tmp_path, mon
     assert (meta["kind"], meta["fight"], meta["student_result"], meta["map_position"]) == (
         "normal", 1, "win", "representative_point")
     assert first["actor"] == "combat_solver" and first["label"] in first["options"]
-    # Every fought fight is an outcome label the combat-outcome reader accepts, lost ones too.
-    labels = [row for _, _, row in outcome_labels(output / "combat-outcomes.jsonl.gz")]
-    assert len(labels) == 6 and {row["source"] for row in labels} == {STUDENT_BATTLE}
-    assert {row["actor"] for row in labels} == {"combat_solver"}
-    lost = next(row for row in labels if row["result"] == "loss")
-    assert (lost["kind"], lost["end_hp"], lost["hp_lost"], lost["student"]["fight"]) == ("boss", 0, 70, 3)
-    assert lost["student"]["potion_policy"] == "RequireAtLeastOne" and lost["seed"] == split_group("S1")
-    # The outcome rows point at their decision frames in the sample files.
-    assert [len(frames) for _, frames in outcome_fights(output)] == [row["frames"]["count"] for row in labels]
 
     imported = import_samples(output / "independent-training.jsonl.gz", tmp_path / "imported")
     assert imported["accepted_runs"] == 5 and imported.get("quarantined_groups", 0) == 0
@@ -291,7 +276,7 @@ def test_fights_are_solved_exported_and_imported_with_their_policy(tmp_path, mon
     shrunk = run_round(directory, output, fraction=0.0, workers=1, config="config.json", budgets=BUDGETS)
     assert (shrunk["runs"], shrunk["counts"]["fights"], shrunk["counts"]["selected_by_death"]) == (2, 2, 2)
     assert len(list((output / "runs").glob("*.json"))) == 5
-    assert export(output)["combat_outcomes"]["counts"] == {"elite/win": 1, "regular/win": 1}
+    assert export(output)["counts"]["fights"] == 2
     # Other budgets are another identity: every selected run is fought again.
     before = len(fought)
     run_round(directory, output, fraction=0.0, workers=1, config="config.json", budgets=dict(BUDGETS, budget_ms=500))

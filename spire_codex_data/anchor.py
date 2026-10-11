@@ -23,8 +23,6 @@ from pathlib import Path
 import random
 import time
 
-from combat_outcome.data import SCHEMA as OUTCOME_SCHEMA
-from combat_outcome.frames import input_entities
 from combat_solver_cli.client import DEFAULT_CONFIG, SolverEngine
 from combat_solver_cli.search_support import player, preference, resolve, state_key
 from combat_solver_cli.trajectory import native_replay_error
@@ -1344,32 +1342,6 @@ def summarize(directory):
     return result
 
 
-def outcome_row(report, anchor, rows, samples, source='summary_anchor'):
-    """One solver fight as a combat-outcome label: the state it was entered with and how
-    it ended. Its decision frames are the fight's rows in `samples`, won or lost.
-    `source` names where the entry state came from; the solver fought it either way."""
-    first = rows[0]
-    hero, meta = player(dict(public=first['observation'])), first['metadata']
-    refs = {e.get('ref'): e for row in rows if row['label']['verb'] == 'USE_POTION'
-            for e in row['observation']['entities']}
-    lost = anchor['outcome'] == 'loss'
-    end_hp = 0 if lost else anchor['exit_hp']
-    return dict(schema=OUTCOME_SCHEMA, source=source, actor='combat_solver', seed=meta['split_group'],
-        run_hash=meta['run_hash'], contract=meta.get('contract'),
-        anchor=anchor['id'], character=meta['character'], ascension=meta['ascension'], act=anchor['act'],
-        floor=anchor['floor'], encounter=anchor['encounter'].split('.')[-1],
-        kind={'monster': 'regular'}.get(anchor['room_type'], anchor['room_type']),
-        entities=input_entities(dict(public=first['observation'])),
-        solver=dict({k: report['identity'][k] for k in BUDGETS}, potions=True),
-        start_hp=anchor['entry_hp'], max_hp=hero['max_hp'], end_hp=end_hp, hp_lost=anchor['entry_hp'] - end_hp,
-        result='loss' if lost else 'win',
-        turns=len({player(dict(public=row['observation'])).get('round') for row in rows}),
-        potions_used=[refs[ref] for row in rows if row['label']['verb'] == 'USE_POTION'
-                      for ref in row['label'].get('source_refs', []) if ref in refs],
-        frames=dict(file=samples, group=anchor['id'], count=len(rows)),
-        state_sources=meta['state_sources'], source_integrity=meta['source_integrity'])
-
-
 def act_bosses(run):
     """The boss encounters of every act, in the order they were fought."""
     return [[room['model_id'] for node in act if node['map_point_type'] == 'boss'
@@ -1399,15 +1371,15 @@ COMPRESSION = 6
 
 def export_report(task):
     """What one report gives an export: its exported rows as a gzip member of their own,
-    its fights as outcome rows, and the counts of the rows kept, of those left out for
-    a map without the recorded bosses, and of those of groups in which nothing was chosen."""
-    path, source, samples, relative = task
+    and the counts of the rows kept, of those left out for a map without the recorded
+    bosses, and of those of groups in which nothing was chosen."""
+    path, source, samples = task
     report = read(path)
     verified = {a['id']: a for a in report['anchors'] if a['status'] == 'verified'}
     bosses = act_bosses(read(source))
-    battles, kept, unnamed = {}, [], Counter()
+    kept, unnamed = [], Counter()
     # A fight won again as a potion anchor starts from the same state with other labels:
-    # its actions stand for those of the fight it repeats, whose outcome is still kept.
+    # its actions stand for those of the fight it repeats.
     again = path.with_name(path.name.replace('.battle.json', '.potion.json'))
     repeated = {a['id'][:-len('-potion')] for a in read(again)['anchors']
                 if a['status'] == 'verified' and a['outcome'] != 'loss'} if report['kind'] == 'battle' and again.exists() else set()
@@ -1419,8 +1391,6 @@ def export_report(task):
             anchor = verified.get(item['metadata']['sample_group'])
             if anchor is None:
                 continue
-            if report['kind'] == 'battle':
-                battles.setdefault(anchor['id'], []).append(item)
             if anchor['outcome'] != 'loss' and anchor['id'] not in repeated:
                 if not shows_bosses(item, bosses):
                     unnamed[item['metadata']['anchor_kind']] += 1
@@ -1431,22 +1401,19 @@ def export_report(task):
                              json.dumps(item, ensure_ascii=False) + '\n'))
     # Forced steps and controller actions teach no policy
     # choices. Keep the group's evidence only if it also has a policy decision,
-    # such as a relic's card selection. Battle outcomes are kept independently.
+    # such as a relic's card selection.
     decided = {group for group, _, _, chosen, _ in kept if chosen}
     forced = Counter(kind for group, kind, _, _, _ in kept if group not in decided)
     kept = [entry for entry in kept if entry[0] in decided]
     counts = Counter((kind, actor) for _, kind, actor, _, _ in kept)
-    labels = [outcome_row(report, verified[key], items, relative) for key, items in battles.items()]
     member = gzip.compress(''.join(entry[-1] for entry in kept).encode('utf-8'), COMPRESSION)
-    return member, labels, counts, unnamed, forced
+    return member, counts, unnamed, forced
 
 
-def export(directory, manifest, target=None, outcomes=None, workers=1):
-    """Verified anchors as independent supervised samples, and every solver fight as a
-    combat-outcome label. Lost battles teach no actions and are left out of the samples,
-    and so are groups in which nothing was chosen; as outcomes the fights are kept.
-    `manifest` locates the run summaries, against whose recorded bosses the map of every
-    row is checked.
+def export(directory, manifest, target=None, workers=1):
+    """Verified anchors as independent supervised samples. Lost battles teach no actions
+    and are left out, and so are groups in which nothing was chosen. `manifest` locates
+    the run summaries, against whose recorded bosses the map of every row is checked.
 
     Reports are read by `workers` processes and written in the order of their names:
     the sample file is the gzip members of the reports one after another, which reads
@@ -1454,32 +1421,24 @@ def export(directory, manifest, target=None, outcomes=None, workers=1):
     directory = Path(directory)
     sources = {s['run_hash']: s['path'] for s in read(manifest)['selected']}
     target = Path(target or directory / 'independent-training.jsonl.gz')
-    outcomes = Path(outcomes or directory / 'combat-outcomes.jsonl.gz')
-    counts, fights, unnamed, forced = Counter(), Counter(), Counter(), Counter()
-    temp, pending = target.with_suffix('.tmp'), outcomes.with_suffix('.tmp')
+    counts, unnamed, forced = Counter(), Counter(), Counter()
+    temp = target.with_suffix('.tmp')
     tasks = []
     for path in sorted((directory / 'runs').glob('*.json')):
         samples = directory / 'samples' / (path.stem + '.jsonl.gz')
         # A report is named after its run: <run hash>.<kind>.json.
-        tasks.append((path, sources[path.name.split('.')[0]], samples, os.path.relpath(samples, outcomes.parent)))
-    with temp.open('wb') as stream, gzip.open(pending, 'wt', encoding='utf-8', compresslevel=COMPRESSION) as labels, \
-            ProcessPoolExecutor(max_workers=workers) if workers > 1 else nullcontext() as pool:
+        tasks.append((path, sources[path.name.split('.')[0]], samples))
+    with temp.open('wb') as stream, ProcessPoolExecutor(max_workers=workers) if workers > 1 else nullcontext() as pool:
         results = pool.map(export_report, tasks, chunksize=8) if pool else map(export_report, tasks)
-        for member, rows, kept, without_boss, without_decision in results:
+        for member, kept, without_boss, without_decision in results:
             stream.write(member)
             counts.update(kept)
             unnamed.update(without_boss)
             forced.update(without_decision)
-            for row in rows:
-                labels.write(json.dumps(row, ensure_ascii=False) + '\n')
-                fights[row['kind'], row['result']] += 1
     temp.replace(target)
-    pending.replace(outcomes)
     summary = dict(path=str(target), counts={f'{k}/{a}': n for (k, a), n in sorted(counts.items())},
                    rows_without_recorded_boss=dict(sorted(unnamed.items())),
                    rows_without_decision=dict(sorted(forced.items())),
-                   combat_outcomes=dict(path=str(outcomes), schema=OUTCOME_SCHEMA,
-                                        counts={f'{k}/{r}': n for (k, r), n in sorted(fights.items())}),
                    continuous_winning_trajectory=False, initialization=INITIALIZATION)
     save_json(directory / 'independent-export-summary.json', summary)
     return summary

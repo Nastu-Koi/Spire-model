@@ -2,7 +2,7 @@
 
 基于玩家公开信息，为《杀戮尖塔 2》训练覆盖整局的策略，目标是提高**五角色 A0 平均整局通关率**并接管 Steam 游戏。当前适配游戏 **0.111.0**。
 
-主策略先用摘要锚点及求解器示范做行为克隆，再自主采样。当前已有 BC、多进程采样与评估、学生状态的求解器战斗标签、胜率模型、优势加权回归和把它们串起来的迭代驱动，以及公开历史、战斗结果记录和 Steam 桥接；迭代路线的效果尚待正式训练验证。设计见 [ARCHITECTURE](ARCHITECTURE.md)，术语见 [CONTEXT](CONTEXT.md)。
+主策略先用摘要锚点及求解器示范做行为克隆，再自主采样。当前已有 BC、多进程采样与评估、学生状态的求解器战斗标签、胜率模型、优势加权回归和把它们串起来的迭代驱动，以及公开历史和 Steam 桥接；迭代路线的效果尚待正式训练验证。设计见 [ARCHITECTURE](ARCHITECTURE.md)，术语见 [CONTEXT](CONTEXT.md)。
 
 ## 从这里开始
 
@@ -13,7 +13,6 @@
 | 判断数据要不要重新生成 | [数据复用与索引](model/README.md#数据复用与索引) |
 | 下载公开对局、恢复锚点和导入示范 | [摘要数据](spire_codex_data/README.md) |
 | 配置求解器或验证原生轨迹 | [CombatSolver worker](combat_solver_cli/README.md) |
-| 训练战斗结果模型、读取学生战斗数据 | [战斗结果模型](combat_outcome/README.md) |
 | 安装录制 Mod、接管 Steam 游戏 | [Steam 录制与桥接](steam_recorder/README.md) |
 | 检查公开观察与合法动作协议 | [决策协议](sts2-cli/docs/decision-protocol.md) |
 
@@ -24,12 +23,11 @@
 | [model/](model/README.md) | 公开输入、主策略、控制器、BC、采样与评估、优势加权回归与迭代驱动、检查点、Steam 控制端和训练监测 |
 | [critic/](critic/README.md) | 胜率模型：局外决策的通关与过本幕概率、交给策略前的门槛、给缓冲打分算优势 |
 | [spire_codex_data/](spire_codex_data/README.md) | 公开对局下载、来源审计、摘要账本、锚点生成、刷新和导出 |
-| [combat_outcome/](combat_outcome/README.md) | 当前入场标量结果模型及学生战斗／中途帧记录 |
 | [combat_solver_cli/](combat_solver_cli/README.md) | 第三方求解器 worker、引擎客户端和独立轨迹复验 |
 | [sts2-cli/](sts2-cli/README.md) | 基于 [wuhao21/sts2-cli](https://github.com/wuhao21/sts2-cli) 的无头引擎 |
 | [public_history/](public_history/README.md) | 无头与 Steam 共用的公开历史状态机和原生钩子 |
 | [steam_recorder/](steam_recorder/README.md) | Steam Mod：实玩录制与控制桥接 |
-| `configs/` | [主策略](configs/rtxpro6000.json)与[战斗结果](configs/combat-outcome.json)配置 |
+| `configs/` | 主策略配置：[20M](configs/rtxpro6000.json) 与 [200M](configs/rtxpro6000-200m.json) |
 | `docs/agents/` | 仓库内的领域文档和本地工单约定 |
 
 源码、测试夹具、配置及使用文档入库。`data/` 保存本地数据，`runs/`、`checkpoints/` 保存实验与检查点，`build/` 保存构建辅助产物和 Mod 备份；这些目录与第三方 DLL 均不入库。整理仓库时保留原始数据、旧对照检查点和回放证据。
@@ -59,10 +57,6 @@ bash sts2-cli/setup.sh "$GAME_DIR"
 当前数据与 BC 训练都在本地 `runs/bootstrap-20261008/`。BC 不自动验证或按表现停止，由使用者自行判断。
 
 新训练、严格续训、当前数据数量、版本迁移及可直接执行的命令统一维护在 [model/README.md](model/README.md)。战后及事件领奖由模型选择，普通宝箱、水晶球格子和指定单选事件按[共用控制规则](model/README.md#策略与控制器)执行。
-
-## 战斗结果模型
-
-[combat_outcome](combat_outcome/README.md) 复用锚点求解器战斗作为预训练标签，也读取主策略实际打出的战斗。当前网络预测入场单场的掉血和失败概率，尚不提供完整结果分布或 Φ。
 
 ## 训练监测网页
 

@@ -11,8 +11,7 @@ What a run keeps is what training reads of it: every decision outside a fight wi
 its frame, its full legal candidates, the action taken and the log-probability it
 was taken with; of each fight only its macro-actions' counts and log-probabilities,
 because a fight is taught by the solver from the engine's save at its entry
-(`model/saves.py`, `<run>.saves.jsonl.gz` beside `<run>.combats.jsonl.gz`); the
-acts' results, the ledger and the outcome. A run that did not finish is not data:
+(`model/saves.py`, `<run>.saves.jsonl.gz`); the ledger and the outcome. A run that did not finish is not data:
 it goes under `quarantine/` with its reason, and a sampled round with one fails.
 
 The sampling processes hand each run over compressed as it ends; this process
@@ -131,7 +130,7 @@ def sample_round(samplers, runner, seeds, directory, *, journals=False, shard_sa
     """Sample one round into `directory` as the buffer reads it. The round is played
     by the engines of `samplers` (`sampling.Samplers`) at the runner's temperatures;
     every run is appended to the shards as it ends. With `journals` each run's journal
-    (every frame with its reward) is written beside its fights as well. Returns the
+    (every frame with its reward) is written as well. Returns the
     summary; a run that did not finish fails the round after the summary is written."""
     jobs = assign(seeds, directory)
     writer = RoundWriter(directory, shard_samples)

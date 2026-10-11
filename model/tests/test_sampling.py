@@ -1,6 +1,5 @@
 """A round sampled by several processes is the round the runner plays alone."""
 
-import gzip
 import json
 import os
 import pickle
@@ -185,9 +184,8 @@ def test_a_round_sampled_in_processes_replays_as_it_was_stored(tmp_path):
     assert [run["status"] for run in runs] == ["complete"] * 20
     # Every job is announced once as it ends, by its index, with the run's summary.
     assert sorted(done) == [(index, run["character"], "complete") for index, run in enumerate(runs)]
-    # Every run beside its journal and its fights; the assignment before any of them.
-    assert all(path.with_suffix(".jsonl").exists() and path.with_suffix(".combats.jsonl.gz").exists()
-               for path in paths)
+    # Every run beside its journal; the assignment before any of them.
+    assert all(path.with_suffix(".jsonl").exists() for path in paths)
     assert json.loads((tmp_path / "round/metadata/seeds.json").read_text()) == seeds
     for run in runs:
         validate_run(run, on_policy=True)
@@ -346,10 +344,6 @@ def test_a_round_sampled_at_phase_temperatures_records_them_and_replays_at_them(
     # Scored at any other temperatures the round is another policy's.
     assert largest_gap(learner.model, learner.vocabulary, runs) > 1e-3
     assert largest_gap(learner.model, learner.vocabulary, runs, {"combat": 0.8, "other": 0.5}) > 1e-3
-    # The fights of a run name the temperatures with the rest of the policy.
-    with gzip.open(paths[0].with_suffix(".combats.jsonl.gz"), "rt") as stream:
-        rows = [json.loads(line) for line in stream]
-    assert rows and all(row["policy"]["temperature"] == temperatures for row in rows)
 
 
 def test_a_selection_inside_a_fight_is_drawn_at_the_fights_temperature(tmp_path):

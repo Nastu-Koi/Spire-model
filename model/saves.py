@@ -11,9 +11,10 @@ encounter, enters the same fight again: same HP, gold, deck, relics, potions and
 enemies. `anchor_state` serializes the state with the room already entered and does
 not serve.
 
-One row per fight of a run, written beside the run's combat labels once the run has
-ended, so that each row can name its label (`combat_index`, `result`). The save is
-kept compressed until then.
+One row per fight of a run, written once the run has ended, so that each row says
+how the fight ended for the policy (`result`). The row also keeps the relics the policy
+entered with, as its first frame showed them: what the solver's entry is compared
+with. The save is kept compressed until then.
 """
 
 import gzip
@@ -56,6 +57,9 @@ class FightTracker:
         self.won = False
         self.bosses = Counter()  # boss fights begun, by act
         self.entry = None  # the fight whose first decision is the next one
+        # How each fight ended for the policy: "win", "loss", or None while it goes on
+        # and for a fight the run was cut off in.
+        self.results = {}
 
     def events(self, events):
         for event in events:
@@ -65,6 +69,7 @@ class FightTracker:
                     raise ProtocolError("Encounter start without identity")
                 self.count += 1
                 self.current, self.won = self.count, False
+                self.results[self.count] = None
                 act = event.get("act")
                 boss = event["kind"] == "boss"
                 self.entry = dict(
@@ -76,6 +81,19 @@ class FightTracker:
                 self.bosses[act] += boss
             elif kind == "encounter_completed" and event.get("result") == "victory":
                 self.won = True
+                if self.current is not None:
+                    self.results[self.current] = "win"
+
+    def finish(self, victory):
+        """The run ended: a defeat inside a fight is that fight's loss. A time limit or
+        an engine fault is not a defeat, and never comes here."""
+        if self.current is not None and not self.won and not victory:
+            self.results[self.current] = "loss"
+
+    def tally(self):
+        """The fights of the run by how they ended, as a run records them."""
+        results = list(self.results.values())
+        return dict(wins=results.count("win"), losses=results.count("loss"), unfinished=results.count(None))
 
     def decision(self):
         """At a decision frame: the fight it belongs to (None outside a fight) and, at
@@ -94,10 +112,12 @@ class EntrySaves:
         self.identity = dict(schema=SCHEMA, seed=str(seed), run_id=run_id, character=character, ascension=ascension)
         self.rows, self.failed = [], 0
 
-    def take(self, engine, entry, floor):
-        """The save at the first decision of a fight. A save the engine refuses is a row
-        without one: the fight still has its label, and the refusal says why."""
-        row = dict(self.identity, **entry, floor=floor, save=None)
+    def take(self, engine, entry, frame, floor):
+        """The save at the first decision of a fight, whose frame is `frame`. A save the
+        engine refuses is a row without one: the fight still has its result, and the
+        refusal says why."""
+        relics = [e for e in frame["public"]["entities"] if e.get("entity_type") == "relic"]
+        row = dict(self.identity, **entry, floor=floor, relics=relics, save=None)
         try:
             row["save"] = zlib.compress(json.dumps(continue_save(engine), separators=(",", ":")).encode(), 6)
         except ProtocolError as exc:
@@ -105,14 +125,13 @@ class EntrySaves:
             self.failed += 1
         self.rows.append(row)
 
-    def close(self, labels):
-        """Write the rows. `labels` maps an encounter id to its combat label's
-        (combat_index, result); a fight without a label (cut off) is written without."""
+    def close(self, results):
+        """Write the rows. `results` maps a fight to how it ended for the policy
+        (`FightTracker.results`); a fight the run was cut off in is written without."""
         temporary = self.path.with_name(self.path.name + ".tmp")
         with gzip.open(temporary, "wt", encoding="utf-8") as stream:
             for row in self.rows:
-                index, result = labels.get(row["encounter_id"], (None, None))
-                row = dict(row, combat_index=index, result=result,
+                row = dict(row, result=results.get(row["fight"]),
                            save=None if row["save"] is None else json.loads(zlib.decompress(row["save"])))
                 stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
         temporary.replace(self.path)

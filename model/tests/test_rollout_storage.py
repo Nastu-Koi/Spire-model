@@ -65,6 +65,12 @@ def test_fights_are_told_apart_by_the_engine_events():
                                          from_event=True, map_point_type="elite", second_boss=False)
     with pytest.raises(ProtocolError, match="identity"):
         FightTracker().events([dict(started(5), kind="event")])
+    # How each fight ended for the policy: the run died in the fourth; cut off there
+    # instead, the fight has no result.
+    assert (tracker.results, tracker.tally()) == ({1: "win", 2: "win", 3: "win", 4: None},
+                                                  dict(wins=3, losses=0, unfinished=1))
+    tracker.finish(False)
+    assert (tracker.results[4], tracker.tally()) == ("loss", dict(wins=3, losses=1, unfinished=0))
 
 
 def test_a_sampled_run_keeps_frames_outside_fights_and_counts_inside():
@@ -82,7 +88,7 @@ def test_a_sampled_run_keeps_frames_outside_fights_and_counts_inside():
     assert validate_run(run, on_policy=True) is run
     (sample,) = samples([run])
     assert (sample.phase, sample.source, sample.weight, sample.branches) == ("combat_play", "rollout", 1.0, 1)
-    assert run["acts"] == {"3": "passed" if run["victory"] else "died"}
+    assert run["fights"] == dict(wins=1, losses=0, unfinished=0)
     assert "climb" in run and run["environment_actions"] == []
     # Greedy twice, with and without the fight's frames: the same play, counted or kept.
     # With every frame the fight's macro-action is a sample too.
@@ -110,10 +116,10 @@ class Refusing(SyntheticEngine):
         return super().send(command)
 
 
-def test_entry_saves_name_each_fight_and_its_label(tmp_path):
+def test_entry_saves_name_each_fight_and_its_result(tmp_path):
     _, runner, _ = sampled_runner()
-    saves, combats = tmp_path / "run.saves.jsonl.gz", tmp_path / "run.combats.jsonl.gz"
-    run = runner.run(SyntheticEngine(4, 2), "Ironclad", "saved", combats=combats, saves=saves, combat_frames=False)
+    saves = tmp_path / "run.saves.jsonl.gz"
+    run = runner.run(SyntheticEngine(4, 2), "Ironclad", "saved", saves=saves, combat_frames=False)
     assert run["status"] == "complete"
     assert run["saves"] == dict(path="run.saves.jsonl.gz", schema="rollout-entry-saves-v1", fights=1, failed=0, from_event=0)
     (row,) = read_saves(saves)
@@ -122,17 +128,14 @@ def test_entry_saves_name_each_fight_and_its_label(tmp_path):
     assert (row["map_point_type"], row["second_boss"], row["act"], row["from_event"]) == ("monster", False, 1, False)
     # The save is the engine's own, taken at the fight's first decision (state version 0).
     assert row["save"]["synthetic"] is True and row["save"]["state_version"] == 0
-    # The row names its combat label, which the fight's result comes from.
-    with gzip.open(combats, "rt") as stream:
-        (label,) = [json.loads(line) for line in stream]
-    assert (row["combat_index"], row["result"]) == (label["combat_index"], label["result"]) == (1, "win")
+    # The row says how the fight ended for the policy, and which relics it entered with.
+    assert (row["result"], row["relics"]) == ("win", [])
     enter, room = anchor_commands(row)
     assert (enter["cmd"], enter["save"], enter["map_point_type"], enter["second_boss"]) == (
         "enter_anchor", row["save"], "monster", False)
     assert room == dict(cmd="anchor_room", room=dict(type="combat", encounter="SYNTHETIC"))
-    # A refused save leaves the fight its row and its label, and says why.
-    refused = runner.run(Refusing(4, 2), "Ironclad", "refused", combats=tmp_path / "r.combats.jsonl.gz",
-                         saves=tmp_path / "r.saves.jsonl.gz")
+    # A refused save leaves the fight its row and its result, and says why.
+    refused = runner.run(Refusing(4, 2), "Ironclad", "refused", saves=tmp_path / "r.saves.jsonl.gz")
     assert refused["status"] == "complete" and refused["saves"]["failed"] == 1
     (row,) = read_saves(tmp_path / "r.saves.jsonl.gz")
     assert row["save"] is None and "no room" in row["error"] and row["result"] == "win"
@@ -168,12 +171,12 @@ def test_a_sampled_round_is_shards_the_trainer_reads(tmp_path):
     directory = tmp_path / "round-0"
     with Samplers(fighting, runner.model, runner.vocabulary, engines=5, processes=3) as pool:
         summary = sample_round(pool, runner, seeds, directory)
-    # The round's files: shards and index, the fights and saves of every run, no run files.
+    # The round's files: shards and index, the entry saves of every run, no run files.
     assert sorted(p.name for p in directory.iterdir() if p.is_dir()) == ["accepted", "metadata"]
     assert [p.name for p in (directory / "accepted").iterdir()] == ["00000.jsonl.gz"]
     assert (directory / INDEX).exists() and json.loads((directory / "metadata/seeds.json").read_text()) == seeds
     assert [p.name for p in directory.glob("*.json")] == ["summary.json"] and not list(directory.glob("*.jsonl"))
-    assert len(list(directory.glob("*.combats.jsonl.gz"))) == len(list(directory.glob("*.saves.jsonl.gz"))) == 20
+    assert len(list(directory.glob("*.saves.jsonl.gz"))) == 20 and not list(directory.glob("*.combats.jsonl.gz"))
     assert json.loads((directory / "summary.json").read_text()) == summary
     assert (summary["kind"], summary["iteration"], summary["policy_version"], summary["policy_digest"]) == (
         "rollout_round", 3, runner.version, runner.digest)

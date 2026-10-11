@@ -8,8 +8,7 @@ enemies; the enemies' random HP and the opening hand are drawn anew, it is anoth
 fight from the same entry), plays it on one native process and another process repeats
 its actions step by step (`anchor.play_battle`). The actions of a won fight are
 independent supervised samples (`spire-independent-decisions-v1`,
-`anchor_kind=student_battle`, `label_source=combat_solver`); every fought fight, won or
-lost, is a combat-outcome label (`combat-outcomes-v2`, source `student_battle`).
+`anchor_kind=student_battle`, `label_source=combat_solver`).
 
 Which fights: every fight of a fixed fraction of the round's runs (drawn by the hash
 of the run id, so the same runs whatever else is selected), and the fight each lost
@@ -28,22 +27,19 @@ python -m model import-independent data/student/round-3/independent-training.jso
 import argparse
 import gzip
 import json
-import os
 import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 
-from combat_outcome.data import SCHEMA as OUTCOME_SCHEMA
-from combat_outcome.frames import input_entities
 from combat_solver_cli.client import DEFAULT_CONFIG, ROOT
 from model.control import controller_for
 from model.dataset_index import STUDENT_BATTLE, read_index
 from model.protocol import fingerprint
 from model.saves import read_saves
 from . import anchor
-from .anchor import AUTOMATIC_POTIONS, BUDGETS, INITIALIZATION, RunProcess, SCHEMA, outcome_row, play_battle
+from .anchor import AUTOMATIC_POTIONS, BUDGETS, INITIALIZATION, RunProcess, SCHEMA, play_battle
 from .fetch import save_json
 from .sources import split_group
 
@@ -127,7 +123,6 @@ def select(round_dir, fraction=FRACTION, max_runs=0):
         if fights:
             runs.append(dict(
                 run_id=run_id, round=str(round_dir), saves=path.name,
-                combats=path.name[:-len('.saves.jsonl.gz')] + '.combats.jsonl.gz',
                 seed=rows[0]['seed'], character=rows[0]['character'], ascension=rows[0]['ascension'],
                 victory=indexed.get('victory'),
                 policy_version=indexed.get('policy_version', summary.get('policy_version')),
@@ -169,12 +164,12 @@ def anchor_for(row):
 
 def relic_differences(student, solver):
     """The public fields of the relics that differ between the policy's entry frame
-    (its combat label's entities) and the solver's first frame: a relic that counts at
+    (the `relics` of its saves row) and the solver's first frame: a relic that counts at
     the start of a fight or of a turn can stand one off when the fight is entered again."""
-    if not student:
+    if student is None:
         return None
-    mine = [e for e in student if e.get('entity_type') == 'relic']
-    theirs = [e for e in input_entities(dict(public=solver['observation'])) if e.get('entity_type') == 'relic']
+    mine = student
+    theirs = [e for e in solver['observation']['entities'] if e.get('entity_type') == 'relic']
     if [e.get('content_id') for e in mine] != [e.get('content_id') for e in theirs]:
         return [dict(relic='*', field='relics', student=[e.get('content_id') for e in mine],
                      solver=[e.get('content_id') for e in theirs])]
@@ -187,19 +182,6 @@ def relic_differences(student, solver):
             if student_value != solver_value:
                 differences.append(dict(relic=a.get('content_id'), field=field, student=student_value, solver=solver_value))
     return differences
-
-
-def entry_entities(path):
-    """The entry entities of every fight of a run's combat labels, by `combat_index`."""
-    entities = {}
-    if not Path(path).is_file():
-        return entities
-    with gzip.open(path, 'rt', encoding='utf-8') as stream:
-        for line in stream:
-            if line.strip():
-                label = json.loads(line)
-                entities[label.get('combat_index')] = label.get('entities')
-    return entities
 
 
 def sample_row(record, run, row, spot, contract, outcome):
@@ -235,7 +217,6 @@ def process_run(run, output, config=SOLVER_CONFIG, budgets=BUDGETS):
         if done['identity'] == identity and [f['fight'] for f in done['fights']] == [f['fight'] for f in run['fights']]:
             return done
     saves = {row['fight']: row for row in read_saves(round_dir / run['saves'])}
-    entities = entry_entities(round_dir / run['combats'])
     samples = output / 'samples' / f'{run["run_id"]}.jsonl.gz'
     samples.parent.mkdir(parents=True, exist_ok=True)
     temp = samples.with_suffix('.tmp')
@@ -253,7 +234,7 @@ def process_run(run, output, config=SOLVER_CONFIG, budgets=BUDGETS):
                 records, contract = result.pop('records'), result.pop('contract')
                 report.update(result, status='verified', rows=len(records), map_position=spot['map_position'],
                               potions_used=sum(r['label']['verb'] == 'USE_POTION' for r in records),
-                              relic_differences=relic_differences(entities.get(row['combat_index']), records[0]))
+                              relic_differences=relic_differences(row.get('relics'), records[0]))
                 for record in records:
                     stream.write(json.dumps(sample_row(record, run, row, spot, contract, result['outcome']),
                                             ensure_ascii=False) + '\n')
@@ -372,21 +353,18 @@ def decided(item):
     return len(item['options']) > 1 and controller_for(item['observation'].get('phase'), item['options']) is None
 
 
-def export(output, target=None, outcomes=None):
-    """The won fights' rows as independent supervised samples, and every fought fight as
-    a combat-outcome label. Lost fights teach no actions; fights in which nothing was
-    chosen (every step forced) are left out of the samples too; both stay as outcomes."""
+def export(output, target=None):
+    """The won fights' rows as independent supervised samples. Lost fights teach no
+    actions and are counted; so are fights in which nothing was chosen (every step
+    forced)."""
     output = Path(output)
     target = Path(target or output / 'independent-training.jsonl.gz')
-    outcomes = Path(outcomes or output / 'combat-outcomes.jsonl.gz')
-    counts, fights = Counter(), Counter()
-    temp, pending = target.with_suffix('.tmp'), outcomes.with_suffix('.tmp')
-    with gzip.open(temp, 'wt', encoding='utf-8', compresslevel=anchor.COMPRESSION) as training, \
-            gzip.open(pending, 'wt', encoding='utf-8', compresslevel=anchor.COMPRESSION) as labels:
+    counts = Counter()
+    temp = target.with_suffix('.tmp')
+    with gzip.open(temp, 'wt', encoding='utf-8', compresslevel=anchor.COMPRESSION) as training:
         for path in selected_reports(output):
             report = read(path)
             samples = output / 'samples' / (path.stem + '.jsonl.gz')
-            relative = os.path.relpath(samples, outcomes.parent)
             verified = {f['id']: f for f in report['fights'] if f['status'] == 'verified'}
             if not verified:
                 continue
@@ -401,12 +379,6 @@ def export(output, target=None, outcomes=None):
                 items = groups.get(key, [])
                 if len(items) != fight['rows']:
                     raise ValueError(f'Fight rows are missing for {key}')
-                row = outcome_row(report, fight, items, relative, source=STUDENT_BATTLE)
-                row['student'] = {k: report[k] for k in ('run_id', 'policy_version', 'policy_digest', 'iteration')}
-                row['student'].update(fight=fight['fight'], student_result=fight['student_result'],
-                                      potion_policy=fight.get('potion_policy'))
-                labels.write(json.dumps(row, ensure_ascii=False) + '\n')
-                fights[row['kind'], fight['outcome']] += 1
                 if fight['outcome'] == 'loss':
                     counts['lost_fights'] += 1
                 elif not any(decided(item) for item in items):
@@ -418,10 +390,7 @@ def export(output, target=None, outcomes=None):
                     counts['fights'] += 1
                     counts['rows'] += len(items)
     temp.replace(target)
-    pending.replace(outcomes)
     summary = dict(path=str(target), schema=SCHEMA, anchor_kind=STUDENT_BATTLE, counts=dict(sorted(counts.items())),
-                   combat_outcomes=dict(path=str(outcomes), schema=OUTCOME_SCHEMA,
-                                        counts={f'{k}/{r}': n for (k, r), n in sorted(fights.items())}),
                    continuous_winning_trajectory=False, initialization=INITIALIZATION)
     save_json(output / 'student-export-summary.json', summary)
     return summary

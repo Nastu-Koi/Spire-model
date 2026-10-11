@@ -128,8 +128,7 @@ def files(sources):
     for source in map(Path, sources):
         if source.is_dir():
             paths += sorted(p for p in source.iterdir()
-                            if p.is_file() and (p.suffix == ".json" or p.name.endswith((".jsonl", ".jsonl.gz")))
-                            and not p.name.endswith(("combats.jsonl", "combats.jsonl.gz")))
+                            if p.is_file() and (p.suffix == ".json" or p.name.endswith((".jsonl", ".jsonl.gz"))))
         elif source.is_file():
             paths.append(source)
         else:
