@@ -180,10 +180,11 @@ def test_identical_entities_differ_through_their_relations():
     model, vocabulary = build([first, second])
     with torch.no_grad():
         attacks = model.encode([observation(first)], vocabulary)[0].actions
-    assert (attacks[0] - attacks[1]).abs().max() > 1e-4
+    # The residual branches start small, so the difference does too: far above rounding.
+    assert (attacks[0] - attacks[1]).abs().max() > 1e-5
     a, b = logits(model, vocabulary, [first, second])
-    # Moving the power to the other enemy mirrors the two scores.
-    assert torch.allclose(a, b.flip(0), atol=1e-5)
+    # Moving the power to the other enemy mirrors the two scores, which differ.
+    assert torch.allclose(a, b.flip(0), atol=1e-6) and not torch.allclose(a, b, atol=1e-6)
 
 
 def test_batched_encoding_matches_single_encoding():

@@ -107,9 +107,6 @@ def parser():
     )
     x.add_argument("--output", required=True)
     x = sub.add_parser("parameters")
-    x.add_argument(
-        "--architecture", help="Read the model dimensions from architecture JSON"
-    )
     x.add_argument("--config", help="Native model/training JSON profile")
     x = sub.add_parser(
         "init",
@@ -172,7 +169,6 @@ def parser():
     x.add_argument("--window-shards", type=int, default=8,
                    help="Sharded data only: shards read into memory and shuffled together")
     x.add_argument("--tiny", action="store_true")
-    x.add_argument("--architecture")
     x.add_argument("--config", help="Native model/training JSON profile; with a strict resume, "
                                     "its sampling temperatures replace the checkpoint's and it "
                                     "must agree with the checkpoint on the rest")
@@ -339,7 +335,7 @@ def _learner(checkpoint, device, *, weights_only=False, training=None, decay_upd
     them, is accepted."""
     model, vocab, manifest = load_model(checkpoint, device, allow_legacy_encoding=weights_only)
     progress = manifest.get("progress", {})
-    saved_training = TrainConfig.from_dict(manifest["training"])
+    saved_training = TrainConfig(**manifest["training"])
     if not weights_only and training is not None:
         # The sampling settings are the profile's; it may differ from the checkpoint in nothing else.
         training = saved_training.with_sampling(training)
@@ -363,13 +359,6 @@ def _learner(checkpoint, device, *, weights_only=False, training=None, decay_upd
     if inference:
         learner.updates = progress.get("updates", 0)
     else:
-        # Whole-run PPO, which has been removed, left its rounds in the progress: such
-        # a policy was not shaped by demonstrations alone, and its optimizer moments are
-        # not those of a BC run.
-        if "sampling_round" in progress or progress.get("completed_ppo_rounds"):
-            raise ValueError("Checkpoint was trained with PPO, which has been removed; it cannot "
-                             "be resumed. Start new training from its weights with --weights-only, "
-                             "or play it as it is")
         if "optimizer" not in manifest:
             raise ValueError("Checkpoint has no optimizer state; use --weights-only")
         progress = restore_training(checkpoint, learner.optimizer, learner.scheduler)
@@ -420,7 +409,7 @@ def _data_metadata(runs):
 
 def _profile(path):
     """The training section of a native profile, or None without a path."""
-    return TrainConfig.from_dict(json.loads(Path(path).read_text())["training"]) if path else None
+    return TrainConfig(**json.loads(Path(path).read_text())["training"]) if path else None
 
 
 def _dataset(paths):
@@ -457,8 +446,6 @@ def main(argv=None):
             config = (
                 ModelConfig(**json.loads(Path(args.config).read_text())["model"])
                 if args.config
-                else ModelConfig.from_architecture(args.architecture)
-                if args.architecture
                 else ModelConfig()
             )
             with torch.device("meta"):
@@ -470,7 +457,7 @@ def main(argv=None):
             profile = json.loads(Path(args.config).read_text())
             config, training = (
                 ModelConfig(**profile["model"]),
-                TrainConfig.from_dict(profile["training"]),
+                TrainConfig(**profile["training"]),
             )
             frames = []
             for character in CHARACTERS:
@@ -576,7 +563,7 @@ def main(argv=None):
             if args.checkpoint:
                 learner, _ = _learner(args.checkpoint, args.device,
                                       weights_only=args.weights_only,
-                                      training=TrainConfig.from_dict(profile["training"]) if profile else None,
+                                      training=TrainConfig(**profile["training"]) if profile else None,
                                       decay_updates=args.decay_updates)
                 if profile and ModelConfig(**profile["model"]) != learner.model.config:
                     raise ValueError("A checkpoint's model architecture cannot be changed by --config")
@@ -586,8 +573,6 @@ def main(argv=None):
                     if profile
                     else ModelConfig.tiny()
                     if args.tiny
-                    else ModelConfig.from_architecture(args.architecture)
-                    if args.architecture
                     else ModelConfig()
                 )
                 vocab = vocabulary_for(runs, config)
@@ -596,7 +581,7 @@ def main(argv=None):
                 learner = Learner(
                     model,
                     vocab,
-                    TrainConfig.from_dict(profile["training"])
+                    TrainConfig(**profile["training"])
                     if profile
                     else TrainConfig(precision=args.precision),
                 )

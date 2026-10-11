@@ -3,14 +3,17 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 
-# Model settings of the training that was removed: the value head of whole-run PPO.
-# A checkpoint saved with them loads without them.
-RETIRED_MODEL_SETTINGS = frozenset({"value_mlp"})
+# The network's structure: what the tensors of a checkpoint are. Version 3 normalizes
+# queries and keys in every attention layer and in the decision head, starts the
+# residual branches scaled by depth, keeps a relation-bias table per global layer,
+# lets the fields of an entity attend to each other, and uses RMSNorm and Linear
+# layers without biases throughout.
+ARCHITECTURE_VERSION = 3
 
 
 @dataclass
 class ModelConfig:
-    architecture_version: int = 2
+    architecture_version: int = ARCHITECTURE_VERSION
     hidden_size: int = 256
     num_heads: int = 4
     layers: int = 4
@@ -25,20 +28,9 @@ class ModelConfig:
     encoder_precision: str = "inherit"
     checkpoint_layers: bool = False
     compile_blocks: bool = False
-    # LayerNorm on each head's queries and keys inside every attention layer.
-    qk_norm: bool = False
-    # Residual-branch output projections start scaled by 1/sqrt(2 * layers).
-    scaled_residual_init: bool = False
-    # Options of the 200M structure. Off, the module names and tensors are those
-    # of the 20M model.
-    head_qk_norm: bool = False  # normalize the decision query and the action keys
-    relation_bias_per_layer: bool = False  # a relation-bias table per global layer
-    field_attention: bool = False  # one attention layer over an entity's fields
-    linear_bias: bool = True  # biases in Linear layers
-    rms_norm: bool = False  # RMSNorm instead of LayerNorm everywhere
 
     def __post_init__(self):
-        if self.architecture_version != 2:
+        if self.architecture_version != ARCHITECTURE_VERSION:
             raise ValueError("Unsupported architecture version")
         if self.encoder_precision not in {"inherit", "fp32"}:
             raise ValueError("Unknown encoder precision")
@@ -68,8 +60,13 @@ class ModelConfig:
 
     @classmethod
     def from_dict(cls, values):
-        """A configuration as a checkpoint saved it, without the retired settings."""
-        return cls(**{name: value for name, value in values.items() if name not in RETIRED_MODEL_SETTINGS})
+        """A configuration as a checkpoint saved it. One of another architecture version
+        is refused by name: its tensors are not this network's."""
+        if values.get("architecture_version") != ARCHITECTURE_VERSION:
+            raise ValueError(
+                f"Checkpoint has architecture version {values.get('architecture_version')!r}; this "
+                f"network is version {ARCHITECTURE_VERSION}. Start a new one with init")
+        return cls(**values)
 
     @classmethod
     def tiny(cls):
@@ -85,30 +82,10 @@ class ModelConfig:
             backend="reference",
         )
 
-    @classmethod
-    def from_architecture(cls, path):
-        spec = json.loads(Path(path).read_text())["model"]
-        return cls(
-            hidden_size=spec["hidden_size"],
-            num_heads=spec["num_heads"],
-            layers=spec["layers"],
-            ffn_size=spec["ffn_size"],
-            local_size=spec["local_effect_encoder"]["hidden_size"],
-            local_layers=spec["local_effect_encoder"]["layers"],
-        )
-
 
 # The settings no optimizer state depends on: where training goes on from a checkpoint, a
 # profile may set them anew (`TrainConfig.with_sampling`).
 SAMPLING_SETTINGS = ("combat_temperature", "other_temperature")
-# Settings of the training that was removed (whole-run PPO, its value head and its
-# single sampling temperature). A checkpoint saved with them resumes without them: no
-# optimizer state of a behavior-cloned policy ever depended on them.
-RETIRED_SETTINGS = frozenset({
-    "value_lr", "clip_ratio", "target_kl", "ppo_epochs", "ppo_muon_lr", "value_coef",
-    "entropy_coef", "bootstrap_coef", "bootstrap_batch_size", "sampling_temperature",
-    "horizon_scale",
-})
 
 
 @dataclass
@@ -154,12 +131,6 @@ class TrainConfig:
     # Difficulty of the runs the policy plays itself: rollouts and evaluation.
     # Demonstrations keep their own; the player entity carries it into the model.
     ascension: int = 0
-
-    @classmethod
-    def from_dict(cls, values):
-        """A configuration as a checkpoint or profile saved it, without the retired
-        settings. Any other unknown setting is an error."""
-        return cls(**{name: value for name, value in values.items() if name not in RETIRED_SETTINGS})
 
     @property
     def temperatures(self):

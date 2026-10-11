@@ -98,17 +98,19 @@ def test_the_body_is_the_policy_weights_and_the_optimizer_groups_are_the_policy_
     assert names == {"muon", "head_decay", "head_no_decay", "backbone_decay", "backbone_no_decay"}
     grouped = {id(p) for group in optimizer.param_groups for p in group["params"]}
     assert grouped == {id(p) for _, p in trainable(net, TrainingConfig(precision="no"))}
-    assert len(grouped) == len(net.trainable()) - 4
+    # The lookup tables stay frozen: three of the encoder and one of each global layer.
+    assert len(grouped) == len(net.trainable()) - 3 - config.layers
     assert not any(id(p) in grouped for p in (net.body.query.weight, net.body.key.weight))
     muon = next(group for group in optimizer.param_groups if group["name"] == "muon")
     linears = [m for n, m in net.body.named_modules() if isinstance(m, torch.nn.Linear)
-               and (".attention." in n or ".ffn." in n) and n.startswith(("blocks.", "encoder.local_blocks."))]
+               and (".attention." in n or ".ffn." in n)
+               and n.startswith(("blocks.", "encoder.local_blocks.", "encoder.field_block."))]
     assert len(muon["params"]) == len(linears) and all(p.ndim == 2 for p in muon["params"])
-    # Frozen by default; a positive rate puts the four tables in a group of their own.
+    # Frozen by default; a positive rate puts the tables in a group of their own.
     assert "embedding_no_decay" not in names
     tables = next(group for group in build_optimizer(net, TrainingConfig(precision="no", embedding_lr=1e-3)).param_groups
                   if group["name"] == "embedding_no_decay")
-    assert len(tables["params"]) == 4 and tables["lr"] == 1e-3 and tables["weight_decay"] == 0.0
+    assert len(tables["params"]) == 3 + config.layers and tables["lr"] == 1e-3 and tables["weight_decay"] == 0.0
 
     # A linear probe trains the head alone, with AdamW alone; `train_blocks` adds the top layers.
     probe = TrainingConfig(precision="no", train_body=False)

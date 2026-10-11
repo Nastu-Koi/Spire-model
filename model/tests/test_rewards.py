@@ -136,13 +136,10 @@ def test_checkpoint_keeps_explicit_difficulty_and_rejects_implicit_migration(tmp
     path = tmp_path / "old"
     save_checkpoint(path, model, vocabulary,
                     training=TrainConfig(ascension=10, loader_workers=0, precision="no"),
-                    progress={"reward_version": "milestones-v1", "sampling_round": 0})
+                    progress={"reward_version": "milestones-v1"})
     _, _, manifest = load_model(path)
     assert manifest["training"]["ascension"] == 10
     assert _learner(path, "cpu", weights_only=True)[0].config.ascension == 10
-    # It sampled rounds: a policy of the removed PPO, which only plays or starts over.
-    with pytest.raises(ValueError, match="PPO"):
-        _learner(path, "cpu")
     assert json.loads((path / "manifest.json").read_text())["progress"]["reward_version"] == "milestones-v1"
     del manifest["training"]["ascension"]
     (path / "manifest.json").write_text(json.dumps(manifest))
@@ -150,7 +147,7 @@ def test_checkpoint_keeps_explicit_difficulty_and_rejects_implicit_migration(tmp
         load_model(path)
 
 
-def test_a_bc_checkpoint_resumes_whatever_reward_it_names_and_a_ppo_one_does_not(tmp_path):
+def test_a_bc_checkpoint_resumes_whatever_reward_it_names(tmp_path):
     model, vocabulary = tiny_policy()
     training = TrainConfig(loader_workers=0, precision="no")
     learner = Learner(model, vocabulary, training)
@@ -163,12 +160,6 @@ def test_a_bc_checkpoint_resumes_whatever_reward_it_names_and_a_ppo_one_does_not
     # Demonstrations taught it all it knows: no reward has shaped its policy.
     cloned = saved("cloned", completed_bootstrap_epochs=17)
     assert _learner(cloned, "cpu")[0].config == training
-    # Rounds of the removed PPO shaped these: they play, or start over from their weights.
-    for name, progress in (("warmed", {"sampling_round": 0}), ("updated", {"completed_ppo_rounds": 1})):
-        with pytest.raises(ValueError, match="PPO"):
-            _learner(saved(name, **progress), "cpu")
-        assert _learner(tmp_path / name, "cpu", inference=True)[0].updates == 0
-        assert _learner(tmp_path / name, "cpu", weights_only=True)[0].policy_version == 0
 
 
 def test_a_rollout_pays_its_outcome_once_at_its_end():
