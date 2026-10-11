@@ -29,7 +29,7 @@ python -m critic.data runs/iterate-v1/buffer --buffer-iterations 10      # 缓�
 
 ```bash
 python -m critic.train runs/bootstrap-20261008/eval-a0/dev-v8 \
-  --checkpoint runs/bootstrap-20261008/trained-v8-potions/epoch-000017 --save runs/critic/v1
+  --checkpoint runs/bootstrap-20261008/trained/current --save runs/critic/v1
 python -m critic.train runs/buffer --pretrained runs/critic/v1 --save runs/critic/v2      # 下一次迭代续训
 ```
 
@@ -38,7 +38,7 @@ python -m critic.train runs/buffer --pretrained runs/critic/v1 --save runs/criti
 - 数据可以是采样轮、缓冲目录或对局目录；`--buffer-iterations N` 只用缓冲里最近 N 次迭代的各轮。
 - 训练范围：默认训练整个主体和头；`--train-blocks N` 只训练顶部 N 个全局层、最终 norm 和头，`--freeze-body` 只训练头（策略表示的线性探针）。不训练的参数不进优化器、不算梯度。
 - 批：按策略的桶与预算打包（`model.batch.collate`、`model.data.microbatches`），一个逻辑批 `logical_batch_size` 个决策，超出预算时拆成几份、梯度累加后更新一次；打包在 `loader_workers` 个 fork 出的进程里做。
-- 优化器照策略分组：Transformer 的 Attention／FFN 矩阵用 Muon，四张查找表（符号、字段名、两张关系偏置表）、头和其余张量用 AdamW，各有自己的学习率；线性预热 `warmup_updates` 次更新，之后线性衰减到最后一次更新为 0。
+- 优化器照策略分组：Transformer 的 Attention／FFN 矩阵用 Muon，查找表（符号、字段名、局部与各全局层的关系偏置表）、头和其余张量用 AdamW，各有自己的学习率；线性预热 `warmup_updates` 次更新，之后线性衰减到最后一次更新为 0。
 - 损失：通关与过幕两个二元交叉熵之和，后者乘 `act_weight`。
 - 每轮结束在留出 seed 上评估一次并打印；`--train-runs N` 只用 N 个训练 seed（学习曲线），`--no-baselines` 跳过基线，`--no-compile` 不编译全局层，`--report` 把报告另存一份。
 - 不写入数据目录。

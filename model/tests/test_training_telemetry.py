@@ -42,7 +42,8 @@ def test_accuracy_counts_legal_top1_decisions_without_changing_replay_or_gradien
     with torch.no_grad():
         for head in (model.query, model.key):
             head.weight.copy_(torch.eye(width))
-            head.bias.zero_()
+    # Scores are the hidden values themselves: the head's norms would level them.
+    model.query_norm = model.key_norm = torch.nn.Identity()
     monkeypatch.setattr(model, "hidden", lambda batch: hidden)
     prepared = SimpleNamespace(
         batch=SimpleNamespace(lengths=[5] * 4, actions=torch.tensor([[1, 2, 3, 4]] * 4)),

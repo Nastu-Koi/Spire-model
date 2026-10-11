@@ -184,7 +184,7 @@ def test_decay_runs_bc_rates_to_zero_and_resumes_only_at_its_length(tmp_path):
         scheduler.step()
     assert rates == pytest.approx([4e-5, 3e-5, 2e-5, 1e-5]) and scheduler.decayed_updates == 4
     constant = {"kind": TRAINING_VERSION, "base_lrs": [4e-5], "warmup_updates": 0, "completed_updates": 9,
-                "decay_updates": 0, "decayed_updates": 0, "mode": "bootstrap"}
+                "decay_updates": 0, "decayed_updates": 0}
     # A schedule built on the optimizer reads its peak rates from it.
     optimizer.param_groups[0]["lr"] = 4e-5
     fresh = BootstrapSchedule(optimizer, 0, decay_updates=4)
@@ -256,107 +256,20 @@ def test_tables_fall_geometrically_over_their_decay_then_hold(tmp_path):
     assert resumed.scheduler.table_decay_updates == 2 and resumed.scheduler.completed_updates == learner.updates
 
 
-def with_value_head(path, *, own_groups):
-    """Rewrite a checkpoint as the removed PPO saved it: value-head tensors among the
-    weights and, in the optimizer, the head's two parameters either in groups of their
-    own or (older) as the last parameter of each head group, with a rate per group in
-    the schedule. BC never moved the head, so it has no moments."""
-    manifest = json.loads((path / "manifest.json").read_text())
-    weights = torch.load(path / "weights.pt", weights_only=True)
-    width = weights["query.weight"].shape[0]
-    weights["value.weight"], weights["value.bias"] = torch.randn(1, width), torch.randn(1)
-    torch.save(weights, path / "weights.pt")
-    state = torch.load(path / manifest["optimizer"], weights_only=True)
-    adamw = state["adamw"] if "adamw" in state else state
-    groups = {group["name"]: group for group in adamw["param_groups"]}
-    first = max(index for group in adamw["param_groups"] for index in group["params"]) + 1
-    runtime = torch.load(path / "runtime.pt", weights_only=True)
-    if own_groups:
-        for offset, name in enumerate(("value_decay", "value_no_decay")):
-            adamw["param_groups"].append(dict(groups["head_decay"], name=name, params=[first + offset],
-                                              lr=1e-3, initial_lr=1e-3))
-        # The value groups followed the other AdamW groups, before Muon's.
-        rates = runtime["scheduler"]["base_lrs"]
-        rates[len(groups):len(groups)] = [1e-3, 1e-3]
-    else:
-        groups["head_decay"]["params"].append(first)
-        groups["head_no_decay"]["params"].append(first + 1)
-    torch.save(state, path / manifest["optimizer"])
-    torch.save(runtime, path / "runtime.pt")
-
-
-@pytest.mark.parametrize("optimizer", ["adamw", "muon_adamw"])
-@pytest.mark.parametrize("own_groups", [False, True])
-def test_a_checkpoint_saved_with_a_value_head_resumes_without_it(tmp_path, optimizer, own_groups):
-    runs, vocabulary, model, training = setup()
-    training = replace(training, optimizer=optimizer)
-    learner = Learner(model, vocabulary, training)
-    learner.bootstrap(runs)
-    saved = tmp_path / "with-head"
-    save_checkpoint(saved, model, vocabulary, learner.optimizer, learner.scheduler, training=training,
-                    progress={"updates": learner.updates, "policy_version": learner.policy_version})
-    with_value_head(saved, own_groups=own_groups)
-    assert "value.weight" in torch.load(saved / "weights.pt", weights_only=True)
-    resumed, _ = _learner(saved, "cpu")
-    assert not hasattr(resumed.model, "value") and "value.weight" not in resumed.model.state_dict()
-    assert [group["name"] for group in resumed.optimizer.param_groups] \
-        == [group["name"] for group in learner.optimizer.param_groups]
-    assert resumed.scheduler.base_lrs == learner.scheduler.base_lrs
-    assert resumed.updates == learner.updates
-    assert resumed.scheduler.completed_updates == learner.scheduler.completed_updates
-    # Every parameter keeps the moments it was trained with.
-    ours = dict(model.named_parameters())
-    theirs = dict(resumed.model.named_parameters())
-    assert set(ours) == set(theirs)
-    moved = 0
-    for name in ours:
-        before, after = learner.optimizer.state.get(ours[name]), resumed.optimizer.state.get(theirs[name])
-        assert bool(before) == bool(after), name
-        if before:
-            moved += 1
-            for key, value in before.items():
-                if isinstance(value, torch.Tensor):
-                    torch.testing.assert_close(value, after[key], rtol=0, atol=0)
-        torch.testing.assert_close(ours[name], theirs[name], rtol=0, atol=0)
-    assert moved
-    # The next epoch continues as the original would.
-    saved_updates = learner.updates
-    state = random.getstate()
-    expected = learner.bootstrap(runs)[0]
-    random.setstate(state)
-    actual = resumed.bootstrap(runs)[0]
-    assert actual["learning_rates"] == expected["learning_rates"]
-    for a, b in zip(learner.model.parameters(), resumed.model.parameters()):
-        torch.testing.assert_close(a, b)
-    # A weights-only start and a load to play leave the head behind as well.
-    assert _learner(saved, "cpu", weights_only=True)[0].updates == 0
-    assert _learner(saved, "cpu", inference=True)[0].updates == saved_updates
-
-
-def test_a_schedule_or_progress_left_by_ppo_is_refused_and_retired_settings_are_dropped(tmp_path):
+def test_a_checkpoint_of_another_architecture_version_is_refused_by_name(tmp_path):
     runs, vocabulary, model, training = setup()
     learner = Learner(model, vocabulary, training)
-    learner.bootstrap(runs)
-    saved = tmp_path / "ppo"
+    saved = tmp_path / "old"
     save_checkpoint(saved, model, vocabulary, learner.optimizer, learner.scheduler, training=training,
                     progress={"updates": learner.updates, "policy_version": learner.policy_version})
-    runtime = torch.load(saved / "runtime.pt", weights_only=True)
-    for change in ({"mode": "ppo"}, {"mode": "value"}, {"ppo_step": 0.5}):
-        torch.save(dict(runtime, scheduler=dict(runtime["scheduler"], **change)), saved / "runtime.pt")
-        with pytest.raises(ValueError, match="PPO"):
-            _learner(saved, "cpu")
-    torch.save(dict(runtime, scheduler=dict(runtime["scheduler"], mode="bootstrap", ppo_step=1.0)),
-               saved / "runtime.pt")
-    assert _learner(saved, "cpu")[0].updates == learner.updates
-    # Settings of the removed training are dropped from a saved configuration; anything
-    # else unknown is an error.
     manifest = json.loads((saved / "manifest.json").read_text())
-    retired = dict(manifest["training"], clip_ratio=0.2, sampling_temperature=0.2, value_lr=1e-3,
-                   horizon_scale=100.0, bootstrap_coef=0.1)
-    assert TrainConfig.from_dict(retired) == learner.config
-    with pytest.raises(TypeError):
-        TrainConfig.from_dict(dict(manifest["training"], unknown=1))
-    assert ModelConfig.from_dict(dict(manifest["model"], value_mlp=True)) == model.config
+    assert ModelConfig.from_dict(manifest["model"]) == model.config
+    # The structure before this one, as its checkpoints name it: its options spelled out.
+    manifest["model"].update(architecture_version=2, qk_norm=False, rms_norm=False)
+    (saved / "manifest.json").write_text(json.dumps(manifest))
+    for options in (dict(), dict(weights_only=True), dict(inference=True)):
+        with pytest.raises(ValueError, match="architecture version 2"):
+            _learner(saved, "cpu", **options)
 
 
 def test_warmup_reaches_the_configured_rates():

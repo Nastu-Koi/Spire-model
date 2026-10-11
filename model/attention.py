@@ -27,19 +27,18 @@ def relation_bias(table, edges, valid):
 
 
 class Attention(nn.Module):
-    def __init__(self, width, heads, *, backend="sdpa", qk_norm=False, bias=True,
-                 norm=nn.LayerNorm):
+    def __init__(self, width, heads, *, backend="sdpa"):
         super().__init__()
         if width % heads:
             raise ValueError("Attention width must divide evenly across heads")
         self.heads = heads
         self.head_dim = width // heads
-        self.qkv = nn.Linear(width, 3 * width, bias=bias)
+        self.qkv = nn.Linear(width, 3 * width, bias=False)
         # Normalizing queries and keys per head bounds the attention logits, so a
         # high learning rate cannot drive them to saturation as the model widens.
-        self.q_norm = norm(self.head_dim) if qk_norm else None
-        self.k_norm = norm(self.head_dim) if qk_norm else None
-        self.output = nn.Linear(width, width, bias=bias)
+        self.q_norm = nn.RMSNorm(self.head_dim)
+        self.k_norm = nn.RMSNorm(self.head_dim)
+        self.output = nn.Linear(width, width, bias=False)
         self.backend = backend
 
     def forward(self, x, valid, bias):
@@ -50,9 +49,8 @@ class Attention(nn.Module):
             .permute(2, 0, 3, 1, 4)
             .unbind(0)
         )
-        if self.q_norm is not None:
-            # LayerNorm runs in float32 under autocast; SDPA wants q, k and v alike.
-            q, k = self.q_norm(q).to(v.dtype), self.k_norm(k).to(v.dtype)
+        # Under autocast the norm may return float32; SDPA wants q, k and v alike.
+        q, k = self.q_norm(q).to(v.dtype), self.k_norm(k).to(v.dtype)
         if self.backend == "reference":
             exact = torch.promote_types(q.dtype, torch.float32)
             with torch.autocast(device_type=x.device.type, enabled=False):

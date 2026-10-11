@@ -9,8 +9,7 @@ from torch import nn
 TRAINING_VERSION = "bc-decay-v5"
 # Lookup tables start at unit scale, about twenty times a Linear weight, and AdamW
 # moves every element by about its rate: they share a rate of their own.
-TABLES = frozenset({"encoder.symbol.weight", "encoder.field.weight",
-                    "relation.weight", "encoder.program_relation.weight"})
+TABLES = frozenset({"encoder.symbol.weight", "encoder.field.weight", "encoder.program_relation.weight"})
 
 
 def is_table(name):
@@ -86,13 +85,8 @@ class BootstrapSchedule:
 
     def check(self, state):
         """Raise unless this schedule continues the saved one: the same warmup, rates
-        and table decay, no PPO round since, and a decay either started now from a
-        constant-rate checkpoint or resumed at its length."""
-        # Whole-run PPO, which no longer exists, ran the schedule in modes of its own
-        # and scaled the rates by a step it paced round by round.
-        if state.get("mode", "bootstrap") != "bootstrap" or state.get("ppo_step", 1.0) != 1.0:
-            raise ValueError("Checkpoint was last trained with PPO, which has been removed; "
-                             "its schedule cannot be resumed. Start with --weights-only")
+        and table decay, and a decay either started now from a constant-rate checkpoint
+        or resumed at its length."""
         if (state.get("kind") != TRAINING_VERSION or list(state["base_lrs"]) != self.base_lrs
                 or state["warmup_updates"] != self.warmup_updates
                 or state.get("table_final_ratio", 1.0) != self.table_final_ratio
@@ -109,41 +103,6 @@ class BootstrapSchedule:
         self.decayed_updates = (state.get("decayed_updates", 0)
                                 if state.get("decay_updates", 0) == self.decay_updates else 0)
         self.prepare()
-
-
-def without_value_head(saved, groups):
-    """A saved AdamW state in today's `groups`, which have no value head, in place.
-    Returns which of the saved groups remain, in their order.
-
-    The value head of the removed PPO was trained in groups of its own (`value_*`),
-    and before those existed as the last parameter of each head group. Its
-    parameters leave with whatever state they had; every other parameter keeps the
-    moments it was trained with, renumbered to its place among the rest.
-    """
-    names = [group.get("name", "") for group in groups]
-    kept_groups, kept_params, state = [], [], saved.get("state", {})
-    for old in saved["param_groups"]:
-        name = str(old.get("name", ""))
-        if name.startswith("value"):
-            kept_groups.append(False)
-            continue
-        params = list(old["params"])
-        if name.startswith("head") and name in names:
-            # A linear value head left one parameter at the end of each head group.
-            if len(params) - len(groups[names.index(name)]["params"]) == 1:
-                params = params[:-1]
-        kept_groups.append(True)
-        kept_params.append((old, params))
-    if all(kept_groups) and all(params == list(old["params"]) for old, params in kept_params):
-        return kept_groups
-    renumbered = {}
-    for _, params in kept_params:
-        for index in params:
-            renumbered[index] = len(renumbered)
-    saved["param_groups"] = [dict(old, params=[renumbered[index] for index in params])
-                             for old, params in kept_params]
-    saved["state"] = {renumbered[index]: value for index, value in state.items() if index in renumbered}
-    return kept_groups
 
 
 class HybridOptimizer(torch.optim.Optimizer):

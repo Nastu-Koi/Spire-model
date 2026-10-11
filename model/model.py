@@ -38,17 +38,13 @@ def numeric_features(numbers, frequencies):
     )
 
 
-def norm_class(config):
-    return nn.RMSNorm if config.rms_norm else nn.LayerNorm
-
-
 class SwiGLU(nn.Module):
     """SwiGLU feed-forward layer with an explicit intermediate width."""
 
-    def __init__(self, width, intermediate, *, bias=True):
+    def __init__(self, width, intermediate):
         super().__init__()
-        self.input = nn.Linear(width, 2 * intermediate, bias=bias)
-        self.output = nn.Linear(intermediate, width, bias=bias)
+        self.input = nn.Linear(width, 2 * intermediate, bias=False)
+        self.output = nn.Linear(intermediate, width, bias=False)
 
     def forward(self, x):
         gate, value = self.input(x).chunk(2, dim=-1)
@@ -70,14 +66,12 @@ def scale_residual_outputs(blocks):
 
 
 class Block(nn.Module):
-    def __init__(self, width, heads, ffn_size, *, backend="sdpa", qk_norm=False,
-                 bias=True, norm=nn.LayerNorm):
+    def __init__(self, width, heads, ffn_size, *, backend="sdpa"):
         super().__init__()
-        self.norm1 = norm(width)
-        self.attention = Attention(width, heads, backend=backend, qk_norm=qk_norm,
-                                   bias=bias, norm=norm)
-        self.norm2 = norm(width)
-        self.ffn = SwiGLU(width, ffn_size, bias=bias)
+        self.norm1 = nn.RMSNorm(width)
+        self.attention = Attention(width, heads, backend=backend)
+        self.norm2 = nn.RMSNorm(width)
+        self.ffn = SwiGLU(width, ffn_size)
 
     def forward(self, x, valid, bias):
         x = x + self.attention(self.norm1(x), valid, bias)
@@ -94,62 +88,51 @@ class SharedEncoder(nn.Module):
         # The number encoder sees which field it encodes: a field-blind encoder
         # followed by a sum over fields cannot tell hp=12, block=40 from
         # hp=40, block=12.
-        norm, bias = norm_class(config), config.linear_bias
         self.numeric = nn.Sequential(
-            nn.Linear(local + NUMERIC_FEATURES, local, bias=bias),
+            nn.Linear(local + NUMERIC_FEATURES, local, bias=False),
             nn.GELU(),
-            nn.Linear(local, local, bias=bias),
+            nn.Linear(local, local, bias=False),
         )
         self.register_buffer(
             "frequencies",
             2 * math.pi / (4 * 512 ** (torch.arange(NUMERIC_BANDS) / (NUMERIC_BANDS - 1))),
         )
-        self.field_norm = norm(local)
+        self.field_norm = nn.RMSNorm(local)
         # 8*ceil(d/3) keeps SwiGLU near the parameter count of a 4d GELU FFN.
         local_ffn = 8 * math.ceil(local / 3)
         # The fields of one entity attend to each other before they are summed, so
         # a combination (a cost with a keyword) is seen at the entity, not left for
         # the global layers to rediscover.
-        self.field_block = (
-            Block(local, config.local_heads, local_ffn, backend=config.backend,
-                  qk_norm=config.qk_norm, bias=bias, norm=norm)
-            if config.field_attention
-            else None
-        )
+        self.field_block = Block(local, config.local_heads, local_ffn, backend=config.backend)
         self.local_blocks = nn.ModuleList(
             [
-                Block(local, config.local_heads, local_ffn, backend=config.backend,
-                      qk_norm=config.qk_norm, bias=bias, norm=norm)
+                Block(local, config.local_heads, local_ffn, backend=config.backend)
                 for _ in range(config.local_layers)
             ]
         )
-        if config.scaled_residual_init:
-            scale_residual_outputs(self.local_blocks)
-            if self.field_block is not None:
-                scale_residual_outputs([self.field_block])
+        scale_residual_outputs(self.local_blocks)
+        scale_residual_outputs([self.field_block])
         self.program_relation = nn.Embedding(
             config.relation_size, config.local_heads, padding_idx=0
         )
-        self.reference = nn.Linear(local, local, bias=bias)
-        self.program_binding = nn.Linear(local, local, bias=bias)
-        self.local_norm = norm(local)
-        self.projection = nn.Linear(local, config.hidden_size, bias=bias)
+        self.reference = nn.Linear(local, local, bias=False)
+        self.program_binding = nn.Linear(local, local, bias=False)
+        self.local_norm = nn.RMSNorm(local)
+        self.projection = nn.Linear(local, config.hidden_size, bias=False)
 
     def fields(self, packed):
         identity = self.symbol(packed.ids) + self.field(packed.kinds)
         numbers = numeric_features(packed.numbers.to(identity.dtype), self.frequencies)
         x = identity + self.numeric(torch.cat([identity, numbers], dim=-1))
         mask = packed.mask
-        if self.field_block is not None:
-            valid = mask.bool()
-            # Padded fields are excluded as keys; a row without fields (padding
-            # of a program group) attends uniformly to stay finite and is zeroed
-            # by the block.
-            excluded = ~valid & valid.any(1, keepdim=True)
-            bias = x.new_zeros((len(x), 1, 1, valid.shape[1])).masked_fill(
-                excluded[:, None, None, :], -float("inf")
-            )
-            x = self.field_block(x, valid, bias)
+        valid = mask.bool()
+        # Padded fields are excluded as keys; a row without fields (padding of a
+        # program group) attends uniformly to stay finite and is zeroed by the block.
+        excluded = ~valid & valid.any(1, keepdim=True)
+        bias = x.new_zeros((len(x), 1, 1, valid.shape[1])).masked_fill(
+            excluded[:, None, None, :], -float("inf")
+        )
+        x = self.field_block(x, valid, bias)
         # Sum retains multiplicity; sqrt normalization controls magnitude only.
         return self.field_norm(
             (x * mask.unsqueeze(-1)).sum(1)
@@ -221,36 +204,31 @@ class PolicyNetwork(nn.Module):
         self.config = config
         d = config.hidden_size
         self.encoder = SharedEncoder(config)
-        norm, bias = norm_class(config), config.linear_bias
         self.blocks = nn.ModuleList(
             [
-                Block(d, config.num_heads, config.ffn_size, backend=config.backend,
-                      qk_norm=config.qk_norm, bias=bias, norm=norm)
+                Block(d, config.num_heads, config.ffn_size, backend=config.backend)
                 for _ in range(config.layers)
             ]
         )
-        if config.scaled_residual_init:
-            scale_residual_outputs(self.blocks)
+        scale_residual_outputs(self.blocks)
         # One bias per relation type and head: entity references, their reverses
-        # and engine relations. Shared by every global layer, or one table per
-        # layer so that each layer follows relations in its own way.
-        def table():
-            return nn.Embedding(config.relation_size, config.num_heads, padding_idx=0)
-
-        self.relation = (
-            nn.ModuleList([table() for _ in range(config.layers)])
-            if config.relation_bias_per_layer
-            else table()
+        # and engine relations. A table per global layer, so that each layer
+        # follows relations in its own way.
+        self.relation = nn.ModuleList(
+            [
+                nn.Embedding(config.relation_size, config.num_heads, padding_idx=0)
+                for _ in range(config.layers)
+            ]
         )
-        self.final_norm = norm(d)
+        self.final_norm = nn.RMSNorm(d)
         # The global token (index 0) carries phase and selection progress; its
         # final state is the decision query. Selection progress is written into
         # the observation, so no state is carried between decisions.
-        self.query = nn.Linear(d, d, bias=bias)
-        self.key = nn.Linear(d, d, bias=bias)
+        self.query = nn.Linear(d, d, bias=False)
+        self.key = nn.Linear(d, d, bias=False)
         # Normalized query and keys bound the decision logits as the width grows.
-        self.query_norm = norm(d) if config.head_qk_norm else None
-        self.key_norm = norm(d) if config.head_qk_norm else None
+        self.query_norm = nn.RMSNorm(d)
+        self.key_norm = nn.RMSNorm(d)
         self.encoder_calls = 0
         self.decoder_calls = 0
         if config.compile_blocks:
@@ -264,7 +242,7 @@ class PolicyNetwork(nn.Module):
 
     def _relation_bias(self, table, edges, valid):
         bias = relation_bias(table, edges, valid)
-        # Every layer reads the same bias: convert it to the attention dtype once.
+        # Every head of the layer reads this bias: convert it to the attention dtype once.
         device = valid.device.type
         if torch.is_autocast_enabled(device):
             bias = bias.to(torch.get_autocast_dtype(device))
@@ -310,17 +288,8 @@ class PolicyNetwork(nn.Module):
             .index_copy(0, slots, tokens)
             .view(rows, pad, -1)
         )
-        shared = (
-            None
-            if self.config.relation_bias_per_layer
-            else self._relation_bias(self.relation, batch.relations, valid)
-        )
-        for index, block in enumerate(self.blocks):
-            bias = (
-                shared
-                if shared is not None
-                else self._relation_bias(self.relation[index], batch.relations, valid)
-            )
+        for block, table in zip(self.blocks, self.relation):
+            bias = self._relation_bias(table, batch.relations, valid)
             if (
                 self.config.checkpoint_layers
                 and self.training
@@ -358,15 +327,11 @@ class PolicyNetwork(nn.Module):
         with torch.autocast(device_type=x.device.type, enabled=False):
             return head(x.float())
 
-    def _project(self, head, norm, x):
-        projected = self._heads(head, x)
-        return projected if norm is None else norm(projected)
-
     def _query(self, state):
-        return self._project(self.query, self.query_norm, state)
+        return self.query_norm(self._heads(self.query, state))
 
     def _keys(self, actions):
-        return self._project(self.key, self.key_norm, actions)
+        return self.key_norm(self._heads(self.key, actions))
 
     def _score(self, queries, keys, masks):
         with torch.autocast(device_type=queries.device.type, enabled=False):
@@ -467,5 +432,4 @@ class PolicyNetwork(nn.Module):
             "backbone": sum(p.numel() for b in self.blocks for p in b.parameters())
             + sum(p.numel() for p in self.final_norm.parameters()),
             "full_layers": len(self.blocks),
-            "linear_layers": 0,
         }

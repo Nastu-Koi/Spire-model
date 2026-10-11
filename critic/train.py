@@ -50,8 +50,7 @@ RUNTIME = {"backend", "encoder_precision", "checkpoint_layers", "compile_blocks"
 
 
 def architecture(model):
-    """The weight-determining fields of a `model` section, with the defaults an older
-    manifest leaves out."""
+    """The weight-determining fields of a `model` section."""
     return {key: value for key, value in asdict(ModelConfig(**model)).items() if key not in RUNTIME}
 
 

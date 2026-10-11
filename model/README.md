@@ -4,7 +4,7 @@
 
 ## 当前训练安排
 
-当前配置为 [configs/rtxpro6000.json](../configs/rtxpro6000.json)：约 20M 共享策略，默认 A0，BC 可使用 A0–A10 混合示范。[configs/rtxpro6000-200m.json](../configs/rtxpro6000-200m.json) 是约 196M 的目标配置，取舍见 [ARCHITECTURE](../ARCHITECTURE.md)。BC 使用传入数据里除固定留出组以外的全部可训练宏动作（规则见 [固定留出集](#固定留出集)），默认持续至手动中断；不自动评估、不按表现降学习率或早停。可用 `--epochs N` 指定本次追加轮数，表现由使用者自行验证。
+两份配置是同一结构的两个尺寸：[configs/rtxpro6000.json](../configs/rtxpro6000.json) 约 20M，用来先行验证路线；[configs/rtxpro6000-200m.json](../configs/rtxpro6000-200m.json) 约 195M，是目标配置，取舍见 [ARCHITECTURE](../ARCHITECTURE.md)。共享策略默认 A0，BC 可使用 A0–A10 混合示范。BC 使用传入数据里除固定留出组以外的全部可训练宏动作（规则见 [固定留出集](#固定留出集)），默认持续至手动中断；不自动评估、不按表现降学习率或早停。可用 `--epochs N` 指定本次追加轮数，表现由使用者自行验证。
 
 | 设置 | 当前值 |
 | --- | --- |
@@ -68,14 +68,14 @@ python -m model --device cuda bootstrap --data data/bootstrap --checkpoint runs/
 
 分片数据不会自行重建词表，必须提供检查点。`init` 从引擎公开内容目录建立冻结词表并随机初始化权重。
 
-本工作区的训练在 `runs/bootstrap-20261008/`，是一条从头到尾严格续训的主线：`init-v5/` 是当前输入编码的初始化；`trained-v6/` 是第 1–7 轮（不含领取样本的数据）；`trained-v7-claims/` 是第 8–12 轮（加入八分之一的领取样本）；`trained-v8-potions/` 从第 12 轮起在 `imported-potions-1in8` 上继续。换数据时用新的输出目录，优化器、调度进度和轮次计数都延续。
+本工作区的数据和训练在 `runs/bootstrap-20261008/`：按下面的命令，当前结构与输入编码的初始化写到 `init/`，在 `imported-potions-1in8` 上的 BC 写到 `trained/`。目录里更早的检查点（`init-v5/`、`trained-v6/` 到 `trained-v8-potions/`）是上一个结构版本的，当前代码载入时按版本报错。换数据时用新的输出目录，优化器、调度进度和轮次计数都延续。
 
 ```bash
 python -m model --device cuda init --config configs/rtxpro6000.json \
-  --engine-root runs/bootstrap-20261008/engine --output runs/bootstrap-20261008/init-v5
+  --engine-root runs/bootstrap-20261008/engine --output runs/bootstrap-20261008/init
 python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-potions-1in8 \
-  --checkpoint runs/bootstrap-20261008/init-v5 --weights-only \
-  --config configs/rtxpro6000.json --output runs/bootstrap-20261008/trained-new --epochs 6
+  --checkpoint runs/bootstrap-20261008/init --weights-only \
+  --config configs/rtxpro6000.json --output runs/bootstrap-20261008/trained --epochs 6
 ```
 
 已有训练目录须通过其 `current` 续训，不能用新初始化覆盖。
@@ -97,8 +97,8 @@ python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-
 ```bash
 python -m model --device cuda bootstrap \
   --data runs/bootstrap-20261008/imported-potions-1in8 data/student-import/round-3 \
-  --checkpoint runs/bootstrap-20261008/trained-v8-potions/current \
-  --output runs/bootstrap-20261008/trained-v9-student
+  --checkpoint runs/bootstrap-20261008/trained/current \
+  --output runs/bootstrap-20261008/trained-student
 ```
 
 加 `--epochs N` 限定追加的轮数。之后每次迭代把新一轮的学生目录追加到 `--data` 列表（旧轮照样留着，份额随累计量上升），照换数据的惯例用新的输出目录、从上一个目录的 `current` 续训。学生目录导入时用小分片（`import-independent --shard-samples 250`），原因见[学生状态的战斗](../spire_codex_data/README.md#学生状态的战斗)。
@@ -115,23 +115,23 @@ python -m model --device cuda bootstrap \
 
 ```bash
 python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-potions-1in8 \
-  --checkpoint runs/bootstrap-20261008/trained-v8-potions/current \
-  --output runs/bootstrap-20261008/trained-v8-potions
+  --checkpoint runs/bootstrap-20261008/trained/current \
+  --output runs/bootstrap-20261008/trained
 ```
 
 收尾衰减示例（用一轮的更新数衰减）：
 
 ```bash
 python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-potions-1in8 \
-  --checkpoint runs/bootstrap-20261008/trained-v8-potions/current --decay-updates 10745 \
-  --output runs/bootstrap-20261008/trained-v8-decay
+  --checkpoint runs/bootstrap-20261008/trained/current --decay-updates 10745 \
+  --output runs/bootstrap-20261008/trained-decay
 ```
 
 衰减跑完的检查点是最终检查点，不能再续训；中途中断可用同一 `--decay-updates` 从其 `current` 续接。
 
 每轮完成后更新 `current/`，并保留 `epoch-000001/` 等独立检查点供手动比较。Ctrl+C 会保留最后一个完整 epoch；当前 epoch 尚未保存的更新不会恢复。只编辑 manifest 不能修改已保存优化器的学习率。
 
-删除整局 PPO 之前保存的检查点仍能载入：权重里的价值头张量（`value.*`）和它在优化器里的参数组被忽略，其余权重、优化器动量和调度进度照常严格续训；manifest 里已经退役的设置项（`clip_ratio`、`sampling_temperature` 等）读入时丢弃，温度取当前默认值。做过 PPO 采样轮、或调度状态停在 PPO 的检查点不能严格续训，只能 `--weights-only` 重新开始，或者用于采样和评估。
+检查点记网络的结构版本（`architecture_version`）。其它版本的检查点张量与当前网络不同，载入、续训和 `--weights-only` 都按版本报错；新训练从 `init` 开始。
 
 ## 固定留出集
 
@@ -143,7 +143,7 @@ python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-
 
 ```bash
 python -m model --device cuda heldout-nll --data runs/bootstrap-20261008/imported-potions-1in8 \
-  --checkpoint runs/bootstrap-20261008/trained-v8-potions/epoch-000017
+  --checkpoint runs/bootstrap-20261008/trained/current
 ```
 
 报告留出部分每个角色×阶段组的 NLL 总和、每宏动作 NLL（`nll_per_macro`）、每决策 NLL（`nll_per_branch`）及宏动作数与决策数，再按角色、按阶段和全体汇总；`equal_group_nll_per_macro` 是各组每宏动作 NLL 的平均，与训练损失的组等权定义一致，可直接与训练日志的 `loss` 对照；`a0` 下是其中 A0 样本的同样表格；`held_out.of` 是整个数据集的计数。它只报告，不选模型、不早停。
@@ -232,7 +232,7 @@ python -m model compare runs/eval-a runs/eval-b --head 60
 
 ```bash
 python -m model --device cuda iterate \
-  --checkpoint runs/bootstrap-20261008/trained-v9-student/current \
+  --checkpoint runs/bootstrap-20261008/trained-student/current \
   --demonstrations runs/bootstrap-20261008/imported-potions-1in8 \
   --output runs/iterate-v1 --iterations 20 --runs-per-character 200 \
   --workers 44 --engine-root runs/bootstrap-20261008/engine \

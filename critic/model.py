@@ -119,7 +119,7 @@ def load(directory, device="cpu", *, budgets=None):
         raise ValueError("Critic input encoding changed; retrain with the current public encoding")
     if manifest.get("rules") != rules.digest():
         raise ValueError("Critic was trained with different rule text")
-    config = ModelConfig(**manifest["model"])
+    config = ModelConfig.from_dict(manifest["model"])
     net = Critic(config)
     net.load_state(torch.load(directory / "weights.pt", map_location="cpu", weights_only=True))
     vocabulary = Vocabulary.from_state(manifest["vocabulary"], config)

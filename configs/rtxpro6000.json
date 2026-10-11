@@ -1,6 +1,6 @@
 {
     "model": {
-        "architecture_version": 2,
+        "architecture_version": 3,
         "hidden_size": 256,
         "num_heads": 4,
         "layers": 24,

@@ -16,7 +16,7 @@ from . import rules
 from .config import ModelConfig, TrainConfig
 from .model import PolicyNetwork
 from .representation import ENCODING_VERSION, Vocabulary
-from .optim import TRAINING_VERSION, without_value_head
+from .optim import TRAINING_VERSION
 from .rewards import REWARD_VERSION
 from .public_history import HISTORY_VERSION, require_history_version
 
@@ -124,8 +124,6 @@ def load_model(path, device="cpu", *, allow_legacy_encoding=False):
     require_history_version(manifest.get("public_history_version"))
     if manifest.get("encoding_version") != ENCODING_VERSION and not allow_legacy_encoding:
         raise ValueError("Checkpoint input encoding changed; use bootstrap --weights-only to start a new run")
-    if manifest.get("model", {}).get("architecture_version") != 2:
-        raise ValueError("Unsupported checkpoint architecture version")
     if manifest.get("rules") != rules.digest():
         raise ValueError("Checkpoint was trained with different rule text")
     if "ascension" not in manifest.get("training", {}):
@@ -139,8 +137,6 @@ def load_model(path, device="cpu", *, allow_legacy_encoding=False):
     loaded = set()
     for name in manifest["weights"]:
         shard = torch.load(path / name, map_location=device, weights_only=True)
-        # The value head of the removed PPO stays behind.
-        shard = {key: tensor for key, tensor in shard.items() if not key.startswith("value.")}
         if loaded & shard.keys() or not shard.keys() <= expected:
             raise ValueError("Duplicate or unexpected checkpoint tensors")
         model.load_state_dict(shard, strict=False)
@@ -169,12 +165,8 @@ def restore_training(path, optimizer, scheduler=None):
     current = optimizer.param_groups
     hybrid = set(restored) == {"adamw", "muon"}
     adamw = restored["adamw"] if hybrid else restored
-    # A checkpoint saved with the value head resumes without it; the schedule's
-    # saved rates are listed group by group in the optimizer's order.
-    kept = without_value_head(adamw, [group for group in current if group.get("name") != "muon"])
     muon = restored["muon"]["param_groups"] if hybrid else []
     groups = adamw["param_groups"] + muon
-    kept += [True] * len(muon)
     # A strict resume restores its original groups. It must never swallow requested settings.
     keys = ("name", "initial_lr", "weight_decay", "betas", "eps", "momentum", "ns_steps")
     if len(groups) != len(current) or any(
@@ -188,8 +180,6 @@ def restore_training(path, optimizer, scheduler=None):
         if runtime["scheduler"] is None:
             raise ValueError("Checkpoint has no schedule state; use --weights-only")
         schedule = dict(runtime["scheduler"])
-        if "base_lrs" in schedule:
-            schedule["base_lrs"] = [lr for lr, keep in zip(schedule["base_lrs"], kept) if keep]
         scheduler.check(schedule)
     # Delegate dtype/device restoration to the actual optimizer, including Muon.
     optimizer.load_state_dict(restored)
