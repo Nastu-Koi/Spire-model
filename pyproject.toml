@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "spire-model"
 version = "0.1.0"
-description = "Slay the Spire 2 agent: Transformer policy bootstrapped from Spire Codex runs, combat-outcome model, sampling and evaluation"
+description = "Slay the Spire 2 agent: Transformer policy bootstrapped from Spire Codex runs, win-probability critic, sampling and evaluation"
 requires-python = ">=3.11"
 dependencies = ["torch>=2.14,<2.15", "accelerate>=1.0", "numpy>=1.26"]
 
@@ -21,8 +21,8 @@ spire-codex-data = "spire_codex_data.__main__:main"
 model = ["monitor_web/*.html", "monitor_web/*.css", "monitor_web/*.js", "monitor_web/*.svg"]
 
 [tool.setuptools.packages.find]
-include = ["model*", "combat_solver_cli*", "combat_outcome*", "critic*", "spire_codex_data*"]
+include = ["model*", "combat_solver_cli*", "critic*", "spire_codex_data*"]
 
 [tool.pytest.ini_options]
-testpaths = ["model/tests", "combat_solver_cli/tests", "combat_outcome/tests", "critic/tests", "spire_codex_data/tests"]
+testpaths = ["model/tests", "combat_solver_cli/tests", "critic/tests", "spire_codex_data/tests"]
 markers = ["engine: requires local headless engine and game assemblies", "cuda: requires a CUDA GPU"]

@@ -63,14 +63,11 @@ python3 -m spire_codex_data.anchor run --manifest data/spire-codex/sources/manif
   --output data/anchors --kinds battle
 python3 -m spire_codex_data.anchor run --manifest data/spire-codex/sources/manifest.json \
   --output data/anchors --kinds potion
-python3 -m spire_codex_data.anchor export --manifest data/spire-codex/sources/manifest.json --output data/anchors      # independent-training.jsonl.gz、combat-outcomes.jsonl.gz
+python3 -m spire_codex_data.anchor export --manifest data/spire-codex/sources/manifest.json --output data/anchors      # independent-training.jsonl.gz
 python3 -m model import-independent data/anchors/independent-training.jsonl.gz --output data/bootstrap
 python3 -m model --device cuda init --config configs/rtxpro6000.json --output runs/init
 python3 -m model --device cuda bootstrap --data data/bootstrap --checkpoint runs/init --weights-only \
   --config configs/rtxpro6000.json --output runs/bootstrap
-
-# 战斗结果模型的预训练（与 Bootstrap 同期，见 combat_outcome/README.md）
-python3 -m combat_outcome.train data/anchors/combat-outcomes.jsonl.gz --save runs/combat-outcome
 ```
 
 `run` 按对局和类型续跑：`runs/<hash>.<类型>.json` 记录锚点状态、失败原因和耗时，`samples/<hash>.<类型>.jsonl.gz` 保存样本行，`summary.json` 汇总。只有对局摘要校验和、该类型的生成版本、原生程序集摘要及战斗预算都一致时，才复用已完成报告；局外规则版本与战斗版本分开维护。重编后若程序集内容改变，旧报告不会被静默跳过。复用旧战斗动作的方式见本文开头的 `--reuse-battles`，无需删除原始证据。
@@ -85,7 +82,7 @@ BC 使用全部可训练样本，不再接受 `--holdout`，默认持续到手�
 
 地图的 Boss 节点带本幕 Boss 的遭遇（字段 `encounter`；十阶第三幕两个 Boss 按出场顺序各一个）：游戏从每幕开始就在地图上显示 Boss。样本里用的是摘要记录的 Boss，不是 seed 抽出的（两者不一定相同，原因见 [ARCHITECTURE](../ARCHITECTURE.md)）：锚点把记录的 Boss 写进存档，引擎发布的帧里就是它。后面几幕的地图和 Boss 不进观测。记录的 Boss 场数与本幕的 Boss 节点数对不上时没法装入，这样的行地图上的 Boss 与记录不一致，`export` 不导出，计入导出摘要的 `rows_without_recorded_boss`。
 
-`export` 用 `--workers` 个进程（默认 16）读各份报告的样本，按报告文件名的顺序写出：样本文件是各份报告的 gzip 段依次相接，读起来是一条流。它同时写出 `combat-outcomes.jsonl.gz`（`combat-outcomes-v2`，`actor` 为 `combat_solver`）：每场通过验证的战斗一行，含第一个决策时的入场实体（玩家、永久卡组、遗物、药水、玩家能力）、遭遇、入场和结束 HP、胜负、回合数和实际用药，`seed` 字段是 `split_group`。求解器打输的战斗不进独立监督样本，但保留在这份文件里；每行的 `frames` 指向 `samples/` 里这场战斗的各个决策行，胜负都有，读取时由 `combat_outcome.data.fights` 取出。它是战斗结果模型的预训练数据（见 [combat_outcome/README.md](../combat_outcome/README.md)）。
+`export` 用 `--workers` 个进程（默认 16）读各份报告的样本，按报告文件名的顺序写出：样本文件是各份报告的 gzip 段依次相接，读起来是一条流。求解器打输的战斗不导出。
 
 局外生成版本为 `summary-anchor-samples-v3`，战斗为 `summary-battle-refresh-v1`。从更早的摘要恢复实现迁移时，须重跑受影响的 `shop event reward unclaimed` 并添加 `treasure`；只重新导出旧文件不能补上缺失的公开内容或原生复验。商店和宝箱的 `metadata.recovery` 保存库存／金币约束、顺序依据和独立复验方式，导入后保留在 `provenance.recovery`，不进入模型观察。
 
@@ -97,7 +94,7 @@ BC 使用全部可训练样本，不再接受 `--holdout`，默认持续到手�
 
 - 每场战斗按锚点 id 抽签，一半入选；入选且开场药水栏不空的，从栏里随机取 1 到全部瓶数，指定为必须使用（`forced`）。自动触发的瓶中精灵不指定。抽签只取决于 id，重跑得到同样的指定。
 - 求解时这几瓶必须出现在整场战斗的路线里，其余药水禁用；每一步搜索都按栏里还欠的那几瓶重新下指令。何时用、对谁用由求解器决定。打完时有指定的药水没用上（离开了药水栏，或战斗先结束）的不通过。
-- 与 `battle` 一样在另一进程逐步重放。导出时，打赢的 `potion` 战斗取代同一场 `battle` 的动作（两者起点相同、标签不同）；打输的不取代。战斗结果标签仍只来自 `battle`。
+- 与 `battle` 一样在另一进程逐步重放。导出时，打赢的 `potion` 战斗取代同一场 `battle` 的动作（两者起点相同、标签不同）；打输的不取代。
 
 用不用药、用几瓶是随机指定的，不是玩家的记录。记录里的用药（`potion_used`）没有采用：它只说这个节点用了哪几瓶，而求解器在指定之下几乎总是开场就用，时机上并不比随机指定多出信息。生成版本为 `summary-potion-v1`，求解进程须支持 `potion_directives`。
 
@@ -109,7 +106,7 @@ BC 使用全部可训练样本，不再接受 `--holdout`，默认持续到手�
 python3 -m spire_codex_data.student_battles select --round runs/collect/round-3 --fraction 0.25      # 只看选了哪些
 python3 -m spire_codex_data.student_battles run --round runs/collect/round-3 --output data/student/round-3 \
   --fraction 0.25 --workers 8
-python3 -m spire_codex_data.student_battles export --output data/student/round-3      # independent-training.jsonl.gz、combat-outcomes.jsonl.gz
+python3 -m spire_codex_data.student_battles export --output data/student/round-3      # independent-training.jsonl.gz
 python3 -m model import-independent data/student/round-3/independent-training.jsonl.gz \
   --output data/student-import/round-3 --shard-samples 250
 python3 -m model --device cuda bootstrap --data data/bootstrap data/student-import/round-3 \
@@ -121,7 +118,7 @@ python3 -m model --device cuda bootstrap --data data/bootstrap data/student-impo
 - **重入不是重放**：存档里的随机数状态是进房之后的，重入时敌人的随机 HP 与开局手牌重抽，与摘要锚点的战斗一样是“同一入场状态的另一次战斗”，不与学生原来那场对齐。在战斗开始时计数的遗物（如 `EMBER_TEA`）重入后可能少一；每场报告里 `relic_differences` 列出学生入场帧与求解器入场帧之间遗物公开字段的差异，`summary.json` 按遗物计数。
 - **产物**：`runs/<run_id>.json` 每局一份报告（身份：版本、原生程序集摘要、预算；每场的状态、胜负、行数、入场与结束 HP、用药数、耗时、失败原因），`samples/<run_id>.jsonl.gz` 每场战斗（胜负都有）的决策行，`selection.json`（这次选了哪些对局的哪些战斗），`summary.json`（选择计数、`verified`／`execution_failed`、失败原因分布、胜率、每类战斗平均秒数、用药计数）。
 - **续跑**：一局的报告在身份相同、入选的战斗也相同时直接复用，中断后重跑同一条命令即可。调大比例只重打入选战斗变了的对局（原先只标败场、现在全标的）和新入选的对局；换求解器构建或预算则全部重打。`summary.json` 与 `export` 只取 `selection.json` 里的对局：调小比例后不再入选的对局，报告留在盘上、不进这次导出。
-- **导出**：`export` 写 `independent-training.jsonl.gz`（只有打赢且至少有一个策略决策的战斗，`spire-independent-decisions-v1`）和 `combat-outcomes.jsonl.gz`（每场打过的战斗，胜负都有，`combat-outcomes-v2`，`source=student_battle`、`actor=combat_solver`，`frames` 指向 `samples/` 里的决策行，另带 `student`：对局、策略版本与 digest、迭代号、学生自己那场的结果、用药策略）。样本 `metadata`：`anchor_kind=student_battle`、`label_source=combat_solver`、`teacher_visibility=privileged`、`bc_only=true`、`native_replay_verified=true`、`initialization=summary-anchor-v1`、`run_hash`=对局 `run_id`、`sample_group`=`<run_id>:fight-NNN`、`split_group=split_group(对局 seed)`（与留出规则一致）、`policy_version`／`policy_digest`／`iteration`、`game_seed`、`fight`、`encounter`、`kind`、`act`、`floor`、`student_result`、`potion_policy`、`source_integrity=sampled_rollout`。
+- **导出**：`export` 写 `independent-training.jsonl.gz`（只有打赢且至少有一个策略决策的战斗，`spire-independent-decisions-v1`）；打输的和没有策略决策的战斗只计数（`lost_fights`、`fights_without_decision`）。样本 `metadata`：`anchor_kind=student_battle`、`label_source=combat_solver`、`teacher_visibility=privileged`、`bc_only=true`、`native_replay_verified=true`、`initialization=summary-anchor-v1`、`run_hash`=对局 `run_id`、`sample_group`=`<run_id>:fight-NNN`、`split_group=split_group(对局 seed)`（与留出规则一致）、`policy_version`／`policy_digest`／`iteration`、`game_seed`、`fight`、`encounter`、`kind`、`act`、`floor`、`student_result`、`potion_policy`、`source_integrity=sampled_rollout`。
 - **在迭代里**：`python -m model iterate` 每次采样之后依次运行上面的 `run`、`export` 和 `import-independent`（各自作为子进程，求解器失败时重跑一次），用法见 [迭代](../model/README.md#迭代采样标签胜率模型与优势加权回归)。
 - **导入与份额**：`import-independent` 照常导入成一个数据目录；索引行多记 `source=student_battle` 和策略字段。导入时用小分片（`--shard-samples 250`）：训练按分片成窗读取，一个读取进程的一窗只有两个分片，学生样本单个权重高、总量只有示范的百分之一，分片与示范一样大时它们会集中在少数几窗里成批出现，分片小则散到更多窗里。训练时把示范目录和若干学生目录一起传给 `--data`（示范在前），学生样本在各角色的战斗阶段组内按份额加权，规则见 [主策略训练](../model/README.md#多个数据目录与学生战斗的份额)。不足一次迭代的学生数据（试跑）不要并入正式训练。
 

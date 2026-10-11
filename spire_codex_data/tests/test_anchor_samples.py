@@ -4,7 +4,6 @@ import os
 
 import pytest
 
-from combat_outcome.data import fights
 from spire_codex_data import anchor
 from spire_codex_data.map_ambiguity import act_report, analyze
 
@@ -184,15 +183,15 @@ def test_export_omits_controller_only_groups_but_retains_followup_evidence(tmp_p
                 metadata=dict(sample_group=group, anchor_kind=controlled)))
     with gzip.open(sample_path, 'wt') as out:
         out.writelines(json.dumps(row) + '\n' for row in rows)
-    member, outcomes, counts, unnamed, automatic = anchor.export_report((report_path, source, sample_path, 'source'))
+    member, counts, unnamed, automatic = anchor.export_report((report_path, source, sample_path))
     exported = [json.loads(line) for line in gzip.decompress(member).splitlines()]
     assert [row['metadata']['sample_group'] for row in exported] == ['selection'] * 3
     assert [row['observation']['phase'] for row in exported] == [controlled, controlled, 'card_select']
-    assert automatic == {controlled: 2} and not outcomes and not unnamed
+    assert automatic == {controlled: 2} and not unnamed
     assert counts == {(controlled, 'historical_noncombat'): 3}
 
 
-def test_export_keeps_winning_actions_and_every_fight_outcome(tmp_path):
+def test_export_keeps_the_actions_of_won_fights(tmp_path):
     hero = dict(entity_type='player', ref='player', hp=50, max_hp=80, round=1)
     potion = dict(entity_type='potion', ref='potion:0', content_id='POTION.FIRE')
     entities = [hero, potion, dict(entity_type='card', zone='deck', content_id='CARD.BASH'),
@@ -233,33 +232,14 @@ def test_export_keeps_winning_actions_and_every_fight_outcome(tmp_path):
     assert summary['counts'] == {'battle/combat_solver': 2, 'rest/historical_noncombat': 1}
     with gzip.open(tmp_path / 'independent-training.jsonl.gz', 'rt') as stream:
         assert [json.loads(line)['metadata']['sample_group'] for line in stream] == ['won', 'won', 'rest']
-    # A lost fight teaches no actions, and neither does one won without a choice; both are outcomes.
+    # A lost fight teaches no actions, and neither does one won without a choice.
     assert summary['rows_without_decision'] == {'battle': 1}
-    assert summary['combat_outcomes']['counts'] == {'boss/loss': 1, 'elite/win': 1, 'regular/win': 1}
-    with gzip.open(tmp_path / 'combat-outcomes.jsonl.gz', 'rt') as stream:
-        won, lost, idle = map(json.loads, stream)
-    assert (idle['result'], idle['frames']['count']) == ('win', 1)
-    assert (won['start_hp'], won['end_hp'], won['hp_lost'], won['result'], won['turns']) == (50, 56, -6, 'win', 2)
-    assert (lost['start_hp'], lost['end_hp'], lost['hp_lost'], lost['result'], lost['kind']) == (50, 0, 50, 'loss', 'boss')
-    assert (won['seed'], won['encounter'], won['act'], won['max_hp']) == ('seed-group', 'TOADPOLES_WEAK', 2, 80)
-    assert [e['content_id'] for e in won['potions_used']] == ['POTION.FIRE']
-    # Solver fights, and the decision frames of every one of them: a lost fight keeps its frames.
-    assert (won['actor'], lost['actor'], lost['frames']) == (
-        'combat_solver', 'combat_solver', dict(file='samples/h.battle.jsonl.gz', group='lost', count=1))
-    labelled = {label['anchor']: frames for label, frames in fights(tmp_path / 'combat-outcomes.jsonl.gz')}
-    assert [f['action']['verb'] for f in labelled['won']] == ['USE_POTION', 'END_TURN']
-    assert [next(e for e in f['public']['entities'] if e['entity_type'] == 'player')['hp']
-            for f in labelled['lost']] == [50]
-    # The input is the state the fight was entered with: no hand, no enemies.
-    assert [(e['entity_type'], e.get('zone')) for e in won['entities']] == [('player', None), ('potion', None), ('card', 'deck')]
-    # Several processes write the rows and the outcomes that one writes, in the same order.
-    again = anchor.export(tmp_path, tmp_path / 'manifest.json', tmp_path / 'again.jsonl.gz',
-                          tmp_path / 'again-outcomes.jsonl.gz', workers=2)
-    assert (again['counts'], again['combat_outcomes']['counts']) == (summary['counts'], summary['combat_outcomes']['counts'])
-    for one, several in (('independent-training', 'again'), ('combat-outcomes', 'again-outcomes')):
-        assert gzip.open(tmp_path / f'{one}.jsonl.gz').read() == gzip.open(tmp_path / f'{several}.jsonl.gz').read()
+    # Several processes write the rows that one writes, in the same order.
+    again = anchor.export(tmp_path, tmp_path / 'manifest.json', tmp_path / 'again.jsonl.gz', workers=2)
+    assert again['counts'] == summary['counts']
+    assert gzip.open(tmp_path / 'independent-training.jsonl.gz').read() == gzip.open(tmp_path / 'again.jsonl.gz').read()
     # A fight won again with potions forced gives its actions in place of the fight it
-    # repeats; one lost again does not, and the outcomes are those of the first fights.
+    # repeats; one lost again does not.
     potions = dict(run_hash='h', kind='potion', identity=dict(anchor.BUDGETS), anchors=[
         dict(fight, kind='potion', id='won-potion', room_type='monster', outcome='win', exit_hp=60),
         dict(fight, kind='potion', id='idle-potion', room_type='elite', outcome='loss', exit_hp=None)])
@@ -267,7 +247,6 @@ def test_export_keeps_winning_actions_and_every_fight_outcome(tmp_path):
                                 item('idle-potion', 'potion', 'combat_solver', use)])
     forced = anchor.export(tmp_path, tmp_path / 'manifest.json')
     assert forced['counts'] == {'potion/combat_solver': 1, 'rest/historical_noncombat': 1}
-    assert forced['combat_outcomes'] == summary['combat_outcomes']
 
 
 def grid(edges, kinds):
