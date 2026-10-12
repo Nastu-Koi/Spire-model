@@ -15,7 +15,9 @@ of the run id, so the same runs whatever else is selected), and the fight each l
 run died in. Fights an event led into are skipped and counted, so are fights whose
 save the engine refused. Potions: an elite or boss fight entered with a full belt is
 asked for one potion of the solver's choosing (`RequireAtLeastOne`, held to the fight
-by `anchor.play_battle`); elsewhere the solver's own policy.
+by `anchor.play_battle`); elsewhere the solver's own policy, at lower prices: a potion
+has to save 5 HP, or 7 and 9 for the two tiers the solver holds dearer (`POTION_COSTS`;
+its own prices are 9, 14 and 18, at which it hardly uses any).
 
 python -m spire_codex_data.student_battles select --round runs/collect/round-3 --fraction 0.25
 python -m spire_codex_data.student_battles run --round runs/collect/round-3 --output data/student/round-3 \\
@@ -28,7 +30,7 @@ import argparse
 import gzip
 import json
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
@@ -46,10 +48,14 @@ from .sources import split_group
 VERSION = 'student-battle-v1'
 FRACTION = 0.25
 WORKERS = 8
-# The solver worker built with `potion_directives` and `potion_policy`, when the
-# workspace has it; the default configuration's worker may predate them.
-POTION_BUILD_CONFIG = ROOT / 'runs/bootstrap-20261008/build-potions/config.json'
-SOLVER_CONFIG = POTION_BUILD_CONFIG if POTION_BUILD_CONFIG.is_file() else DEFAULT_CONFIG
+# What a potion has to save for the solver's own policy to use it, in HP: the base price
+# and those of its two dearer tiers.
+POTION_COSTS = (5, 7, 9)
+SEARCH = dict(BUDGETS, potion_costs=list(POTION_COSTS))
+# The solver worker built with `potion_costs`, when the workspace has it; the default
+# configuration's worker may predate it, and `play_battle` refuses such a worker.
+SOLVER_BUILD_CONFIG = ROOT / 'runs/bootstrap-20261008/build-potion-costs/config.json'
+SOLVER_CONFIG = SOLVER_BUILD_CONFIG if SOLVER_BUILD_CONFIG.is_file() else DEFAULT_CONFIG
 # What a fight is selected by.
 BY_FRACTION, BY_DEATH = 'fraction', 'death'
 
@@ -200,29 +206,41 @@ def sample_row(record, run, row, spot, contract, outcome):
     return item
 
 
-def process_run(run, output, config=SOLVER_CONFIG, budgets=BUDGETS):
+def process_run(run, output, config=SOLVER_CONFIG, budgets=SEARCH):
     """The selected fights of one run, on two native processes of its own: the report
     goes to `runs/<run id>.json`, the rows of every fight (won or lost) to
     `samples/<run id>.jsonl.gz`.
 
-    A finished report stands while it holds the same fights and was made by the same
-    version, native build and solver budgets: another fraction fights again only the
-    runs it selects other fights of."""
+    Verified fights stand under the same selection, version, native build and budgets.
+    Execution failures are retried; a verified loss is a finished fight too."""
     output, round_dir = Path(output), Path(run['round'])
     shared, second = RunProcess(config), RunProcess(config)
     identity = dict(version=VERSION, **shared.build_identity, **budgets)
     target = output / 'runs' / f'{run["run_id"]}.json'
-    if target.exists():
+    samples = output / 'samples' / f'{run["run_id"]}.jsonl.gz'
+    cached, cached_rows = {}, defaultdict(list)
+    if target.exists() and samples.exists():
         done = read(target)
         if done['identity'] == identity and [f['fight'] for f in done['fights']] == [f['fight'] for f in run['fights']]:
-            return done
+            cached = {f['fight']: f for f in done['fights'] if f['status'] == 'verified'}
+            if len(cached) == len(run['fights']):
+                return done
+            with gzip.open(samples, 'rt', encoding='utf-8') as stream:
+                for line in stream:
+                    row = json.loads(line)
+                    cached_rows[row['metadata']['fight']].append(line)
+            cached = {number: report for number, report in cached.items()
+                      if len(cached_rows[number]) == report['rows']}
     saves = {row['fight']: row for row in read_saves(round_dir / run['saves'])}
-    samples = output / 'samples' / f'{run["run_id"]}.jsonl.gz'
     samples.parent.mkdir(parents=True, exist_ok=True)
     temp = samples.with_suffix('.tmp')
     reports = []
     with shared, second, gzip.open(temp, 'wt', encoding='utf-8') as stream:
         for selected in run['fights']:
+            if selected['fight'] in cached:
+                reports.append(cached[selected['fight']])
+                stream.writelines(cached_rows[selected['fight']])
+                continue
             row = saves[selected['fight']]
             spot = anchor_for(row)
             report = dict(selected, id=spot['id'], encounter=row['encounter'], kind=row['kind'], act=row['act'],
@@ -254,7 +272,9 @@ def work(task):
     """One run in a worker process: (run id, its report, None) or (run id, None, why not)."""
     run, arguments = task[0], task[1:]
     try:
-        return run['run_id'], process_run(run, *arguments), None
+        report = process_run(run, *arguments)
+        failed = [str(f['fight']) for f in report['fights'] if f['status'] != 'verified']
+        return run['run_id'], report, 'execution_failed:' + ','.join(failed) if failed else None
     except Exception as exc:
         return run['run_id'], None, f'{type(exc).__name__}:{exc}'
 
@@ -323,7 +343,7 @@ def summarize(output):
     return result
 
 
-def run_round(round_dir, output, *, fraction=FRACTION, workers=WORKERS, config=SOLVER_CONFIG, budgets=BUDGETS,
+def run_round(round_dir, output, *, fraction=FRACTION, workers=WORKERS, config=SOLVER_CONFIG, budgets=SEARCH,
               max_runs=0, log=None):
     """Select the fights of a round and fight them, `workers` runs at a time; the
     selection's counts and every run's outcome are written to `output/summary.json`."""
@@ -410,8 +430,12 @@ def main():
                         help='Solver time per search in a normal fight')
     parser.add_argument('--elite-budget-ms', type=int, default=BUDGETS['elite_budget_ms'])
     parser.add_argument('--boss-budget-ms', type=int, default=BUDGETS['boss_budget_ms'])
+    parser.add_argument('--potion-costs', type=int, nargs=3, default=list(POTION_COSTS),
+                        metavar=('BASE', 'ELEVATED', 'HIGH'),
+                        help="HP a potion has to save for the solver's own policy to use it, by the "
+                             "solver's three tiers; its own prices are 9 14 18")
     parser.add_argument('--solver-config', type=Path, default=SOLVER_CONFIG,
-                        help='Solver worker configuration; the worker must know potion_policy')
+                        help='Solver worker configuration; the worker must know potion_costs')
     args = parser.parse_args()
     if args.mode == 'export':
         if not args.output:
@@ -430,7 +454,7 @@ def main():
         if args.workers < 1:
             parser.error('workers must be positive')
         budgets = dict(budget_ms=args.budget_ms, elite_budget_ms=args.elite_budget_ms,
-                       boss_budget_ms=args.boss_budget_ms)
+                       boss_budget_ms=args.boss_budget_ms, potion_costs=args.potion_costs)
         result = run_round(args.round, args.output, fraction=args.fraction, workers=args.workers,
                            config=args.solver_config, budgets=budgets, max_runs=args.max_runs,
                            log=lambda line: print(line, flush=True))

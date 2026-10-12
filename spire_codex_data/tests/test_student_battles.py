@@ -283,6 +283,35 @@ def test_fights_are_solved_exported_and_imported_with_their_policy(tmp_path, mon
     assert len(fought) == before + 2
 
 
+def test_execution_failures_are_retried_without_replaying_verified_fights(tmp_path, monkeypatch):
+    directory, ids = a_round(tmp_path)
+    output, fought = tmp_path / "student", []
+    failed_id = f"{ids['whole']}:fight-001"
+    solve = solved(fought)
+
+    def interrupted(shared, second, save, spot, budgets):
+        if spot["id"] == failed_id:
+            raise TimeoutError("transient native failure")
+        return solve(shared, second, save, spot, budgets)
+
+    monkeypatch.setattr(student_battles, "RunProcess", Process)
+    monkeypatch.setattr(student_battles, "play_battle", interrupted)
+    report = run_round(directory, output, fraction=0.5, workers=1)
+    assert report["counts"]["execution_failed"] == 1
+    assert set(report["run_failures"]) == {ids["whole"]}
+    assert export(output)["counts"]["fights"] == 4
+    monkeypatch.setattr(student_battles, "play_battle", solve)
+    before = len(fought)
+    recovered = run_round(directory, output, fraction=0.5, workers=1)
+    assert [name for name, _, _ in fought[before:]] == [failed_id]
+    assert recovered["run_failures"] == {} and recovered["counts"]["verified"] == 6
+    assert recovered["counts"]["outcome_loss"] == 1
+    assert export(output)["counts"]["fights"] == 5
+    assert import_samples(output / "independent-training.jsonl.gz", tmp_path / "imported")["accepted_runs"] == 5
+    run_round(directory, output, fraction=0.5, workers=1)
+    assert len(fought) == before + 1
+
+
 CONTRACT = dict(adapter_version="duel-v1", observation_schema="public-state-v6", action_schema="candidate-v1",
                 public_history_version="public-history-v1", fixed_ascension=0, training_ready=True,
                 initialization="summary-anchor-v1")
@@ -292,11 +321,12 @@ class Duel:
     """A fight of `turns` turns with a belt, and a solver that does what it is asked: a
     search asked for a potion uses the first one of the belt, or refuses (while its
     state version is in `refuse`, or with an empty belt); a search left to itself ends
-    the turn. `fail` are the state versions at which it finds nothing at all."""
+    the turn. `fail` are the state versions at which it finds nothing at all. Each
+    search names the potion prices it used, unless the worker predates them (`prices`)."""
 
-    def __init__(self, turns=3, belt=("POTION.A", "POTION.B", "POTION.C"), refuse=(), fail=()):
+    def __init__(self, turns=3, belt=("POTION.A", "POTION.B", "POTION.C"), refuse=(), fail=(), prices=True):
         self.turns, self.start, self.refuse, self.fail = turns, list(belt), set(refuse), set(fail)
-        self.asked = []
+        self.asked, self.prices, self.priced = [], prices, []
 
     def reset(self):
         self.version, self.turn, self.belt = 0, 0, list(self.start)
@@ -329,6 +359,7 @@ class Duel:
     def step(self, frame, **options):
         policy = options.get("potion_policy", "Smart")
         self.asked.append((self.version, policy))
+        self.priced.append(options.get("potion_costs"))
         if self.version in self.fail:
             return dict(type="error", message="nothing found")
         candidates = frame["legal"]["candidates"]
@@ -338,7 +369,10 @@ class Duel:
             chosen = candidates[0]
         else:
             chosen = candidates[-1]
-        return dict(type="solver_step", candidate_ref=chosen["candidate_ref"],
+        search = dict(budget_ms=options["budget_ms"])
+        if self.prices:
+            search["potion_costs"] = options.get("potion_costs") or [9, 14, 18]
+        return dict(type="solver_step", candidate_ref=chosen["candidate_ref"], search=search,
                     frame=self.send(execution_command(frame, chosen["candidate_ref"])))
 
 
@@ -388,3 +422,21 @@ def test_a_fight_asked_for_a_potion_asks_every_search_until_one_is_used():
     # A search that fails on the solver's own policy too fails the fight.
     with pytest.raises(ValueError, match="solver_failed:nothing found"):
         fought_as(asking, fail={1})
+
+
+def test_a_fight_names_its_potion_prices_to_every_search():
+    from spire_codex_data.anchor import play_battle
+    from spire_codex_data.student_battles import SEARCH
+
+    # Student battles are fought at lower prices than the solver's own; every search is told.
+    assert SEARCH == dict(BUDGETS, potion_costs=[5, 7, 9])
+    shared = Seat()
+    play_battle(shared, Seat(), {}, dict(room_type="elite"), SEARCH)
+    assert shared.engine.priced == [[5, 7, 9]] * 3
+    # Budgets without prices leave the solver its own: the request does not mention them.
+    shared = Seat()
+    play_battle(shared, Seat(), {}, dict(room_type="elite"), BUDGETS)
+    assert shared.engine.priced == [None] * 3
+    # A worker that predates the prices would search at its own without saying so.
+    with pytest.raises(ValueError, match="solver_worker_without_potion_costs"):
+        play_battle(Seat(prices=False), Seat(), {}, dict(room_type="elite"), SEARCH)

@@ -79,7 +79,8 @@ def test_a_critic_trained_on_rounds_scores_them_into_advantages(world, tmp_path)
     report = main([str(world["buffer"]), "--buffer-iterations", "1", "--checkpoint", str(world["checkpoint"]),
                    "--config", str(world["profile"]), "--device", "cpu", "--save", str(saved)])
     assert report["data"]["rounds"] == 2 and report["data"]["decisions"] == 90
-    assert report["train"]["constant_loss"] > 0 and "baselines" in report
+    # A small sampled training split can contain only wins; its constant loss is then zero.
+    assert report["train"]["constant_loss"] >= 0 and "baselines" in report
     manifest = json.loads((saved / "manifest.json").read_text())
     assert manifest["report"]["train"] == report["train"] and manifest["version"] == 1
 

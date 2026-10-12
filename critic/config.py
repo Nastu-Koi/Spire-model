@@ -14,6 +14,8 @@ from model.config import ModelConfig
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs/rtxpro6000.json"
 INITIALIZATIONS = ("checkpoint", "random")
+# Model settings that do not change checkpoint tensor shapes or meanings.
+RUNTIME = {"backend", "encoder_precision", "checkpoint_layers", "compile_blocks"}
 
 
 @dataclass

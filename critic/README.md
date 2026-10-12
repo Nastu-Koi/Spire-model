@@ -12,7 +12,7 @@
 
 来源是完整对局（`spire-trajectory-v1`），四种写法都读：采样轮（`collect`／`iterate` 写出的 `round-N/`，经索引逐分片读，校验与策略的加载器相同）；缓冲目录（其下已写完的各轮，`--buffer-iterations N` 只取最近 N 次迭代的）；每局一个 JSON 的目录（`evaluate` 写出的，`metadata/` 与报告、流水账会被跳过）；每行一局的 `.jsonl`／`.jsonl.gz`。未完成的对局不进数据。采样轮只保存局外决策的帧，它的行与策略按优势加权的样本一一对应，行里另记宏动作在对局里的序号和迭代号。
 
-划分按 seed 分组，用策略的留出规则（`model.data.held_out`）：一个 seed 的全部决策在同一侧，加数据不改变已有 seed 的归属，留出的 seed 与策略验证集的留出 seed 相同。
+划分按 seed 分组，用策略的留出规则（`model.data.held_out`）：一个 seed 的全部决策在同一侧，加数据不改变已有 seed 的归属，分组键与策略一致；默认留出比例为 20%，策略为 2%，因此策略留出种子包含在 critic 的留出种子中。
 
 ```bash
 python -m critic.data runs/bootstrap-20261008/eval-a0/dev-v8      # 对局数、决策数、按幕／角色／阶段的通关率与过幕率
@@ -34,7 +34,7 @@ python -m critic.train runs/buffer --pretrained runs/critic/v1 --save runs/criti
 ```
 
 - `--checkpoint`：策略检查点，提供词表和（默认）主体初始权重；结构须与配置的 `model` 节一致（`backend`、`compile_blocks` 等运行时项除外）。
-- `--pretrained`：从已保存的 critic 继续，沿用其词表与配置，版本号加一；与 `--checkpoint` 二选一。
+- `--pretrained`：从已保存的 critic 继续，沿用其词表、模型和训练配置，版本号加一；与 `--checkpoint` 二选一。不传 `--config` 时无需原 profile；显式 profile 的 `critic` 字段和命令行参数依次覆盖保存值，未写出的字段保留。`--no-compile` 同样作用于恢复的网络。续训禁止改变 `holdout`，且要求 `data.split.version` 为 `seed-group-v1`；旧划分的 critic 仍可加载推理，但训练须从策略检查点新建。
 - 数据可以是采样轮、缓冲目录或对局目录；`--buffer-iterations N` 只用缓冲里最近 N 次迭代的各轮。
 - 训练范围：默认训练整个主体和头；`--train-blocks N` 只训练顶部 N 个全局层、最终 norm 和头，`--freeze-body` 只训练头（策略表示的线性探针）。不训练的参数不进优化器、不算梯度。
 - 批：按策略的桶与预算打包（`model.batch.collate`、`model.data.microbatches`），一个逻辑批 `logical_batch_size` 个决策，超出预算时拆成几份、梯度累加后更新一次；打包在 `loader_workers` 个 fork 出的进程里做。

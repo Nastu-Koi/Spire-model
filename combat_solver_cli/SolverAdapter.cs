@@ -98,6 +98,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 	public void PrepareEngine()
 	{
 		PortfolioDeadline.Install(assembly);
+		PotionCosts.Install(assembly);
 		NativeSelectionBridge.Install();
 		// Restore the native Neutralize action; the CLI legacy prefix bypasses native attack commands.
 		// Keep the solver patch audit enabled and remove only this known compatibility prefix.
@@ -175,6 +176,9 @@ internal sealed class SolverAdapter(Assembly assembly)
 			only_death_routes_found = Get(result, "OnlyDeathRoutesFound"),
 			refinement_failure = _refinementFailure,
 			budget_ms = _effectiveBudgetMs,
+			potion_costs = PotionCosts.Current,
+			// What the route's potions cost at those prices, as the solver counted it.
+			potion_strategic_cost = ((IEnumerable)Get(Get(result, "PotionStrategicCostByTurn"), "Values")).Cast<int>().Sum(),
 			boss_combat = IsBossCombat()
 		};
 	}
@@ -225,7 +229,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 			}
 			bool reuse = request.TryGetProperty("reuse_turn_plan", out var reuseValue) && reuseValue.GetBoolean();
 			int turn = player.PlayerCombatState.TurnNumber;
-			string policy = string.Join("|", new[] { "budget_ms", "boss_budget_ms", "potions", "potion_policy", "potion_directives", "beam_width", "beam_portfolio" }
+			string policy = string.Join("|", new[] { "budget_ms", "boss_budget_ms", "potions", "potion_policy", "potion_directives", "potion_costs", "beam_width", "beam_portfolio" }
 				.Select(k => request.TryGetProperty(k, out var v) ? v.GetRawText() : ""));
 			if (!reuse || _planTurn != turn || _planPolicy != policy) _turnPlan.Clear();
 			object obj2;
@@ -420,6 +424,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 		}
 		int num = EffectiveBudget(request);
 		_effectiveBudgetMs = num;
+		PotionCosts.Set(request);
 		Assembly assembly = Assembly.Load("sts2");
 		Type type = assembly.GetType("MegaCrit.Sts2.Core.Combat.CombatManager", throwOnError: true);
 		object value3 = type.GetProperty("Instance", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).GetValue(null);

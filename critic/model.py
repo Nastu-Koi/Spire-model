@@ -16,7 +16,7 @@ The value of a ±1 return is 2 * p_win - 1.
 
 import json
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import torch
@@ -29,7 +29,7 @@ from model.public_history import HISTORY_VERSION, require_history_version
 from model.representation import ENCODING_VERSION, Vocabulary
 
 from .batches import pack, parse
-from .config import Budgets
+from .config import RUNTIME, Budgets
 
 FORMAT = "critic-v1"
 TARGET = "p(run won), p(act passed)"
@@ -108,7 +108,7 @@ def save(directory, net, vocabulary, config, **provenance):
         public_history_version=HISTORY_VERSION, **provenance), indent=1))
 
 
-def load(directory, device="cpu", *, budgets=None):
+def load(directory, device="cpu", *, budgets=None, runtime=None):
     """The saved critic as a Scorer, rebuilt from its manifest alone."""
     directory = Path(directory)
     manifest = json.loads((directory / "manifest.json").read_text())
@@ -120,6 +120,10 @@ def load(directory, device="cpu", *, budgets=None):
     if manifest.get("rules") != rules.digest():
         raise ValueError("Critic was trained with different rule text")
     config = ModelConfig.from_dict(manifest["model"])
+    if runtime:
+        if set(runtime) - RUNTIME:
+            raise ValueError("Only runtime settings may override a saved critic's model")
+        config = replace(config, **runtime)
     net = Critic(config)
     net.load_state(torch.load(directory / "weights.pt", map_location="cpu", weights_only=True))
     vocabulary = Vocabulary.from_state(manifest["vocabulary"], config)

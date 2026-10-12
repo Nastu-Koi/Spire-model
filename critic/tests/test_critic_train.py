@@ -16,14 +16,16 @@ from critic.train import build_optimizer, main, set_head_bias, trainable
 from model.config import ModelConfig
 from model.model import PolicyNetwork
 from model.representation import Vocabulary
+from model.seeds import SPLIT_VERSION
 
 
 def test_training_saves_a_critic_that_scores_frames_and_continues(runs_dir, runs, profile, checkpoint, tmp_path):
     saved = tmp_path / "critic-1"
     report = main([str(runs_dir), "--checkpoint", str(checkpoint), "--config", str(profile), "--device", "cpu",
-                   "--holdout", "0.5", "--save", str(saved), "--report", str(tmp_path / "report.json")])
+                   "--holdout", "0.5", "--freeze-body", "--head-lr", "0.003",
+                   "--save", str(saved), "--report", str(tmp_path / "report.json")])
     assert report["data"]["runs"] == 6 and report["data"]["split"] == dict(
-        holdout=0.5, train=12, train_seeds=3, test=12, test_seeds=3)
+        version=SPLIT_VERSION, holdout=0.5, train=12, train_seeds=3, test=12, test_seeds=3)
     assert set(report["baselines"]) == {"constant", "logistic_act_floor", "logistic_state"}
     assert report["baselines"]["constant"]["win"]["explained_variance"] <= 0.0
     assert set(report["critic"]) == {"win", "act", "calibration"} and len(report["history"]) == 2
@@ -49,11 +51,22 @@ def test_training_saves_a_critic_that_scores_frames_and_continues(runs_dir, runs
 
     # The next iteration continues from the saved critic: same vocabulary, next version.
     continued = tmp_path / "critic-2"
-    report = main([str(runs_dir), "--pretrained", str(saved), "--config", str(profile), "--device", "cpu",
-                   "--holdout", "0.5", "--epochs", "1", "--no-baselines", "--save", str(continued)])
+    report = main([str(runs_dir), "--pretrained", str(saved), "--device", "cpu",
+                   "--epochs", "1", "--no-baselines", "--save", str(continued)])
     assert report["model"]["version"] == 2 and report["model"]["pretrained"] == str(saved)
-    assert load(continued).manifest["vocabulary"] == manifest["vocabulary"]
+    resumed = load(continued).manifest
+    assert resumed["vocabulary"] == manifest["vocabulary"]
+    assert resumed["training"] == dict(manifest["training"], epochs=1)
+    assert resumed["data"]["split"] == manifest["data"]["split"]
     assert "baselines" not in report
+
+    with pytest.raises(ValueError, match="holdout"):
+        main([str(runs_dir), "--pretrained", str(continued), "--device", "cpu", "--holdout", "0.2"])
+    legacy = dict(resumed)
+    del legacy["data"]["split"]["version"]
+    (continued / "manifest.json").write_text(json.dumps(legacy))
+    with pytest.raises(ValueError, match="older seed split"):
+        main([str(runs_dir), "--pretrained", str(continued), "--device", "cpu"])
 
     # A random body takes only the vocabulary from the checkpoint.
     report = main([str(runs_dir), "--checkpoint", str(checkpoint), "--config", str(profile), "--device", "cpu",

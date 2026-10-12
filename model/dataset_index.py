@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .control import CONTROL_VERSION, policy_macros
 from .protocol import ProtocolError, fingerprint
+from .seeds import seed_group
 
 
 INDEX = "index.jsonl.gz"
@@ -55,7 +56,13 @@ def read_index(directory):
                 "Missing or stale policy index; rebuild it with "
                 f"python -m model reindex --data {Path(directory)}"
             )
-        return [json.loads(line) for line in stream if line.strip()]
+        rows = [json.loads(line) for line in stream if line.strip()]
+    for row in rows:
+        # Older imports omit source; their seed is already a split group. Old
+        # sampled rounds are distinguished by the outcome fields (`row_source`).
+        if "split_group" not in row:
+            row["split_group"] = seed_group(dict(row, source=row_source(row)))
+    return rows
 
 
 def member(run):
@@ -73,7 +80,8 @@ def index_row(run, shard=None, line=None, phases=None):
         phases = Counter(m["phase"] for m in policy_macros(run))
     source = sample_source(run)
     row = dict(run_id=run["run_id"], seed=run["seed"], character=run["character"],
-               phases=dict(phases), contract=fingerprint(run["contract"]), source=source)
+               ascension=run.get("ascension"), phases=dict(phases),
+               contract=fingerprint(run["contract"]), source=source, split_group=seed_group(run))
     if run.get("source") == "rollout":
         row.update({name: run.get(name) for name in ROLLOUT_FIELDS})
     if source == STUDENT_BATTLE:
@@ -129,11 +137,13 @@ class ShardWriter:
 
 
 def _index_shard(task):
-    directory, name = task
+    directory, name, listed = task
     rows, counts, excluded = [], Counter(), Counter()
     raw_macros, training_groups = 0, 0
     with gzip.open(directory / name, "rb") as stream:
         for line, payload in enumerate(stream):
+            if listed is not None and line not in listed:
+                continue
             run = json.loads(payload)
             row = index_row(run, name, line)
             rows.append(json.dumps(row, ensure_ascii=False) + "\n")
@@ -148,25 +158,49 @@ def _index_shard(task):
                 counts=counts, excluded=excluded)
 
 
-def rebuild_index(directory, *, workers=1):
+def listed_runs(directory):
+    """The lines of every shard that the present index of `directory` lists."""
+    listed = {}
+    with gzip.open(Path(directory) / INDEX, "rt", encoding="utf-8") as stream:
+        next(stream, None)
+        for line in stream:
+            if line.strip():
+                row = json.loads(line)
+                listed.setdefault(row["shard"], set()).add(row["line"])
+    return listed
+
+
+def rebuild_index(directory, *, workers=1, listed_only=False):
     """Recount all policy macros, then atomically publish an index with this rule version.
 
     A failed scan leaves the previous index in place. Source shards and import
     summaries are not changed; the previous index is retained before replacement.
+
+    A directory that shares another's shards holds a part of them: what its index
+    lists. `listed_only` keeps to those runs; without it such a directory is refused,
+    since its index would come out as the whole of the other's.
     """
     directory = Path(directory)
     if workers < 1:
         raise ValueError("Index workers must be positive")
+    if (directory / "accepted").is_symlink() and not listed_only:
+        raise ProtocolError("The shards belong to another directory, of which this index lists a part; "
+                            "rebuild it with --listed-only")
     names = sorted(p.relative_to(directory).as_posix() for p in (directory / "accepted").glob("*.jsonl.gz"))
     if not names:
         raise ProtocolError("No accepted gzip shards to index")
+    listed = listed_runs(directory) if listed_only else None
+    if listed is not None:
+        if set(listed) - set(names):
+            raise ProtocolError("The index lists shards that are missing")
+        names = sorted(listed)
     descriptor, temporary = tempfile.mkstemp(prefix=".policy-index-", suffix=".gz", dir=directory)
     temporary = Path(temporary)
     counts, excluded, totals = Counter(), Counter(), Counter()
     pool = None
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            tasks = ((directory, name) for name in names)
+            tasks = ((directory, name, None if listed is None else listed[name]) for name in names)
             if workers > 1:
                 pool = ProcessPoolExecutor(max_workers=workers)
                 results = pool.map(_index_shard, tasks)

@@ -18,9 +18,9 @@ python -m combat_solver_cli configure \
 ## 组成
 
 - `lib/`（不入库）：`CombatSolver.dll`、`CombatSolver.json` 与本机 `config.json`。
-- `client.py`：`SolverEngine`，一个原生进程，同一时刻只有一局（开始下一局的条件见[决策协议](../sts2-cli/docs/decision-protocol.md)）；`step()` 让求解器执行一步战斗（普通/Boss 预算、药水、回合计划复用）。药水默认按求解器自己的 `Smart` 策略（一瓶药水折成若干点 HP，省不回来就不用）；`potion_policy` 可改为 `Disabled` 或 `RequireAtLeastOne`，`potion_directives` 按栏位指定（`[{slot, potion, directive}]`，`directive` 为 `Force`／`Disabled`／`Smart`，`potion` 是不带 `POTION.` 前缀的 ID）：被 `Force` 的药水必须出现在整场战斗的路线里，找不到这样的路线时求解失败。
+- `client.py`：`SolverEngine`，一个原生进程，同一时刻只有一局（开始下一局的条件见[决策协议](../sts2-cli/docs/decision-protocol.md)）；`step()` 让求解器执行一步战斗（普通/Boss 预算、药水、回合计划复用）。药水默认按求解器自己的 `Smart` 策略（一瓶药水折成若干点 HP，省不回来就不用）；`potion_policy` 可改为 `Disabled` 或 `RequireAtLeastOne`，`potion_directives` 按栏位指定（`[{slot, potion, directive}]`，`directive` 为 `Force`／`Disabled`／`Smart`，`potion` 是不带 `POTION.` 前缀的 ID）：被 `Force` 的药水必须出现在整场战斗的路线里，找不到这样的路线时求解失败。`potion_costs=[基础, 较高, 最高]` 改 `Smart` 的价格（HP）：求解器自己的是 9／14／18，不传即原价；搜索结果回报所用的价格（`potion_costs`）和路线上药水按该价格合计的代价（`potion_strategic_cost`）。
 - `Program.cs` / `SolverAdapter.cs`：worker 主循环、求解请求、当前回合计划复用、真实状态一致性检查；每个决策边界同步求解器状态，出错时重置。
-- `ChoiceTransaction.cs` / `NativeSelectionBridge.cs`：统一选择事务（见下）。`PortfolioDeadline.cs`：限时求解的截止处理。
+- `ChoiceTransaction.cs` / `NativeSelectionBridge.cs`：统一选择事务（见下）。`PortfolioDeadline.cs`：限时求解的截止处理。`PotionCosts.cs`：药水价格。CombatSolver 0.44 的三档价格是编译期常量，散在 `PotionUsePolicy` 的四个方法、`CombatSearchCoordinator.MaximumSmartPotionUses` 和插入格挡药水的阈值里；安装时逐处核对常量的个数再改成读取请求的价格，个数对不上（求解器换了版本）就拒绝启动。
 - `search_support.py`：动作语义、状态哈希、prefix 记录、公开动作先验（`preference`）。
 - `trajectory.py`：独立原生重放验证与导出。
 

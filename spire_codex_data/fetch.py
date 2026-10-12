@@ -75,11 +75,16 @@ class Client:
 
     def reserve(self, route):
         pace = self.interval if self.interval is not None else 60 / ROUTE_LIMITS.get(route, 60) * self.margin
-        with self.lock:
-            now = time.monotonic()
-            start = max(now, self.next_request.get(route, 0.0))
-            self.next_request[route] = start + pace
-        time.sleep(start - now)
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                delay = self.next_request.get(route, 0.0) - now
+                if delay <= 0:
+                    self.next_request[route] = now + pace
+                    return
+            # A hold or another request can move the deadline while we sleep. A
+            # late wakeup is one new slot, not permission to drain overdue slots.
+            time.sleep(delay)
 
     def hold(self, route, seconds):
         """Keep every thread off a route until `seconds` from now."""

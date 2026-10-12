@@ -172,7 +172,13 @@ def reweigh(logical, table, temperature, scale=1.0):
     weighted = [([replace(item, weight=item.weight * next(factor) * scale) for item in micro], prepared)
                 for micro, prepared in logical]
     size = effective_size(advantages, beta)
-    return weighted, dict(beta=beta, effective=size, samples=len(items), share=size / len(items))
+    final = [item.weight for micro, _ in weighted for item in micro]
+    total = sum(final)
+    shares = [weight / total for weight in final] if total else []
+    final_size = min(len(items), 1 / sum(share ** 2 for share in shares)) if shares else 0.0
+    return weighted, dict(beta=beta, effective=size, samples=len(items), share=size / len(items),
+                          weighted_effective_samples=final_size, weighted_effective_share=final_size / len(items),
+                          max_weight_share=max(shares, default=0.0))
 
 
 def _again(factory):
@@ -235,11 +241,15 @@ class Mixed:
             return dict(batches=0)
         betas = [entry["beta"] for entry in self.seen if not math.isinf(entry["beta"])]
         shares = [entry["share"] for entry in self.seen]
+        weighted_shares = [entry["weighted_effective_share"] for entry in self.seen]
         return dict(
             batches=len(self.seen), samples=sum(entry["samples"] for entry in self.seen),
             beta=sum(betas) / len(betas) if betas else None,
             beta_min=min(betas) if betas else None, beta_max=max(betas) if betas else None,
-            effective_share=sum(shares) / len(shares), effective_share_min=min(shares))
+            effective_share=sum(shares) / len(shares), effective_share_min=min(shares),
+            weighted_effective_share=sum(weighted_shares) / len(weighted_shares),
+            weighted_effective_share_min=min(weighted_shares),
+            max_weight_share=max(entry["max_weight_share"] for entry in self.seen))
 
 
 def pass_updates(rounds, config):
@@ -302,6 +312,7 @@ def update(learner, rounds, supervised, *, temperature=None, updates=None, windo
         on_update(dict(
             metrics, beta=None if math.isinf(done["beta"]) else done["beta"], effective_samples=done["effective"],
             effective_share=done["share"], sampled_samples=done["samples"],
+            **{key: done[key] for key in ("weighted_effective_samples", "weighted_effective_share", "max_weight_share")},
             awr_loss=metrics["sources"].get(SAMPLED, {}).get("loss"),
             supervised_loss=supervised_loss(metrics["sources"])))
 

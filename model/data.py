@@ -20,6 +20,7 @@ from .protocol import (
 from .rewards import require_reward_version
 from .control import CONTROL_VERSION, controller_for, is_policy_frame, policy_macros
 from .dataset_index import INDEX, STUDENT_BATTLE, read_index, row_source, sample_source
+from .seeds import seed_group
 
 
 SOURCES = {"demonstration", "recorder_bc", "independent", "rollout", "evaluation"}
@@ -208,12 +209,12 @@ HELDOUT_FRACTION = 0.02
 
 def held_out(run, fraction=HELDOUT_FRACTION):
     """Whether a run's seed falls in the held-out part. The side is a function of the
-    seed alone (the first 32 bits of its fingerprint, as a fraction of 2**32, under
+    seed group alone (the first 32 bits of its fingerprint, as a fraction of 2**32, under
     `fraction`): every run and fragment of one seed lands on the same side, in whatever
     shard it is stored, whatever else the data set holds and however it was imported."""
     from .protocol import fingerprint
 
-    key = str(run.get("seed", run["run_id"]))
+    key = seed_group(run)
     return int(fingerprint(key)[:8], 16) / 2**32 < fraction
 
 
@@ -336,6 +337,25 @@ class RunShards:
             parts[held_out(row, fraction)].append(row)
         return RunShards(self.directories, parts[0]), RunShards(self.directories, parts[1])
 
+    def at_ascension(self, ascension):
+        """The runs played at `ascension`, over the same shards."""
+        if any("ascension" not in row for row in self.rows):
+            raise ProtocolError("The policy index predates ascensions; rebuild it with python -m model reindex")
+        return RunShards(self.directories, [row for row in self.rows if row["ascension"] == ascension])
+
+    def combat_from(self, directories):
+        """The data set with its fights taken from `directories` alone, which are some
+        of its own: a run that holds combat macro-actions stays where it is one of
+        theirs, and every run without them stays. A fight is a sample group of its own,
+        so what is left of the other directories is their decisions outside combat."""
+        own = [path.resolve() for path in self.directories]
+        named = [Path(path).resolve() for path in directories]
+        if any(path not in own for path in named):
+            raise ProtocolError("--combat-from names directories of --data")
+        roots = {own.index(path) for path in named}
+        return RunShards(self.directories, [row for row in self.rows
+                                            if "combat" not in row["phases"] or row.get("root", 0) in roots])
+
     @property
     def counts(self):
         """Macros per (character, phase): the groups the sample weights are normalized by."""
@@ -448,6 +468,20 @@ def split_held_out(runs, fraction=HELDOUT_FRACTION):
     if isinstance(runs, RunShards):
         return runs.split(fraction)
     return split_runs(runs, fraction)
+
+
+def at_ascension(runs, ascension):
+    """The runs of `runs` played at `ascension`, a list in memory or RunShards."""
+    if isinstance(runs, RunShards):
+        return runs.at_ascension(ascension)
+    return [run for run in runs if run.get("ascension") == ascension]
+
+
+def combat_from(runs, directories):
+    """`runs` with its fights taken from `directories` alone (RunShards.combat_from)."""
+    if not isinstance(runs, RunShards):
+        raise ProtocolError("--combat-from tells sharded data directories apart")
+    return runs.combat_from(directories)
 
 
 def extent(runs):

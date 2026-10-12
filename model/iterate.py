@@ -369,17 +369,23 @@ class Driver:
         settings = self.settings
         work, target = self.output / "student" / f"round-{iteration}", self.output / "student-import" / f"round-{iteration}"
         log = self.output / "logs" / f"labels-round-{iteration}.log"
-        status = (started or self.launch(self.label_command(iteration), log)).wait()
-        if status:
-            # A finished run's report stands: a second attempt fights only what failed.
-            status = self.launch(self.label_command(iteration), log).wait()
-        summary = json.loads((work / "summary.json").read_text()) if (work / "summary.json").is_file() else {}
-        failures = len(summary.get("run_failures") or {})
+        job = started or self.launch(self.label_command(iteration), log)
+        for attempt in range(2):
+            status = job.wait()
+            summary = json.loads((work / "summary.json").read_text()) if (work / "summary.json").is_file() else {}
+            failures = len(summary.get("run_failures") or {})
+            failed_fights = summary.get("counts", {}).get("execution_failed", 0)
+            if attempt or not (status or failures or failed_fights):
+                break
+            # Verified wins and losses stand; retry execution failures only.
+            job = self.launch(self.label_command(iteration), log)
         selected = summary.get("selection", {}).get("runs_selected", 0)
-        # The command fails when runs did; anything else that fails it left no such count.
-        if not summary or (status and not 0 < failures <= settings.label_failures * selected):
+        fights = summary.get("selection", {}).get("selected", summary.get("counts", {}).get("fights", 0))
+        if (not summary or failures > settings.label_failures * selected
+                or failed_fights > settings.label_failures * fights
+                or (status and not (failures or failed_fights))):
             raise ProtocolError(f"The solver's labelling of round {iteration} failed "
-                                f"({failures} of {selected} runs); see {log}")
+                                f"({failures} of {selected} runs, {failed_fights} of {fights} fights); see {log}")
         if self.launch([sys.executable, "-m", "spire_codex_data.student_battles", "export", "--output", work], log).wait():
             raise ProtocolError(f"The export of round {iteration}'s labels failed; see {log}")
         self.set_aside(target)
@@ -390,7 +396,7 @@ class Driver:
         imported = json.loads((target / "summary.json").read_text())
         counts = summary["counts"]
         return dict(
-            fraction=settings.label_fraction, selected_runs=selected, failed_runs=failures,
+            fraction=settings.label_fraction, selected_runs=selected, failed_runs=failures, failed_fights=failed_fights,
             fights=counts.get("fights", 0), verified=counts.get("verified", 0), wins=counts.get("outcome_win", 0),
             groups=imported["accepted_runs"], macros=imported.get("macros", 0),
             data=str(target.relative_to(self.output)) if imported["accepted_runs"] else None)
@@ -511,12 +517,14 @@ class Driver:
             awr_loss=done["awr_loss"], supervised_loss=done["supervised_loss"], beta=done["beta"],
             beta_min=done["beta_min"], beta_max=done["beta_max"], effective_share=done["effective_share"],
             effective_share_min=done["effective_share_min"], temperature=done["temperature"],
+            weighted_effective_share=done["weighted_effective_share"],
+            weighted_effective_share_min=done["weighted_effective_share_min"], max_weight_share=done["max_weight_share"],
             capped_groups=done["capped_groups"],
             sampled=done["sampled"], labelled=done["supervised"], sources=metrics["sources"],
             grad_norm=metrics.get("grad_norm"), seconds=round(time.monotonic() - started, 1))
         critic = self.entry(iteration).get("critic")
         seeds = RunShards(rounds).seeds
-        for directory in self.student_data():
+        for directory in supervised:
             seeds |= RunShards(directory).seeds
         _save(current, learner, dict(
             runtime=self.runtime, iteration=iteration, update=result, advantage=settings.advantage,
@@ -602,6 +610,8 @@ class Driver:
                 awr_updates=update["pass_updates"], loss=update["loss"], accuracy=update["accuracy"],
                 awr_loss=update["awr_loss"], supervised_loss=update["supervised_loss"], beta=update["beta"],
                 effective_share=update["effective_share"], effective_share_min=update["effective_share_min"],
+                **{key: update.get(key) for key in (
+                    "weighted_effective_share", "weighted_effective_share_min", "max_weight_share")},
                 student_macros=update["labelled"]["student_macros"])
         if evaluation:
             metrics.update(eval_runs=evaluation["runs"], eval_win_rate=evaluation["win_rate"],

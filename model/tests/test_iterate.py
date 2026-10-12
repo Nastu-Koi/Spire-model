@@ -23,6 +23,7 @@ from model.history import TrainingHistory
 from model.independent import import_samples
 from model.iterate import COMPILED_VARIANTS, Command, Driver, Settings, canonical, round_seeds, seeds_of
 from model.protocol import CHARACTERS, ProtocolError
+from model.seeds import validate_evaluation_seeds
 from model.tests import journeys
 from model.tests.test_student_share import POLICY, rows
 from spire_codex_data.sources import split_group
@@ -120,6 +121,37 @@ def lines(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines()]
 
 
+def test_new_demonstrations_are_excluded_from_evaluation_after_an_update(world):
+    state = driver(world, labels=False, advantage="return", updates="1", eval_seeds=None).run(1)
+    assert state["iterations"]["0"]["update"]["labelled"]["macros"] > 0
+    metrics = lines(world.output / "updates.jsonl")[0]["metrics"]
+    assert 0 < metrics["weighted_effective_share"] <= 1 and 0 < metrics["max_weight_share"] <= 1
+    assert lines(world.output / "history.jsonl")[0]["metrics"]["weighted_effective_share"] == metrics["weighted_effective_share"]
+    progress = read(world.output / "policy/current/manifest.json")["progress"]
+    known = RunShards(world.demonstrations).seeds
+    assert known <= set(progress["training_seeds"])
+    queue = read(world.seeds)
+    queue["Ironclad"] = ["demonstration-0"]
+    with pytest.raises(ValueError, match="overlaps"):
+        validate_evaluation_seeds(queue, progress)
+
+
+def test_failed_fights_cannot_silently_continue_an_iteration(world):
+    class FailedFights(Solver):
+        def fight(self, command, work):
+            work.mkdir(parents=True, exist_ok=True)
+            (work / "summary.json").write_text(json.dumps(dict(
+                selection=dict(runs_selected=2, selected=2), run_failures={},
+                counts=dict(fights=2, execution_failed=2))))
+            return 0  # Reports from older workers can return success despite failed fights.
+
+    solver = FailedFights()
+    with pytest.raises(ProtocolError, match="labelling of round 0 failed"):
+        driver(world, solver, advantage="return", updates="1").run(1)
+    assert solver.calls == ["run", "run"]
+    assert not (world.output / "policy/current").exists()
+
+
 def test_two_iterations_sample_label_value_weigh_update_and_evaluate(world):
     solver = Solver()
     state = driver(world, solver).run(2)
@@ -147,7 +179,7 @@ def test_two_iterations_sample_label_value_weigh_update_and_evaluate(world):
 
     # Labelled: the solver's commands in order, every round's import kept as data.
     assert solver.calls == ["run", "export", "import"] * 2
-    assert first["labels"] == dict(fraction=0.25, selected_runs=2, failed_runs=0, fights=2, verified=2, wins=2,
+    assert first["labels"] == dict(fraction=0.25, selected_runs=2, failed_runs=0, failed_fights=0, fights=2, verified=2, wins=2,
                                    groups=2, macros=4, data="student-import/round-0")
     assert RunShards(world.output / "student-import/round-1").student_macros == 4
 
@@ -171,14 +203,15 @@ def test_two_iterations_sample_label_value_weigh_update_and_evaluate(world):
     assert (first["update"]["policy"], second["update"]["policy"]) == ("policy/iteration-0000", "policy/iteration-0001")
     assert (first["update"]["policy_version"], second["update"]["policy_version"]) == (start + 1, start + 2)
     assert first["update"]["gate"]["enforced"] is False and "heldout_seeds" in first["update"]["gate"]["failed"]
-    assert first["update"]["temperature"]["rule"] == "tuned" and 0.1 <= first["update"]["beta"] <= 100
+    assert first["update"]["temperature"]["rule"] == "tuned" and 0.1 - 1e-12 <= first["update"]["beta"] <= 100 + 1e-12
     assert 0 < first["update"]["effective_share_min"] <= first["update"]["effective_share"] <= 1
     assert {"rollout", "demonstration"} <= set(first["update"]["sources"]) <= {"rollout", "demonstration", "student_battle"}
     assert first["update"]["labelled"]["student_macros"] == 4 and second["update"]["labelled"]["student_macros"] == 8
     # As many updates as a pass over the newest round makes, drawn from the whole buffer.
     learner, manifest = _learner(world.output / "policy/current", "cpu")
     passes = [awr.pass_updates([world.output / "buffer" / f"round-{number}"], learner.config) for number in range(2)]
-    assert [first["update"]["pass_updates"], second["update"]["pass_updates"]] == passes and min(passes) >= 7
+    # Whole seeds are held out, so a small round can lose more than one half-batch.
+    assert [first["update"]["pass_updates"], second["update"]["pass_updates"]] == passes and min(passes) > 0
     assert (first["update"]["updates"], second["update"]["updates"]) == (passes[0], sum(passes))
     assert second["update"]["sampled"]["macros"] > first["update"]["sampled"]["macros"]
     progress = manifest["progress"]
