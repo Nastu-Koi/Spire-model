@@ -34,19 +34,17 @@ from model.checkpoint import load_model as load_policy
 from model.config import ModelConfig
 from model.loader import _stream
 from model.optim import HybridOptimizer
+from model.seeds import SPLIT_VERSION
 
 from .baselines import fit_baselines
 from .batches import labels, pack, parse
-from .config import DEFAULT_CONFIG, CriticConfig, override
+from .config import DEFAULT_CONFIG, RUNTIME, CriticConfig, TrainingConfig, override
 from .data import coverage, frame_of, load as load_rows, split
 from .metrics import calibration, reliability, summary
 from .model import Critic, autocast, load as load_critic, save
 
 OVERRIDES = ("epochs", "init", "train_body", "train_blocks", "muon_lr", "backbone_lr", "embedding_lr", "head_lr",
              "logical_batch_size", "token_budget", "holdout", "seed", "loader_workers", "precision")
-# Settings of a ModelConfig that do not change the weights: a critic may differ from
-# the policy it starts from in these.
-RUNTIME = {"backend", "encoder_precision", "checkpoint_layers", "compile_blocks"}
 
 
 def architecture(model):
@@ -252,7 +250,7 @@ def main(argv=None):
                              "and files (JSON per run, or JSONL)")
     parser.add_argument("--buffer-iterations", type=int,
                         help="of a buffer directory, train on the rounds of its last so many iterations")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
+    parser.add_argument("--config", type=Path,
                         help="policy profile: its model section is the network, its critic section the settings")
     parser.add_argument("--checkpoint", type=Path, help="policy checkpoint: the frozen vocabulary and, by default, the body's initial weights")
     parser.add_argument("--pretrained", type=Path, help="saved critic to continue from; its vocabulary and version are kept")
@@ -281,8 +279,24 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if bool(args.pretrained) == bool(args.checkpoint):
         parser.error("give --checkpoint (a fresh critic) or --pretrained (the next iteration), not both")
-    config = CriticConfig.load(args.config)
+    previous = None
+    if args.pretrained:
+        previous = json.loads((args.pretrained / "manifest.json").read_text())
+        config = CriticConfig(ModelConfig.from_dict(previous["model"]), TrainingConfig(**previous["training"]))
+        if previous.get("data", {}).get("split", {}).get("version") != SPLIT_VERSION:
+            raise ValueError("The saved critic uses an older seed split; start a fresh critic with --checkpoint")
+        if args.config:
+            profile = json.loads(args.config.read_text())
+            model = ModelConfig(**profile["model"])
+            if architecture(previous["model"]) != architecture(asdict(model)):
+                raise ValueError("The saved critic has a different architecture; its manifest holds the profile to use")
+            config.model = model
+            config.training = replace(config.training, **profile.get("critic", {}))
+    else:
+        config = CriticConfig.load(args.config or DEFAULT_CONFIG)
     config.training = training = override(config.training, args, OVERRIDES)
+    if previous and training.holdout != previous["training"]["holdout"]:
+        raise ValueError("Cannot change holdout when continuing a critic; start a fresh critic with --checkpoint")
     if args.no_compile:
         config.model = replace(config.model, compile_blocks=False)
     torch.manual_seed(training.seed)
@@ -296,15 +310,13 @@ def main(argv=None):
         kept = set(kept[:args.train_runs])
         train = [r for r in train if r.seed in kept]
     report = dict(data=dict(data, coverage=coverage(rows), split=dict(
-        holdout=training.holdout, train=len(train), train_seeds=len({r.seed for r in train}),
+        version=SPLIT_VERSION, holdout=training.holdout, train=len(train), train_seeds=len({r.seed for r in train}),
         test=len(test), test_seeds=len({r.seed for r in test}))),
         train=dict(constant_loss=round(constant_loss(train, training.act_weight), 5)))
 
     if args.pretrained:
-        scorer = load_critic(args.pretrained, device)
+        scorer = load_critic(args.pretrained, device, runtime={name: getattr(config.model, name) for name in RUNTIME})
         net, vocabulary, previous = scorer.net, scorer.vocabulary, scorer.manifest
-        if architecture(previous["model"]) != architecture(asdict(config.model)):
-            raise ValueError("The saved critic has a different architecture; its manifest holds the profile to use")
         version, policy = previous["version"] + 1, previous["policy"]
         pretrained = str(args.pretrained)
     else:

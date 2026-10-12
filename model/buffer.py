@@ -79,6 +79,8 @@ class RoundWriter:
         _, _, path = job
         name = path.stem
         member = run["member"]
+        # Training excludes unfinished runs; the report still counts every attempt.
+        self.runs.append({key: run.get(key) for key in ("status", "victory", "character", "ascension", "ledger", "climb")})
         if run["status"] != "complete":
             directory = self.directory / "quarantine"
             directory.mkdir(exist_ok=True)
@@ -99,8 +101,6 @@ class RoundWriter:
         self.totals["fights"] += saves.get("fights", 0)
         self.totals["saves_failed"] += saves.get("failed", 0)
         self.totals["fights_from_event"] += saves.get("from_event", 0)
-        # What the round's report reads of a run; the rest of the summary is let go.
-        self.runs.append({key: run[key] for key in ("status", "victory", "character", "ascension", "ledger", "climb")})
 
     def close(self, runner, seeds_path="metadata/seeds.json"):
         """Close the shards and write the summary; returns it."""

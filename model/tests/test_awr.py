@@ -210,6 +210,19 @@ def test_a_samples_weight_is_its_share_weight_times_its_normalized_advantage_fac
         awr.reweigh([([item("c", 0, 0.1)], None)], table, awr.Temperature())
 
 
+def test_final_weight_metrics_expose_a_rare_samples_concentration():
+    counts = {("Ironclad", "shop", "rollout"): 20, ("Ironclad", "map", "rollout"): 9980}
+    weights = awr.buffer_weights(counts)
+    items = [item("rare", 0, weights["Ironclad", "shop", "rollout"])] + [
+        item("common", i, weights["Ironclad", "map", "rollout"]) for i in range(255)]
+    table = {(entry.run_id, entry.index): float(entry.run_id == "rare") for entry in items}
+    _, done = awr.reweigh([(items[:128], None), (items[128:], None)], table, awr.Temperature(), scale=0.5)
+    assert done["share"] == pytest.approx(0.3)
+    assert done["weighted_effective_samples"] == pytest.approx(3.56773154)
+    assert done["weighted_effective_share"] == pytest.approx(3.56773154 / 256)
+    assert done["max_weight_share"] == pytest.approx(0.5286007)
+
+
 class Stream:
     """Half-batches of a source, counting how often it was begun and closed."""
 
@@ -231,7 +244,7 @@ def halves(source, count):
 def test_every_batch_is_a_weighted_sampled_half_followed_by_a_supervised_half():
     def weigh(batch):
         return [([replace(entry, weight=2.0) for entry in micro], prepared) for micro, prepared in batch], dict(
-            beta=0.5, share=0.5, samples=1, effective=0.5)
+            beta=0.5, share=0.5, samples=1, effective=0.5, weighted_effective_share=1.0, max_weight_share=1.0)
 
     # One pass over the sampled stream; the shorter supervised stream is begun anew.
     sampled, supervised = Stream(halves("rollout", 3)), Stream(halves("independent", 2))
@@ -242,7 +255,8 @@ def test_every_batch_is_a_weighted_sampled_half_followed_by_a_supervised_half():
     assert [[entry.weight for micro, _ in batch for entry in micro] for batch in batches] == [[2.0, 1.0]] * 3
     assert (sampled.begun, sampled.closed, supervised.begun, supervised.closed) == (1, 1, 2, 2)
     assert mixed.summary() == dict(batches=3, samples=3, beta=0.5, beta_min=0.5, beta_max=0.5, effective_share=0.5,
-                                   effective_share_min=0.5)
+                                   effective_share_min=0.5, weighted_effective_share=1.0,
+                                   weighted_effective_share_min=1.0, max_weight_share=1.0)
     # A fixed number of updates begins either stream anew, and stops both when it is reached.
     sampled, supervised = Stream(halves("rollout", 2)), Stream(halves("independent", 3))
     mixed = awr.Mixed(sampled, supervised, weigh, updates=5)
@@ -296,6 +310,9 @@ def test_an_update_is_half_weighted_decisions_of_the_buffer_and_half_supervised_
     assert supervised["weight"] * metrics["loss_scale"] == pytest.approx(supervised["samples"] / 8)
     assert all(awr.BETA_MIN <= update["beta"] <= awr.BETA_MAX and 0 < update["effective_share"] <= 1 for update in told)
     assert all(update["effective_share"] >= 0.3 - 1e-9 or update["beta"] == awr.BETA_MAX for update in told)
+    assert all(0 < update["weighted_effective_share"] <= 1 and 0 < update["max_weight_share"] <= 1 for update in told)
+    assert done["weighted_effective_share_min"] == min(update["weighted_effective_share"] for update in told)
+    assert done["max_weight_share"] == max(update["max_weight_share"] for update in told)
     assert done["awr_loss"] == pytest.approx(metrics["sources"]["rollout"]["loss"])
     assert done["supervised_loss"] == pytest.approx(metrics["sources"]["demonstration"]["loss"])
     assert (done["sampled"]["macros"], done["supervised"]["macros"]) == (ours.macros, theirs.macros)

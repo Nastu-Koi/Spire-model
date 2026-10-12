@@ -44,6 +44,8 @@ python -m model reindex --data data/bootstrap --workers 6
 
 重建成功后原子替换 `index.jsonl.gz`，旧索引保存为 `index.jsonl.gz.before-public-control-v1`，汇总写入 `policy-index-summary.json`。原始分片和导入时的 `summary.json` 保留。加载时拒绝旧控制版本的索引，读分片时核对过滤计数。
 
+子集目录（`accepted` 是指向另一份导入的链接，自己的索引只列其中一部分）要加 `--listed-only`：只重算现有索引列出的那些对局；不加会被拒绝，否则索引会变成整份导入。索引每行记对局的难度（`ascension`），`bootstrap --ascension` 靠它筛选；更早写出的索引没有这一项，筛选时报错，重建一次即可。
+
 ### 当前工作区的数据
 
 截至 2026-10-10，`runs/bootstrap-20261008/` 下保留最新的一份导入（`independent-import-v6`，索引为当前控制版本），可直接用于 BC，无需运行 `reindex`：
@@ -75,8 +77,32 @@ python -m model --device cuda init --config configs/rtxpro6000.json \
   --engine-root runs/bootstrap-20261008/engine --output runs/bootstrap-20261008/init
 python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-potions-1in8 \
   --checkpoint runs/bootstrap-20261008/init --weights-only \
-  --config configs/rtxpro6000.json --output runs/bootstrap-20261008/trained --epochs 6
+  --config configs/rtxpro6000.json --output runs/bootstrap-20261008/trained --epochs 10
 ```
+
+BC 分两段，各 10 轮：上面是第一段，拟合全部难度的样本；第二段从它的 `current` 严格续训，只拟合 A10 的样本，用新的输出目录。之后的续训与迭代仍用全部难度的示范。`imported-potions-1in8` 的索引写于记录难度之前，先重建一次（`runs/bootstrap-20261008` 的那份已重建）：
+
+```bash
+python -m model reindex --data runs/bootstrap-20261008/imported-potions-1in8 --listed-only --workers 6
+```
+
+第二段的战斗只取按更大预算另求的那批 A10 战斗（生成与导入见 [spire_codex_data](../spire_codex_data/README.md)，这里的目录是 `imported-a10-battles`），局外样本仍是 `imported-potions-1in8` 里 A10 的那部分：
+
+```bash
+python -m model --device cuda bootstrap \
+  --data runs/bootstrap-20261008/imported-potions-1in8 runs/bootstrap-20261008/imported-a10-battles \
+  --ascension 10 --combat-from runs/bootstrap-20261008/imported-a10-battles \
+  --checkpoint runs/bootstrap-20261008/trained/current \
+  --output runs/bootstrap-20261008/trained-a10 --epochs 10
+python -m model --device cuda heldout-nll \
+  --data runs/bootstrap-20261008/imported-potions-1in8 runs/bootstrap-20261008/imported-a10-battles \
+  --ascension 10 --combat-from runs/bootstrap-20261008/imported-a10-battles \
+  --checkpoint runs/bootstrap-20261008/trained-a10/current
+```
+
+`--ascension` 之后各组的权重在这一部分上重新归一，留出规则不变；检查点记下这一段的难度（`bootstrap_ascension`），训练过的 seed 与第一段的累计。`heldout-nll --ascension` 只给该难度的留出样本打分，不带则是全部难度。
+
+`--combat-from` 列出 `--data` 里的若干目录：含战斗宏动作的样本组（一场战斗是一个样本组）只从这些目录取，其余目录只留下局外的样本组；权重在留下的部分上归一，检查点记 `bootstrap_combat_from`。只对分片数据目录有效。两个选项可以同时用，`heldout-nll` 带同样的选项就是按训练时的取法打分。
 
 已有训练目录须通过其 `current` 续训，不能用新初始化覆盖。
 
@@ -135,7 +161,9 @@ python -m model --device cuda bootstrap --data runs/bootstrap-20261008/imported-
 
 ## 固定留出集
 
-训练数据按 seed 分组固定留出约 2%，永不训练，只用来比较 NLL。规则是 `model/data.py` 的 `held_out`：取索引行的 `seed`（独立监督样本的 seed 是来源对局 seed 的 `split_group` 哈希，学生战斗样本同样取游戏 seed 的 `split_group`，采样对局的是游戏 seed），其 `fingerprint` 的前 32 位作为 [0, 1) 里的小数小于 `HELDOUT_FRACTION`（0.02）即留出。它只是 seed 的函数：同一 seed 的全部片段落在同一侧，与分片边界、导入批次和子集无关，所以同一个 seed 在 `imported-potions` 和它的 1in8 子集里都在同一侧，数据重新导入或增长也不改变已有 seed 的归属。依据见 [评估](../ARCHITECTURE.md#评估)。
+训练数据按 seed 分组固定留出约 2%，永不训练，只用来比较 NLL。规则是 `model/data.py` 的 `held_out`：取统一的 `split_group`（`model.seeds.seed_group`）：原始游戏 seed 先去首尾空格、转大写并将 O/I 归一成 0/1，再做 SHA-256；独立监督与学生战斗的 `seed` 已是这个摘要，直接使用。新索引明确保存 `split_group`，旧索引按来源恢复，不改写分片。对分组键取 `fingerprint` 的前 32 位作为 [0, 1) 里的小数小于 `HELDOUT_FRACTION`（0.02）即留出。它只是 seed 的函数：同一 seed 的全部片段落在同一侧，与分片边界、导入批次和子集无关，所以同一个 seed 在 `imported-potions` 和它的 1in8 子集里都在同一侧，数据重新导入或增长也不改变已有 seed 的归属。依据见 [评估](../ARCHITECTURE.md#评估)。
+
+当前划分版本为 `seed-group-v1`。独立监督数据的历史留出归属不变；原始 seed 的采样／评估数据改用统一分组后，部分归属会改变。已按旧规则训练过这些对局的策略，不能把新的留出 NLL 当作未见数据的成绩；新的对照实验应从未训练过这些对局的检查点开始。旧 critic 不允许继续训练，须以 `--checkpoint` 重新建立。原始数据与历史检查点不会自动修改。
 
 `bootstrap` 默认跳过留出组（`--include-heldout` 关掉跳过）：加载器只读训练部分的索引行，留出组的行连解析都不做，样本权重按训练部分归一。每轮记录（`history.jsonl` 的 `metrics`）带 `held_out`（留出的组数、宏动作数、seed 数）、`training`（训练部分的同样计数）和 `samples`（加载器这一轮交给训练器的宏动作数）：`samples` 等于 `training.macros`，与 `held_out.macros` 相加等于索引总数，这就是留出组没进训练窗口的证据；检查点的 `progress.held_out` 保存同样的计数，`training_seeds` 仍记录整个数据集的 seed。
 
@@ -213,8 +241,8 @@ python -m model compare runs/eval-a runs/eval-b --head 60
 | 文件 | 内容 |
 | --- | --- |
 | `accepted/*.jsonl.gz` | 打完的对局，每局一行（一个 gzip 成员）；每个分片约 `--shard-samples`（默认 2000）个保存的决策步 |
-| `index.jsonl.gz` | 每局一行：`run_id`、`seed`、角色、各阶段可训练宏动作数、契约哈希、分片与行号，另加 `policy_version`、`policy_digest`、`iteration`、`victory`；`reindex` 保留这些字段 |
-| `summary.json` | 轮的契约：`iteration`、策略版本与权重 digest、温度、难度、控制与奖励版本、对局数与胜场、各角色×阶段的宏动作数、战斗与存档计数、分片数、引擎契约（`contracts`），以及与 `evaluate` 相同的通关率报告（`report`） |
+| `index.jsonl.gz` | 每局一行：`run_id`、`seed`、`split_group`、角色、各阶段可训练宏动作数、契约哈希、分片与行号，另加 `policy_version`、`policy_digest`、`iteration`、`victory`；`reindex` 保留这些字段 |
+| `summary.json` | 轮的契约：`iteration`、策略版本与权重 digest、温度、难度、控制与奖励版本、对局数与胜场、各角色×阶段的宏动作数、战斗与存档计数、分片数、引擎契约（`contracts`），以及按全部尝试统计的通关率报告（`report`）；隔离对局不进训练，但仍计入报告分母，并令 `comparable: false` |
 | `<角色>-<序号>.saves.jsonl.gz` | 每场战斗入场时的引擎存档，见下 |
 | `metadata/seeds.json` | 种子分配 |
 | `advantages.json.gz` | 局外决策的优势，由[迭代](#迭代采样标签胜率模型与优势加权回归)写在轮目录里；采样本身不产生，分片不因它改动 |
@@ -254,12 +282,12 @@ python -m model --device cuda iterate \
 - **缓冲**是 `buffer/` 下最近 `--buffer-iterations`（默认 10）次迭代的各轮；更早的轮留在盘上、不再读。学生战斗的导入累计保留，不随缓冲淘汰：每次更新的监督数据是 `--demonstrations`（最大的放第一个）加此前每一轮的 `student-import/round-*`，份额规则见[多个数据目录与学生战斗的份额](#多个数据目录与学生战斗的份额)。
 - **采样种子**由 `--seed-root` 和迭代号派生（十六位十六进制，每角色等量，同一个根和迭代号总是同一组）；`--exclude-seeds` 列出的种子文件（开发集、测试集）、`--eval-seeds` 和检查点记下的训练种子都被避开，按原样、按游戏读法（O 作 0、I 作 1）和按示范的 `split_group` 三种写法核对。
 - **优势**：每个局外决策 δ = V(s′) − V(s)，最后一个决策 δ = ±1 − V(s)，V = 2·p_win − 1，GAE 的 `--lam`（默认 0.9）、不折扣；s′ 是同一局的下一个局外决策，跨过中间的战斗。文件 `advantages.json.gz` 记来源（critic 的版本与权重摘要、λ）、统计和每局各决策的（宏动作序号、V、A）；同一个 critic、同一个 λ 算过的轮不重算。也可单独运行：`python -m critic.advantage <缓冲或轮目录> --critic <critic 目录>`。
-- **权重与 β**：局外样本的权重 = 它在缓冲里的份额权重 × 批内归一的 exp(A/β)。份额权重是缓冲的每个角色×阶段组等权、组内平分，但单个决策不超过均匀份额的 `--weight-cap` 倍（默认 10，`0` 不设上限）：只出现几次的阶段按上限给，每次更新的摘要里 `capped_groups` 列出被封顶的组。`--beta auto`（默认）对每一批取使有效样本数 (Σw)²/Σw² 不低于 `--ess-share`（默认 0.3）× 这批局外样本数的最小 β，限制在 [`--beta-min`, `--beta-max`]（默认 0.1 到 100）；`--beta <数>` 固定 β；`--beta inf` 不加权。
+- **权重与 β**：局外样本的权重 = 它在缓冲里的份额权重 × 批内归一的 exp(A/β)。份额权重是缓冲的每个角色×阶段组等权、组内平分，但单个决策不超过均匀份额的 `--weight-cap` 倍（默认 10，`0` 不设上限）：只出现几次的阶段按上限给，每次更新的摘要里 `capped_groups` 列出被封顶的组。`--beta auto`（默认）对每一批取使优势倍率的有效样本数 (Σw)²/Σw²（w = exp(A/β)）不低于 `--ess-share`（默认 0.3）× 这批局外样本数的最小 β，限制在 [`--beta-min`, `--beta-max`]（默认 0.1 到 100）；`--beta <数>` 固定 β；`--beta inf` 不加权。原 `effective_share` 只衡量优势倍率；逐更新日志另记 `weighted_effective_samples`、`weighted_effective_share`（乘份额权重后的 ESS 及其占比）和 `max_weight_share`（单样本占局外半批总权重的最大比例）。迭代汇总记最终 ESS 占比的均值／最小值与最大单样本占比的峰值。这些指标用于发现最终权重集中，不改变 β 规则。
 - **每次更新**一半是加权的局外样本、一半是示范与求解器标签，各 `logical_batch_size / 2` 个，学习率与日程严格续接检查点。`--updates round`（默认）做新一轮的样本过一遍那么多次更新，样本从整个缓冲里抽；`--updates buffer` 把缓冲过一遍；`--updates <N>` 固定次数。
 - **critic 的门槛**（`critic/gate.py`，数值的来历见 [胜率模型说明](../critic/README.md#门槛)）：`--critic-gate on`（默认）时不过门槛的迭代不更新策略，`state.json` 记下没过的项和各项的实测值；`--critic-gate off` 照常更新，仍记录结果；`--gate 名称=数值` 改单项（可重复）。数据少时（留出对局不足 200 局）默认门槛必然不过，试跑要关掉门槛。critic 的结构与训练设置取 `--critic-config` 指向的 profile 的 `model` 与 `critic` 两节（默认 `configs/rtxpro6000.json`）。
 - **对照**：`--beta inf`（对自己的局外决策做行为克隆）；`--advantage return`（不用 critic：优势 = 本局回报 − 缓冲里同角色对局的平均回报，这时不训练 critic、没有门槛）。
-- **求解器标签的时机**：默认在采样之后、critic 之前做完（本轮的标签进入本次更新）。`--labels-in-background` 让求解器与 critic 续训和策略更新并行，本轮的标签进入下一次迭代的更新；下一次采样或评估开始前会等它结束，求解器不与引擎同时运行。求解器失败时自动重跑一次（已打完的对局直接复用）；仍有对局失败且不超过入选对局的 5% 时继续，否则停下。
-- **记录**：每局对局带策略版本、权重 digest 和迭代号；`policy/` 下每个检查点的 `progress` 记 `iteration`、critic 的版本与目录、优势来源和这次更新的摘要；`state.json` 记每次迭代各步的结果与当时的设置。标准输出每完成一步打印一行 JSON。
+- **求解器标签的时机**：默认在采样之后、critic 之前做完（本轮的标签进入本次更新）。`--labels-in-background` 让求解器与 critic 续训和策略更新并行，本轮的标签进入下一次迭代的更新；下一次采样或评估开始前会等它结束，求解器不与引擎同时运行。求解器执行失败时自动重跑一次；相同选择、版本和预算下，已验证的正常胜负复用，只重试执行失败的战斗。执行失败同时计入对局失败与战斗失败；重试后，两者分别不超过入选对局／战斗的 5% 时继续，否则停下。即使命令返回成功，也检查报告里的失败数。
+- **记录**：每局对局带策略版本、权重 digest 和迭代号；`policy/` 下每个检查点的 `progress` 记 `iteration`、critic 的版本与目录、优势来源和这次更新的摘要，`training_seeds` 累积保留采样缓冲、全部示范目录和学生标签的种子（含留出组）；`state.json` 记每次迭代各步的结果与当时的设置。标准输出每完成一步打印一行 JSON。
 
 断点续跑：重新运行同一条命令（`--iterations` 可以加大）。每一步的结果落盘后才记入 `state.json`，已记入的步骤跳过；被打断的步骤留下的目录移到 `interrupted/`（不删除）后重做，求解器已打完的对局报告直接复用；策略更新已保存而未记入时不会再更新一次。`kill`（SIGTERM）与 Ctrl+C 一样会结束正在进行的步骤及其子进程，`status.json` 记下停在哪一步。除 `--checkpoint` 和 `--seed-root` 外的设置都可以在两次运行之间改，从尚未完成的步骤起生效；同一输出目录不能换起始检查点或种子根，也不能同时被两个进程写。
 
@@ -281,7 +309,7 @@ python3 -m model.monitor --runs runs --port 8765
 
 横轴、悬停提示、历史表和 CSV 均使用优化器累计更新次数（Update），曲线按数值间距绘制；微批拆分和梯度累积只产生一个逻辑批更新点。跨 epoch 继续计数，恢复检查点沿用保存的更新次数；恢复后回退的更新和不同 session 之间不连线。默认显示全部历史，也可只看最近 N 次更新，按更新次数区间筛选，不把缺失点补成零；曲线和 CSV 保留所选范围的全部更新。
 
-`iterate` 的输出是另一种训练记录（侧栏“迭代”）：曲线是各次策略更新的逐更新指标，“优化指标”里多出 AWR 损失（加权局外样本）、示范与求解器标签损失、β 和有效样本占比；“迭代汇总”表每次迭代一行：采样通关率与平均楼层（按温度抽样的对局，不是评估）、胜率模型在留出对局上的解释方差、门槛是否通过、β 与有效样本占比（各更新批的均值）、两路损失和评估通关率；状态栏显示正在进行的迭代与步骤。critic 不过门槛而跳过更新的迭代在表里标“未过，未更新”，曲线上没有它的点。
+`iterate` 的输出是另一种训练记录（侧栏“迭代”）：曲线是各次策略更新的逐更新指标，“优化指标”里多出 AWR 损失（加权局外样本）、示范与求解器标签损失、β、优势倍率有效样本占比、最终权重有效样本占比和最大单样本权重占比；“迭代汇总”表每次迭代一行：采样通关率与平均楼层（按温度抽样的对局，不是评估）、胜率模型在留出对局上的解释方差、门槛是否通过、β 与两种有效样本占比（各更新批的均值）、最大单样本权重占比（各批峰值）、两路损失和评估通关率；状态栏显示正在进行的迭代与步骤。critic 不过门槛而跳过更新的迭代在表里标“未过，未更新”，曲线上没有它的点。
 
 每个点都参与绘制：一个像素列里只连它的首点、最低点、最高点和末点，形状与逐点连线相同。点多时默认叠加滑动平均（同一段内最近 N 个点的均值，粗线），原值留作其后的细线。纵轴默认聚焦主体，少数远离主体的点落在范围外时，图下写明被略去的最高和最低值；两项都可以关掉。
 

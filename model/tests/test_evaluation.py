@@ -167,9 +167,53 @@ def test_an_evaluation_seed_is_refused_however_training_recorded_it():
     queue = {c: [f"SEED{i}"] for i, c in enumerate(CHARACTERS)}
     assert validate_evaluation_seeds(queue, {"training_seeds": ["OTHER", split_group("OTHER")]}) is queue
     # A rollout is kept under its game seed, an independent sample under the seed's split group.
-    for known in ("SEED0", split_group("SEED0"), split_group("seedo")):
+    for known in ("SEED0", " seedo ", split_group("SEED0"), split_group("seedo")):
         with pytest.raises(ValueError, match="overlaps"):
             validate_evaluation_seeds(queue, {"training_seeds": [known]})
+
+    queue[CHARACTERS[1]] = ["seedo"]
+    with pytest.raises(ValueError, match="unique"):
+        validate_evaluation_seeds(queue, {})
+
+
+def test_a_sampled_seed_and_its_imported_labels_share_the_held_out_side(tmp_path):
+    from model.independent import import_samples
+    from model.tests.test_independent import samples as exported_samples
+
+    seeds = ["1553B38947E951FC", "C41AC5D6EA2F4572"]
+    runs = [demonstration("Ironclad", seed, 4, 2) for seed in seeds]
+    config = ModelConfig.tiny()
+    runner = RolloutRunner(PolicyNetwork(config), vocabulary_for(runs, config))
+    sampled = [runner.run(SyntheticEngine(4, 2), "Ironclad", seed) for seed in seeds]
+    directory = tmp_path / "sampled"
+    directory.mkdir()
+    rollouts = sharded(directory, sampled)
+    for source in ("historical_noncombat", "student_battle"):
+        records = []
+        for seed in seeds:
+            rows = exported_samples(group=seed, seed=seed)
+            for row in rows:
+                row["metadata"].update(split_group=split_group(seed), anchor_kind=source,
+                                       policy_version=1, policy_digest="synthetic", iteration=0)
+            records.extend(rows)
+        exported = tmp_path / f"{source}.jsonl"
+        exported.write_text("".join(json.dumps(row) + "\n" for row in records))
+        imported = tmp_path / source
+        assert import_samples(exported, imported)["accepted_runs"] == 2
+        labels = RunShards(imported)
+        # Preserve the existing independent data's split; never hash its digest twice.
+        assert [held_out(row) for row in labels.rows] == [False, True]
+        for own_part, label_part in zip(rollouts.split(), labels.split()):
+            assert {split_group(seed) for seed in own_part.seeds} == label_part.seeds
+        assert [held_out(run) for run in sampled] == [held_out(row) for row in labels.rows]
+        assert [held_out(run) for window in labels.windows() for run in window] == [False, True]
+        # Legacy indexes had no explicit group; the oldest imports also omitted source.
+        with gzip.open(imported / "index.jsonl.gz", "wt") as stream:
+            stream.write(json.dumps(HEADER) + "\n")
+            for row in labels.rows:
+                stream.write(json.dumps({key: value for key, value in row.items()
+                                         if key not in {"split_group", "source"}}) + "\n")
+        assert [held_out(row) for row in RunShards(imported).rows] == [False, True]
 
 
 def held_out_seed(prefix, start=0):

@@ -85,6 +85,7 @@ class SolverEngine(CliEngine):
         potions=False,
         potion_policy=None,
         potion_directives=None,
+        potion_costs=None,
         reuse_turn_plan=False,
         beam_width=60,
         beam_portfolio=True,
@@ -106,6 +107,7 @@ class SolverEngine(CliEngine):
                 ),
                 **({"potion_policy": potion_policy} if potion_policy else {}),
                 **({"potion_directives": potion_directives} if potion_directives else {}),
+                **({"potion_costs": list(potion_costs)} if potion_costs else {}),
                 **{
                     k: routing[k]
                     for k in ("decision_id", "state_version", "selection_revision")

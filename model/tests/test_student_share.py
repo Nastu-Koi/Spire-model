@@ -10,9 +10,10 @@ import pytest
 
 from model.cli import main
 from model.data import (
-    SHARE_RAMP_MACROS, STUDENT_BATTLE, RunShards, extent, group_weights, samples, student_share, weight_totals,
+    SHARE_RAMP_MACROS, STUDENT_BATTLE, RunShards, at_ascension, combat_from, extent, group_weights, samples,
+    student_share, weight_totals,
 )
-from model.dataset_index import index_row, read_index, rebuild_index, row_source, sample_source
+from model.dataset_index import INDEX, index_row, read_index, rebuild_index, row_source, sample_source
 from model.independent import convert_group, import_samples
 from model.protocol import CHARACTERS, ProtocolError, execution_command
 from model.testing import SyntheticEngine
@@ -32,19 +33,19 @@ class Fighting(SyntheticEngine):
         return frame
 
 
-def rows(group, seed, character="IRONCLAD", policy=None):
+def rows(group, seed, character="IRONCLAD", policy=None, ascension=10):
     """The rows exported for one solver fight: a summary anchor's battle, or with
     `policy` a student battle of that policy. One macro-action in the combat phase (the
     fight's selection) and one decision after it, in another phase."""
     engine = Fighting(4, 2)
-    frame = engine.reset("Ironclad", seed)
+    frame = engine.reset("Ironclad", seed, ascension)
     kind = dict(anchor_kind=STUDENT_BATTLE, **policy) if policy else dict(anchor_kind="battle")
     result = []
     while frame["boundary"] != "terminal":
         candidate = frame["legal"]["candidates"][0]
         item = row(frame, candidate, "combat_solver")
         item["metadata"] = dict(
-            run_hash="run", sample_group=group, split_group="split-" + seed, character=character, ascension=10,
+            run_hash="run", sample_group=group, split_group="split-" + seed, character=character, ascension=ascension,
             game_version="v0.111.0", teacher_visibility="privileged", label_source="combat_solver",
             native_replay_verified=True, independent=True, bc_only=True, routing=item.pop("routing"),
             contract=engine.contract, **kind)
@@ -215,3 +216,78 @@ def test_bootstrap_takes_several_data_directories(tmp_path, capsys):
                  "--checkpoint", str(tmp_path / "smoke/checkpoint"), "--weights-only",
                  "--output", str(tmp_path / "bc2")]) == 1
     assert "sharded" in capsys.readouterr().err
+
+
+def test_the_runs_of_one_ascension_are_a_data_set_of_their_own(tmp_path):
+    groups = [rows(f"d{i}", f"d{i}", ascension=10 if i % 2 else i) for i in range(6)]
+    write_rows(tmp_path / "demos.jsonl.gz", groups)
+    import_samples(tmp_path / "demos.jsonl.gz", tmp_path / "demo", shard_samples=len(groups[0]) + 1)
+    shards = RunShards(tmp_path / "demo")
+    assert Counter(row["ascension"] for row in shards.rows) == {10: 3, 0: 1, 2: 1, 4: 1}
+    top = at_ascension(shards, 10)
+    assert len(top) == 3 and top.macros == shards.macros // 2
+    # The weights are those of the part: its groups share the whole between them.
+    assert sum(weight_totals(top.weights, top.source_counts).values()) == pytest.approx(1.0)
+    assert {run["ascension"] for names in top.window_names(8) for run in top.read(names)} == {10}
+    assert len(at_ascension(shards, 7)) == 0
+    # Runs in memory are told apart the same way.
+    held = [run for names in shards.window_names(8) for run in shards.read(names)]
+    assert len(held) == 6 and len(at_ascension(held, 10)) == 3
+    # An index written before ascensions were recorded cannot tell: it is rebuilt.
+    path = tmp_path / "demo" / INDEX
+    with gzip.open(path, "rt") as stream:
+        old = [json.loads(line) for line in stream]
+    with gzip.open(path, "wt") as stream:
+        stream.write("".join(json.dumps({k: v for k, v in row.items() if k != "ascension"}) + "\n" for row in old))
+    with pytest.raises(ProtocolError, match="reindex"):
+        at_ascension(RunShards(tmp_path / "demo"), 10)
+    rebuild_index(tmp_path / "demo")
+    assert len(at_ascension(RunShards(tmp_path / "demo"), 10)) == 3
+
+
+def test_fights_are_taken_from_the_directories_named_for_them(tmp_path):
+    demos = [rows(f"d{i}", f"d{i}") for i in range(4)]
+    write_rows(tmp_path / "demos.jsonl.gz", demos)
+    import_samples(tmp_path / "demos.jsonl.gz", tmp_path / "demo", shard_samples=len(demos[0]) + 1)
+    write_rows(tmp_path / "better.jsonl.gz", [rows(f"b{i}", f"b{i}") for i in range(2)])
+    import_samples(tmp_path / "better.jsonl.gz", tmp_path / "better", shard_samples=len(demos[0]) + 1)
+    # A run without combat macro-actions among the demonstrations: a decision outside a fight.
+    path = tmp_path / "demo" / INDEX
+    with gzip.open(path, "rt") as stream:
+        header, *listed = stream.read().splitlines()
+    outside = json.loads(listed[0])
+    outside["phases"] = {phase: n for phase, n in outside["phases"].items() if phase != "combat"}
+    assert outside["phases"]
+    with gzip.open(path, "wt") as stream:
+        stream.write("\n".join([header, json.dumps(outside), *listed[1:]]) + "\n")
+    both = RunShards([tmp_path / "demo", tmp_path / "better"])
+    assert len(both) == 6
+    part = combat_from(both, [tmp_path / "better"])
+    assert [(row.get("root", 0), "combat" in row["phases"]) for row in part.rows] == [(0, False), (1, True), (1, True)]
+    assert len(combat_from(both, [tmp_path / "demo", tmp_path / "better"])) == 6
+    assert sum(weight_totals(part.weights, part.source_counts).values()) == pytest.approx(1.0)
+    with pytest.raises(ProtocolError, match="--data"):
+        combat_from(both, [tmp_path / "elsewhere"])
+    with pytest.raises(ProtocolError, match="sharded"):
+        combat_from([dict(phases={})], [tmp_path / "better"])
+
+
+def test_a_directory_sharing_shards_is_reindexed_as_the_part_it_lists(tmp_path):
+    groups = [rows(f"d{i}", f"d{i}", ascension=10 if i % 2 else 0) for i in range(6)]
+    write_rows(tmp_path / "demos.jsonl.gz", groups)
+    import_samples(tmp_path / "demos.jsonl.gz", tmp_path / "whole", shard_samples=2 * len(groups[0]) + 1)
+    # A part of the whole: its own index over the whole's shards, as a subset is kept.
+    part = tmp_path / "part"
+    part.mkdir()
+    (part / "accepted").symlink_to(tmp_path / "whole" / "accepted")
+    with gzip.open(tmp_path / "whole" / INDEX, "rt") as stream:
+        header, *lines = stream.readlines()
+    kept = [json.loads(line) for line in lines[::2]]
+    with gzip.open(part / INDEX, "wt") as stream:
+        stream.write(header + "".join(json.dumps({k: v for k, v in row.items() if k != "ascension"}) + "\n"
+                                      for row in kept))
+    with pytest.raises(ProtocolError, match="--listed-only"):
+        rebuild_index(part)
+    rebuild_index(part, listed_only=True)
+    assert read_index(part) == kept
+    assert len(read_index(tmp_path / "whole")) == 6

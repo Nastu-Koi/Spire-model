@@ -14,14 +14,16 @@ const METRICS = {
   samples: "每次更新的宏动作数", weight: "逻辑批权重", loss_scale: "损失缩放",
   validation_nll: "混合验证 NLL / 分支", a0_validation_nll: "A0 验证 NLL / 分支", duration_seconds: "耗时（秒）",
   awr_loss: "AWR 损失（加权局外样本）", supervised_loss: "示范与求解器标签损失", beta: "β（优势权重温度）",
-  effective_share: "有效样本占比", effective_samples: "有效样本数", sampled_samples: "每次更新的局外样本数",
+  effective_share: "优势倍率有效样本占比", effective_samples: "优势倍率有效样本数", sampled_samples: "每次更新的局外样本数",
+  weighted_effective_share: "最终权重有效样本占比", weighted_effective_samples: "最终权重有效样本数",
+  max_weight_share: "最大单样本权重占比（局外半批）",
 };
 // A run's kind: a behavior-cloning run, or the iterations of policy improvement.
 const KINDS = { bootstrap: "Bootstrap", iterate: "迭代" };
 const STEPS = { sample: "采样", labels: "求解器标签", critic: "胜率模型续训", update: "策略更新", evaluation: "评估" };
 const roundName = (kind, number) => kind === "iterate" ? `迭代 ${number}` : `第 ${number} 轮`;
 // Offered first, in this order; any other metric a log carries follows them.
-const CHOICES = ["awr_loss", "supervised_loss", "beta", "effective_share", "entropy", "last_grad_norm", "gradient_clip_fraction"];
+const CHOICES = ["awr_loss", "supervised_loss", "beta", "effective_share", "weighted_effective_share", "max_weight_share", "entropy", "last_grad_norm", "gradient_clip_fraction"];
 const CHARTED = ["loss", "accuracy", "duration_seconds"];
 const COUNTERS = new Set(["updates", "accuracy_correct", "accuracy_decisions"]);
 const SMOOTH_STEPS = [1000, 500, 200, 100, 50, 20, 10];
@@ -30,7 +32,7 @@ const isObject = (value) => value !== null && typeof value === "object" && !Arra
 const count = (value) => isNumber(value) ? value : 0;
 const fmt = (value, digits = 4) => !isNumber(value) ? "—" : value.toLocaleString("zh-CN", { maximumFractionDigits: digits });
 const pct = (value, digits = 1) => !isNumber(value) ? "—" : `${fmt(value * 100, digits)}%`;
-const percentMetric = (key) => key.endsWith("rate") || key.endsWith("fraction") || key === "accuracy" || key === "effective_share";
+const percentMetric = (key) => key.endsWith("rate") || key.endsWith("fraction") || key.endsWith("share") || key === "accuracy";
 const metricLabel = (key) => METRICS[key] || (key.startsWith("learning_rates.") ? "学习率 · " + key.slice(15) : key.startsWith("grad_norm.") ? "梯度范数 · " + key.slice(10) : key);
 const metricText = (key, value) => percentMetric(key) ? pct(value) : !isNumber(value) ? "—" : value !== 0 && Math.abs(value) < 1e-3 ? value.toExponential(2) : fmt(value);
 const runLabel = (run) => run.id.includes("/") ? run.id.split("/").slice(-2).join(" / ") : run.name;
@@ -575,11 +577,11 @@ function noData(title, text) {
 // on held-out runs, how its update was weighted and what it lost.
 function renderIterations(panel, rounds) {
   if (!rounds.length) { panel.append(noData("还没有完成的迭代", "每完成一次迭代写入一条汇总；策略更新的逐更新指标在上方曲线。")); return; }
-  panel.append(el("p", "panel-note", "每次迭代结束时的汇总，最新在前。通关率与楼层来自本次采样（按温度抽样，不是评估）；EV 为胜率模型在留出对局上对 ±1 回报的解释方差；β 与有效样本占比是本次各更新批的均值；门槛未过时策略不更新。"));
+  panel.append(el("p", "panel-note", "每次迭代结束时的汇总，最新在前。通关率与楼层来自本次采样；EV 为胜率模型在留出对局上的解释方差。β 与两种有效样本占比取各批均值，最大单样本占比取峰值，权重统计均针对局外半批。门槛未过时策略不更新。"));
   const gate = (m) => m.policy_updated === false ? "未过，未更新" : m.critic_gate_passed === true ? "通过" : m.critic_gate_passed === false ? "未过（未启用）" : "—";
-  panel.append(table(["迭代", "Update", "采样通关率", "平均楼层", "胜率模型 EV", "门槛", "β", "有效样本占比", "AWR 损失", "示范损失", "评估通关率", "耗时", "完成时间"], rounds.map((record) => {
+  panel.append(table(["迭代", "Update", "采样通关率", "平均楼层", "胜率模型 EV", "门槛", "β", "优势倍率有效占比", "最终权重有效占比", "最大单样本占比", "AWR 损失", "示范损失", "评估通关率", "耗时", "完成时间"], rounds.map((record) => {
     const m = record.metrics;
-    return [fmt(record.round, 0), fmt(record.update, 0), pct(m.sampled_win_rate), fmt(m.sampled_mean_floor, 1), fmt(m.critic_win_ev, 3), gate(m), fmt(m.beta, 3), pct(m.effective_share), fmt(m.awr_loss), fmt(m.supervised_loss), pct(m.eval_win_rate), duration(m.duration_seconds), date(record.time)];
+    return [fmt(record.round, 0), fmt(record.update, 0), pct(m.sampled_win_rate), fmt(m.sampled_mean_floor, 1), fmt(m.critic_win_ev, 3), gate(m), fmt(m.beta, 3), pct(m.effective_share), pct(m.weighted_effective_share), pct(m.max_weight_share), fmt(m.awr_loss), fmt(m.supervised_loss), pct(m.eval_win_rate), duration(m.duration_seconds), date(record.time)];
   })).wrap);
 }
 function renderRounds() {

@@ -13,7 +13,9 @@ from .buffer import sample_round
 from .checkpoint import archive_checkpoint, load_model, restore_training, save_checkpoint
 from .config import ModelConfig, TrainConfig
 from .control import environment_action
-from .data import HELDOUT_FRACTION, RunShards, audit_files, extent, load_runs, policy_macros, split_held_out
+from .data import (HELDOUT_FRACTION, RunShards, at_ascension, audit_files, combat_from, extent, load_runs,
+                   policy_macros,
+                   split_held_out)
 from .engine import CliEngine
 from .evaluation import compare_evaluations, evaluate_runs, nll_report
 from .history import TrainingHistory
@@ -159,6 +161,9 @@ def parser():
     x = sub.add_parser("reindex", help="Recount policy choices in existing demonstration shards")
     x.add_argument("--data", required=True)
     x.add_argument("--workers", type=int, default=4)
+    x.add_argument("--listed-only", action="store_true",
+                   help="Keep to the runs the present index lists: for a directory that shares "
+                        "another's shards and holds a part of them")
     x = sub.add_parser("bootstrap")
     x.add_argument("--data", required=True, nargs="+",
                    help="Data directories read together as one data set (an import of "
@@ -186,6 +191,13 @@ def parser():
     x.add_argument("--include-heldout", action="store_true",
                    help="Train on the held-out seed groups as well; by default they are "
                         "skipped and kept for NLL comparisons (heldout-nll)")
+    x.add_argument("--ascension", type=int,
+                   help="Train on the runs of this ascension only: the second stage of BC fits "
+                        "the A10 demonstrations after the first has fitted all of them")
+    x.add_argument("--combat-from", nargs="+", metavar="DATA",
+                   help="Take fights from these of the --data directories only; the others give "
+                        "their decisions outside combat. The second stage of BC takes its fights "
+                        "from the battles the solver fought on the larger budgets")
     x.add_argument("--output", required=True)
     x = sub.add_parser("heldout-nll",
                        help="Score a checkpoint on the held-out seed groups of a data set: "
@@ -193,6 +205,9 @@ def parser():
     x.add_argument("--data", required=True, nargs="+",
                    help="Data directories read together, as for bootstrap")
     x.add_argument("--checkpoint", required=True)
+    x.add_argument("--ascension", type=int, help="Score the held-out runs of this ascension only")
+    x.add_argument("--combat-from", nargs="+", metavar="DATA",
+                   help="Score the fights of these of the --data directories only, as bootstrap trains on them")
     x.add_argument("--window-shards", type=int, default=8,
                    help="Sharded data only: shards read into memory at a time")
     x = sub.add_parser("compare",
@@ -518,7 +533,7 @@ def main(argv=None):
         elif args.command == "reindex":
             from .dataset_index import rebuild_index
 
-            emit(rebuild_index(args.data, workers=args.workers))
+            emit(rebuild_index(args.data, workers=args.workers, listed_only=args.listed_only))
         elif args.command == "inspect":
             with CliEngine(root=args.engine_root) as engine:
                 frame = engine.reset(args.character, args.game_seed, args.ascension)
@@ -543,6 +558,10 @@ def main(argv=None):
                         or Path(args.checkpoint).resolve() != (output / "current").resolve()):
                     raise ValueError("Existing BC output requires resume from its current checkpoint; use a new output directory")
             runs, streamed = _dataset(args.data)
+            if args.ascension is not None:
+                runs = at_ascension(runs, args.ascension)
+            if args.combat_from:
+                runs = combat_from(runs, args.combat_from)
             if streamed and not args.checkpoint:
                 raise ProtocolError(
                     "Sharded data is read as a stream and cannot rebuild a vocabulary: "
@@ -589,7 +608,9 @@ def main(argv=None):
             start_epoch = getattr(learner, "checkpoint_metadata", {}).get(
                 "completed_bootstrap_epochs", 0
             )
-            metadata = {"runtime": runtime, **(runs.metadata() if streamed else _data_metadata(runs))}
+            metadata = {"runtime": runtime, **(runs.metadata() if streamed else _data_metadata(runs)),
+                        "bootstrap_ascension": args.ascension,
+                        "bootstrap_combat_from": args.combat_from and [str(path) for path in args.combat_from]}
             epoch_started = time.monotonic()
             completed = 0
 
@@ -634,6 +655,10 @@ def main(argv=None):
             history.status("completed", round=start_epoch + completed)
         elif args.command == "heldout-nll":
             runs, _ = _dataset(args.data)
+            if args.ascension is not None:
+                runs = at_ascension(runs, args.ascension)
+            if args.combat_from:
+                runs = combat_from(runs, args.combat_from)
             learner, _ = _learner(args.checkpoint, args.device, inference=True)
             _, held = split_held_out(runs)
             if not extent(held)["macros"]:
@@ -641,6 +666,8 @@ def main(argv=None):
             groups = learner.evaluate_bootstrap(held, window_shards=args.window_shards, include_a0=True)
             emit({
                 "data": [str(path) for path in args.data],
+                "ascension": args.ascension,
+                "combat_from": args.combat_from,
                 "checkpoint": str(args.checkpoint),
                 "policy_version": learner.policy_version,
                 "updates": learner.updates,

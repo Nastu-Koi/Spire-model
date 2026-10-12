@@ -579,7 +579,7 @@ def replay(second, save, anchor, records, final=None):
 
 # Solver time per new search, by the kind of fight. The worker tells a boss fight by
 # its room; an elite is told apart here, from the summary.
-BUDGETS = dict(budget_ms=1000, elite_budget_ms=1000, boss_budget_ms=5000)
+BUDGETS = dict(budget_ms=5000, elite_budget_ms=5000, boss_budget_ms=20000)
 # Runs in progress at once. A search is one thread cut off by the clock: as many
 # battles as the machine has cores give the most fights per hour, and each search
 # then expands about a quarter fewer nodes than with half as many. Choice anchors
@@ -601,12 +601,19 @@ def play_battle(shared, second, save, anchor, budgets):
     one, a search that finds none is made again on the solver's own policy, and after
     the first potion the rest of the fight is the solver's own. The fight tells how many
     searches found no such route (`potion_refusals`); whether a potion was used is in
-    its records."""
+    its records.
+
+    `budgets['potion_costs']`, when given, is what the solver's own policy asks a potion
+    to save, in HP: the base price and those of the two tiers it holds dearer (its own
+    are 9, 14 and 18). A worker that does not know them searches at its own prices and
+    says so in no other way, so every search has to name the prices it used."""
     records = []
     budget_ms = budgets['elite_budget_ms' if anchor['room_type'] == 'elite' else 'budget_ms']
     engine, frame = shared.enter(save, anchor)
     contract, entry_hp = deepcopy(frame['contract']), player(frame)['hp']
     forced = Counter(anchor.get('forced', []))
+    costs = budgets.get('potion_costs')
+    priced = dict(potion_costs=costs) if costs else {}
     required = anchor.get('potion_policy') == 'RequireAtLeastOne'
     owes_potion, refusals = required, 0
     while in_combat(engine, frame):
@@ -624,8 +631,11 @@ def play_battle(shared, second, save, anchor, budgets):
             potions = dict(potion_policy='Disabled', potion_directives=slots)
 
         def search(**options):
-            return engine.step(before, budget_ms=budget_ms, boss_budget_ms=budgets['boss_budget_ms'],
-                               reuse_turn_plan=True, **options)
+            reply = engine.step(before, budget_ms=budget_ms, boss_budget_ms=budgets['boss_budget_ms'],
+                                reuse_turn_plan=True, **priced, **options)
+            if costs and reply.get('search') is not None and reply['search'].get('potion_costs') != list(costs):
+                raise ValueError('solver_worker_without_potion_costs')
+            return reply
         reply = search(potions=True, potion_policy='RequireAtLeastOne') if owes_potion else search(**potions)
         if owes_potion and reply.get('type') not in ('solver_step', 'solver_selection_required'):
             refusals += 1
@@ -1457,6 +1467,9 @@ def main():
     parser.add_argument('--budget-ms', type=int, default=BUDGETS['budget_ms'], help='Solver time per search in a normal fight')
     parser.add_argument('--elite-budget-ms', type=int, default=BUDGETS['elite_budget_ms'])
     parser.add_argument('--boss-budget-ms', type=int, default=BUDGETS['boss_budget_ms'])
+    parser.add_argument('--potion-costs', type=int, nargs=3, metavar=('BASE', 'ELEVATED', 'HIGH'),
+                        help="HP a potion has to save for the solver's own policy to use it, by the solver's "
+                             "three tiers; without it the solver searches at its own prices, 9 14 18")
     parser.add_argument('--solver-config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--reuse-battles', type=Path,
         help='Previous anchor directory: revalidate and refresh stored battle actions before searching again')
@@ -1474,6 +1487,8 @@ def main():
         failures = {}
         budgets = dict(budget_ms=args.budget_ms, elite_budget_ms=args.elite_budget_ms,
                        boss_budget_ms=args.boss_budget_ms)
+        if args.potion_costs:
+            budgets['potion_costs'] = args.potion_costs
         # Choice kinds first, then battles, each at its own concurrency.
         passes = [([k for k in args.kinds if k != 'battle'], args.workers or WORKERS['choice']),
                   ([k for k in args.kinds if k == 'battle'], args.workers or WORKERS['battle'])]

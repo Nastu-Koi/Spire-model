@@ -224,6 +224,9 @@ def test_a_run_that_did_not_finish_is_quarantined_and_fails_the_round(tmp_path):
     assert broken["status"] == "error" and "broke off" in broken["error"]
     summary = json.loads((directory / "summary.json").read_text())
     assert (summary["accepted_runs"], summary["quarantined_runs"]) == (19, 1) and "Silent-0" in summary["quarantine"]
+    assert summary["report"]["pooled"]["attempts"] == 20
+    assert summary["report"]["comparable"] is False
+    assert summary["report"]["equal_character_win_rate"] == pytest.approx(summary["wins"] / 20)
     # The rest of the round is readable, every run with its journal this time (the
     # broken run's journal was opened before its engine broke).
     assert len(RunShards(directory)) == 19 and len(list(directory.glob("*.jsonl"))) == 20

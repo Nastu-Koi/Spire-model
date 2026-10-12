@@ -6,6 +6,23 @@ import pytest
 from spire_codex_data.fetch import download, unpack
 
 
+class Clock:
+    """A clock whose waits advance time, with one optional concurrent event."""
+
+    def __init__(self):
+        self.now, self.waits, self.on_sleep = 0.0, [], None
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.waits.append(seconds)
+        self.now += seconds
+        event, self.on_sleep = self.on_sleep, None
+        if event:
+            event()
+
+
 def run():
     return dict(seed='SEED', build_id='v0.111.0', ascension=0, start_time=10,
                 win=True, was_abandoned=False, game_mode='standard', modifiers=[],
@@ -186,7 +203,7 @@ def test_transport_retries_cover_a_body_cut_off_mid_read(monkeypatch):
                 raise IncompleteRead(b'')
             return gzip.compress(b'{}')[:-4] if len(attempts) == 2 else b'{}'
     monkeypatch.setattr(fetch, 'urlopen', lambda request, timeout: Response())
-    monkeypatch.setattr(fetch.time, 'sleep', lambda seconds: None)
+    monkeypatch.setattr(fetch, 'time', Clock())
     assert fetch.Client(interval=0).get('/x') == b'{}' and len(attempts) == 3
 
 
@@ -208,13 +225,31 @@ def test_threads_share_one_request_budget(monkeypatch):
     # Routes are paced apart: the site counts each on its own.
     client = fetch.Client()
     assert client.route('/api/runs/shared/abc') != client.route('/api/runs/abc/replay') != client.route('/api/runs/list?page=1')
-    started = fetch.time.monotonic()
-    monkeypatch.setattr(fetch.time, 'sleep', lambda seconds: starts.append(('slept', seconds)))
+    clock = Clock()
+    monkeypatch.setattr(fetch, 'time', clock)
     for path in ('/api/runs/shared/a', '/api/runs/a/replay', '/api/runs/list?page=1', '/api/runs/shared/b'):
         client.get(path)
-    waits = [x[1] for x in starts if isinstance(x, tuple)]
     # Only the second summary waits, for a little over a second.
-    assert [round(w) for w in waits] == [0, 0, 0, 1] and waits[3] > 1.0
+    assert clock.waits == pytest.approx([1.05])
+
+
+@pytest.mark.parametrize("event, expected", [("hold", [0.0, 10.05, 10.1]), ("late", [0.0, 1.05, 1.1])])
+def test_waiting_requests_observe_new_backoff_and_late_wakeups(monkeypatch, event, expected):
+    from spire_codex_data import fetch
+
+    clock, starts = Clock(), []
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+        def read(self, limit): return b'{}'
+    monkeypatch.setattr(fetch, 'time', clock)
+    monkeypatch.setattr(fetch, 'urlopen', lambda *args, **kwargs: starts.append(clock.now) or Response())
+    client = fetch.Client(interval=0.05)
+    client.get('/x')
+    clock.on_sleep = (lambda: client.hold('', 10)) if event == 'hold' else lambda: setattr(clock, 'now', clock.now + 1)
+    client.get('/x')
+    client.get('/x')
+    assert starts == pytest.approx(expected)
 
 
 def test_legacy_cache_without_receipt_is_adopted_only_after_validation(tmp_path):
