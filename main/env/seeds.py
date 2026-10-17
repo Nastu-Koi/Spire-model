@@ -14,11 +14,10 @@ def split_group(seed):
 
 
 def seed_group(run):
-    """A canonical split group, including the two legacy seed representations.
-
-    Independent imports already stored the group's digest as `seed`; do not hash
-    it again. Other runs carry the game seed. New index rows name the group explicitly.
-    """
+    """The split group of a run or index row: named outright (`split_group`), or
+    derived from its seed. An independent import's `seed` is the group's digest
+    already (its index rows, imported without `source`, are read as such); a
+    sampled run carries the game seed, which is hashed."""
     if "split_group" in run:
         return str(run["split_group"])
     seed = str(run.get("seed", run.get("run_id")))

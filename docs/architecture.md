@@ -22,7 +22,7 @@ main/
   play/      对局循环、多进程采样、幕组采样、采样轮、评估报告、合成引擎
   demos/     示范导入（摘要锚点导出、Steam 录制）
   learn/     数据供给、加权 NLL 训练器、幕组优势、幕组批、裁剪目标
-  iterate.py 迭代驱动；cli.py 命令入口；steam.py 实机接管
+  iterate.py 迭代驱动；cli.py 命令入口（参数与分派）；commands.py 各命令的执行；steam.py 实机接管
 spire_codex_data/   公开对局下载、来源审计、摘要账本、锚点生成（示范生成）
 combat_solver_cli/  CombatSolver worker 与客户端（示范战斗、评估参考）
 public_history/     无头与 Steam 共用的公开历史状态机（C#）
@@ -30,7 +30,7 @@ steam_recorder/     Steam Mod：录制与控制桥接（C#）
 sts2-cli/           无头引擎
 ```
 
-依赖只朝一个方向：`env ← encoding ← data, network ← play ← learn ← iterate, cli`；`demos` 在 `data` 之上，供 `cli` 与 `steam` 使用。`data` 与 `network` 互不依赖。`main` 内部除顶层模块外不引用 `spire_codex_data` 与 `combat_solver_cli`，后两者反过来引用 `main`。`main/tests/test_layers.py` 检查这一点。
+依赖只朝一个方向：`env ← encoding ← data, network ← play ← learn ← iterate ← cli`；`demos` 在 `data` 之上，供 `cli` 与 `steam` 使用；`cli` 是入口，没有模块引用它。`data` 与 `network` 互不依赖。`main` 内部除顶层模块外不引用 `spire_codex_data` 与 `combat_solver_cli`，后两者反过来引用 `main`。`main/tests/test_layers.py` 检查这一点。
 
 ## 数据流
 

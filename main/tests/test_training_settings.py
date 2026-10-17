@@ -11,13 +11,14 @@ import pytest
 import torch
 
 from main.network.checkpoint import load_model, save_checkpoint
-from main.cli import _learner, parser, vocabulary_for
+from main.cli import parser
+from main.commands import vocabulary_for
 from main.network.config import LearningRates, ModelConfig, TrainConfig
 from main.data.shards import RunShards, samples
 from main.learn.loader import batches, stream
 from main.network.model import PolicyNetwork
 from main.network.optim import TRAINING_VERSION, BootstrapSchedule
-from main.encoding.representation import Vocabulary
+from main.encoding.vocabulary import Vocabulary
 from main.play.testing import demonstration
 from main.learn.trainer import Learner
 
@@ -126,7 +127,7 @@ def test_resume_continues_warmup_and_weights_only_restarts_it(tmp_path, optimize
     saved = tmp_path / "saved"
     save_checkpoint(saved, model, vocabulary, learner.optimizer, learner.scheduler, training=training,
                     progress={"updates": learner.updates, "policy_version": learner.policy_version})
-    resumed, _ = _learner(saved, "cpu")
+    resumed, _ = Learner.load(saved, "cpu")
     assert resumed.updates == 1 and resumed.scheduler.completed_updates == 1
     state = random.getstate()
     expected = learner.bootstrap(runs)[0]
@@ -137,8 +138,8 @@ def test_resume_continues_warmup_and_weights_only_restarts_it(tmp_path, optimize
         torch.testing.assert_close(a, b)
     changed = replace(training, embedding_lr=training.embedding_lr * 4)
     with pytest.raises(ValueError, match="Strict resume"):
-        _learner(saved, "cpu", training=changed)
-    fresh, _ = _learner(saved, "cpu", weights_only=True, training=changed)
+        Learner.load(saved, "cpu", training=changed)
+    fresh, _ = Learner.load(saved, "cpu", weights_only=True, training=changed)
     assert fresh.updates == fresh.scheduler.completed_updates == 0
     assert not fresh.optimizer.state
     assert next(g for g in fresh.optimizer.param_groups if g["name"] == "embedding_no_decay")["lr"] == changed.embedding_lr
@@ -150,7 +151,7 @@ def test_resume_continues_warmup_and_weights_only_restarts_it(tmp_path, optimize
     manifest["training"]["head_lr"] *= 2
     (saved / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="conflicts"):
-        _learner(saved, "cpu")
+        Learner.load(saved, "cpu")
 
 
 def test_legacy_encoding_can_only_start_new_training_without_reindexing(tmp_path):
@@ -165,7 +166,7 @@ def test_legacy_encoding_can_only_start_new_training_without_reindexing(tmp_path
     (saved / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="encoding changed"):
         load_model(saved)
-    fresh, _ = _learner(saved, "cpu", weights_only=True)
+    fresh, _ = Learner.load(saved, "cpu", weights_only=True)
     assert fresh.vocabulary.symbols[:len(old["symbols"])] == tuple(old["symbols"])
     assert fresh.vocabulary.encode("rider_effect=Energized") >= len(old["symbols"])
     for a, b in zip(model.parameters(), fresh.model.parameters()):
@@ -200,7 +201,7 @@ def test_decay_runs_bc_rates_to_zero_and_resumes_only_at_its_length(tmp_path):
     saved = tmp_path / "constant"
     save_checkpoint(saved, model, vocabulary, learner.optimizer, learner.scheduler, training=training,
                     progress={"updates": learner.updates, "policy_version": learner.policy_version})
-    decaying, _ = _learner(saved, "cpu", decay_updates=1)
+    decaying, _ = Learner.load(saved, "cpu", decay_updates=1)
     assert decaying.scheduler.decay_updates == 1 and decaying.optimizer.state
     metrics = decaying.bootstrap(runs, epochs=None)
     assert decaying.updates == learner.updates + 1 and len(metrics) == 1
@@ -209,8 +210,8 @@ def test_decay_runs_bc_rates_to_zero_and_resumes_only_at_its_length(tmp_path):
     save_checkpoint(final, decaying.model, vocabulary, decaying.optimizer, decaying.scheduler, training=training,
                     progress={"updates": decaying.updates, "policy_version": decaying.policy_version})
     with pytest.raises(ValueError, match="inside a decay"):
-        _learner(final, "cpu")
-    played, _ = _learner(final, "cpu", inference=True)
+        Learner.load(final, "cpu")
+    played, _ = Learner.load(final, "cpu", inference=True)
     assert played.updates == decaying.updates and played.policy_version == decaying.policy_version
     for a, b in zip(decaying.model.parameters(), played.model.parameters()):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
@@ -252,7 +253,7 @@ def test_tables_fall_geometrically_over_their_decay_then_hold(tmp_path):
     saved = tmp_path / "tables"
     save_checkpoint(saved, model, vocabulary, learner.optimizer, learner.scheduler, training=training,
                     progress={"updates": learner.updates, "policy_version": learner.policy_version})
-    resumed, _ = _learner(saved, "cpu")
+    resumed, _ = Learner.load(saved, "cpu")
     assert resumed.scheduler.table_decay_updates == 2 and resumed.scheduler.completed_updates == learner.updates
 
 
@@ -269,7 +270,7 @@ def test_a_checkpoint_of_another_architecture_version_is_refused_by_name(tmp_pat
     (saved / "manifest.json").write_text(json.dumps(manifest))
     for options in (dict(), dict(weights_only=True), dict(inference=True)):
         with pytest.raises(ValueError, match="architecture version 2"):
-            _learner(saved, "cpu", **options)
+            Learner.load(saved, "cpu", **options)
 
 
 def test_warmup_reaches_the_configured_rates():
@@ -299,7 +300,7 @@ def test_a_learning_rate_file_changes_the_rates_of_a_strict_resume_and_nothing_e
     path = tmp_path / "rates.json"
     path.write_text(json.dumps(dict(muon=1e-4, backbone=1e-6, embedding=1e-4, head=3e-6)))
     rates = LearningRates.load(path)
-    resumed, _ = _learner(saved, "cpu", rates=rates)
+    resumed, _ = Learner.load(saved, "cpu", rates=rates)
     # The optimizer's state and the schedule's progress go on; only the rates are new.
     assert resumed.updates == learner.updates and resumed.optimizer.state
     assert resumed.scheduler.completed_updates == learner.updates
@@ -315,12 +316,12 @@ def test_a_learning_rate_file_changes_the_rates_of_a_strict_resume_and_nothing_e
     save_checkpoint(again, resumed.model, vocabulary, resumed.optimizer, resumed.scheduler, training=resumed.config,
                     progress={"updates": resumed.updates, "policy_version": resumed.policy_version})
     assert json.loads((again / "manifest.json").read_text())["training"]["muon_lr"] == pytest.approx(1e-4)
-    kept, _ = _learner(again, "cpu")
+    kept, _ = Learner.load(again, "cpu")
     assert all(a == pytest.approx(b) for a, b in zip(astuple(LearningRates.of(kept.config)), astuple(rates)))
     assert {g["name"]: g["lr"] for g in kept.optimizer.param_groups}["muon"] == pytest.approx(1e-4)
     # A profile still may not change the rates of a strict resume; a file is how.
     with pytest.raises(ValueError, match="Strict resume"):
-        _learner(saved, "cpu", training=replace(training, head_lr=1e-4))
+        Learner.load(saved, "cpu", training=replace(training, head_lr=1e-4))
     for wrong in (dict(muon=0.0, backbone=1e-6, embedding=1e-4, head=3e-6), dict(muon=1e-4, backbone=1e-6, head=3e-6),
                   dict(muon=1e-4, backbone=1e-6, embedding=1e-4, head=3e-6, other=1.0)):
         path.write_text(json.dumps(wrong))
@@ -344,16 +345,16 @@ def test_a_learning_rate_file_lets_a_profile_resume_a_checkpoint_saved_at_its_ra
                     progress={"updates": learner.updates, "policy_version": learner.policy_version})
     profile = replace(training, combat_temperature=0.5)
     with pytest.raises(ValueError, match="Strict resume.*muon_lr"):
-        _learner(saved, "cpu", training=profile)
+        Learner.load(saved, "cpu", training=profile)
     # Given the file, the profile's rates are not the run's and are not compared.
-    resumed, _ = _learner(saved, "cpu", training=profile, rates=rates)
+    resumed, _ = Learner.load(saved, "cpu", training=profile, rates=rates)
     assert resumed.config == replace(ran, combat_temperature=0.5) and resumed.updates == learner.updates
     assert {g["name"]: g["lr"] for g in resumed.optimizer.param_groups}["muon"] == pytest.approx(1e-4)
     # Everything else is still the checkpoint's.
     with pytest.raises(ValueError, match="sampling and learning-rate settings only.*logical_batch_size"):
-        _learner(saved, "cpu", training=replace(profile, logical_batch_size=8), rates=rates)
+        Learner.load(saved, "cpu", training=replace(profile, logical_batch_size=8), rates=rates)
     with pytest.raises(ValueError, match="embedding_decay_updates"):
-        _learner(saved, "cpu", training=replace(profile, embedding_decay_updates=3), rates=rates)
+        Learner.load(saved, "cpu", training=replace(profile, embedding_decay_updates=3), rates=rates)
 
 
 def test_unlimited_bc_continues_until_manual_interrupt():
@@ -497,21 +498,19 @@ def test_a_profile_sets_the_sampling_temperatures_anew_and_nothing_else(tmp_path
                     progress={"updates": learner.updates, "policy_version": learner.policy_version})
     profile = replace(training, combat_temperature=0.5, other_temperature=0.9)
     assert training.with_sampling(profile) == profile
-    resumed, _ = _learner(saved, "cpu", training=profile)
+    resumed, _ = Learner.load(saved, "cpu", training=profile)
     assert resumed.config == profile and resumed.updates == learner.updates
     assert resumed.config.temperatures == {"combat": 0.5, "other": 0.9}
     # What the optimizer state was built under stays the checkpoint's.
     with pytest.raises(ValueError, match="sampling settings only.*head_lr, logical_batch_size"):
-        _learner(saved, "cpu", training=replace(profile, head_lr=1e-4, logical_batch_size=8))
+        Learner.load(saved, "cpu", training=replace(profile, head_lr=1e-4, logical_batch_size=8))
     # A round may be sampled at a profile's temperatures as well.
-    assert _learner(saved, "cpu", inference=True, training=profile)[0].config.temperatures == profile.temperatures
-    assert parser().parse_args(["collect", "--checkpoint", "c", "--seeds", "s", "--output", "o",
-                                "--config", "p.json"]).config == "p.json"
+    assert Learner.load(saved, "cpu", inference=True, training=profile)[0].config.temperatures == profile.temperatures
     # A checkpoint saved before the temperatures existed samples at the defaults.
     manifest = json.loads((saved / "manifest.json").read_text())
     del manifest["training"]["combat_temperature"], manifest["training"]["other_temperature"]
     (saved / "manifest.json").write_text(json.dumps(manifest))
-    assert _learner(saved, "cpu", inference=True)[0].config.temperatures == TrainConfig().temperatures
+    assert Learner.load(saved, "cpu", inference=True)[0].config.temperatures == TrainConfig().temperatures
 
 
 def test_batched_muon_steps_as_torch_muon_does_matrix_by_matrix():

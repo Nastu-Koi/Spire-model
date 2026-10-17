@@ -15,7 +15,7 @@ from main.learn.loader import stream
 from main.network.model import PolicyNetwork
 from main.network.policy import prepare_replay
 from main.env.protocol import ProtocolError, action_semantics
-from main.encoding.representation import Vocabulary
+from main.encoding.vocabulary import Vocabulary
 from main.play.rollout import RolloutRunner
 from main.steam import choose_action
 from main.play.testing import demonstration
@@ -112,19 +112,19 @@ def test_steam_uses_the_public_legal_options_and_retains_the_next_real_choice():
 
 
 def test_infer_emits_the_controller_action_without_model_scoring(tmp_path, monkeypatch, capsys):
-    from main import cli
+    from main import cli, commands
 
     config = ModelConfig.tiny()
     frame = policy_frame("event", ["DISCARD_POTION", "CHOOSE_EVENT_OPTION"], 0)
     path = tmp_path / "frame.json"
     path.write_text(json.dumps(frame))
-    monkeypatch.setattr(cli, "load_model", lambda *_: (
+    monkeypatch.setattr(commands, "load_model", lambda *_: (
         PolicyNetwork(config), Vocabulary.from_frames([frame], config), dict(training=dict(precision="no"))))
 
     def unexpected(*_, **__):
         raise AssertionError("An automatic event advance must not call the model")
 
-    monkeypatch.setattr(cli.SessionPolicy, "choose", unexpected)
+    monkeypatch.setattr(commands.SessionPolicy, "choose", unexpected)
     assert cli.main(["infer", "--checkpoint", "unused", "--frame", str(path)]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["command"]["candidate_ref"] == "0:1"

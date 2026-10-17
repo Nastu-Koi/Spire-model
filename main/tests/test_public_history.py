@@ -9,8 +9,11 @@ from main.network.checkpoint import save_checkpoint, load_model
 from main.network.model import PolicyNetwork
 from main.env.protocol import ProtocolError
 from main.env.public_history import HISTORY_VERSION, recorded_memory, draw_relations, unknown_memory
-from main.demos.recorder import PublicSnapshot
-from main.encoding.representation import Vocabulary, clean_public, fields_of, observation
+from main.demos.recorder.snapshot import PublicSnapshot
+from main.encoding.fields import fields_of
+from main.encoding.frames import clean_public
+from main.encoding.representation import observation
+from main.encoding.vocabulary import Vocabulary
 from main.steam import live_frame
 from main.tests.test_encoding import action, build, frame, logits
 from main.tests.test_steam import message, card

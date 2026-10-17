@@ -7,7 +7,9 @@ import torch
 from main.network.config import ModelConfig
 from main.network.model import PolicyNetwork
 from main.encoding.batch import Fields
-from main.encoding.representation import Vocabulary, fields_of, observation
+from main.encoding.fields import fields_of
+from main.encoding.representation import observation
+from main.encoding.vocabulary import Vocabulary
 
 
 def action(slot, verb="PLAY_CARD", source=(), target=()):

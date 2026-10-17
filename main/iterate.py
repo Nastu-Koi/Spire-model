@@ -50,10 +50,11 @@ from main.learn.groups import KIND as GROUPS, advantages as group_advantages
 from main.play import groups as act_groups
 from main.play.groups import group_rounds, groups_summary, sample_groups
 from main.network.checkpoint import archive_checkpoint
-from main.network.config import LearningRates
+from main.network.config import LearningRates, TrainConfig
 from main.data.shards import RunShards
 from main.play.evaluation import evaluate_runs
 from main.learn.history import TrainingHistory
+from main.learn.trainer import Learner
 from main.env.protocol import CHARACTERS, ProtocolError
 from main.play.rollout import SUMMARY_RUNS, RolloutRunner, collect_round
 from main.play.sampling import Samplers
@@ -372,13 +373,12 @@ class Driver:
         """The policy with its optimizer: the last update's, or the starting checkpoint's.
         `resumed` says which: only a policy of this run's own may be the update of an
         iteration that was cut off after it was saved (`update`)."""
-        from main.cli import _learner, _profile
-
         current = self.policy / "current"
         self.resumed = current.exists()
         rates = self.settings.learning_rates
-        learner, _ = _learner(current if self.resumed else self.settings.checkpoint, self.device,
-                              training=_profile(self.settings.config),
+        learner, _ = Learner.load(current if self.resumed else self.settings.checkpoint, self.device,
+                                  training=TrainConfig.from_profile(self.settings.config)
+                                  if self.settings.config else None,
                               rates=LearningRates.load(rates) if rates else None)
         return learner
 
@@ -498,8 +498,6 @@ class Driver:
     def update(self, iteration):
         """One pass over the iteration's round with the clipped objective
         (`grpo.group_update`), the KL to the policy the iterations started from."""
-        from main.cli import _save
-
         settings, learner, directory = self.settings, self.learner, self.groups / f"round-{iteration}"
         current, archived = self.policy / "current", self.policy / f"iteration-{iteration:04d}"
         applied = getattr(learner, "checkpoint_metadata", {}) if self.resumed else {}
@@ -539,7 +537,7 @@ class Driver:
             clip=done["clip"], kl=done["kl"], phase_weights=done["phase_weights"], seen=done["seen"],
             reference=str(anchored.relative_to(self.output) if anchored.is_relative_to(self.output) else anchored))
         seeds = set().union(*(RunShards(path).seeds for path in waves.values()))
-        _save(current, learner, dict(
+        learner.save(current, dict(
             runtime=self.runtime, iteration=iteration, update=result, advantage=GROUPS,
             training_seeds=sorted(seeds)))
         self.set_aside(archived)

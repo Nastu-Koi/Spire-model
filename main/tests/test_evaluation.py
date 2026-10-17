@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from main.cli import main, vocabulary_for
+from main.cli import main
+from main.commands import vocabulary_for
 from main.network.config import ModelConfig, TrainConfig
 from main.data.shards import HELDOUT_FRACTION, RunShards, extent, held_out, split_held_out
 from main.data.index import HEADER, index_row

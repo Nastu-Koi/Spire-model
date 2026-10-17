@@ -25,8 +25,8 @@ def validate_frame(frame: dict, *, allow_prototype: bool = False) -> dict:
         raise ProtocolError("Expected decision_frame")
     contract = frame.get("contract", {})
     ascension = contract.get("fixed_ascension")
-    if type(ascension) is not int or not 0 <= ascension <= 10:
-        raise ProtocolError("Only verified A0-A10 runs are supported")
+    if type(ascension) is not int or ascension < 0:
+        raise ProtocolError("The contract's fixed_ascension must be a non-negative integer")
     if contract.get("training_ready") is not True and not allow_prototype:
         raise ProtocolError(
             "Engine contract is not training_ready; use inspect for prototype diagnostics"

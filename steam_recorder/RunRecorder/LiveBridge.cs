@@ -35,8 +35,12 @@ namespace RunRecorder;
 // Tick is called by the Godot timer: no game object is touched by a worker thread.
 internal static class LiveBridge
 {
-    // Card rewards are published with their cards; a chest is opened by an action.
-    private const string Protocol = "steam-live-v2";
+    // Every answer carries the panel's settings and reset count; a phase the player
+    // keeps is `manual`, an error the controller reported is `halted` until the reset;
+    // the controller reports its decisions. Card rewards are published with their
+    // cards; a chest is opened by an action.
+    private const string Protocol = "steam-live-v3";
+    private const int HistoryLimit = 50;
     private static readonly AsyncLocal<bool> Origin = new();
     internal static bool Executing => Origin.Value;
     private static Snapshot _snapshot = new() { TrackObjects = true };
@@ -50,15 +54,44 @@ internal static class LiveBridge
     private static bool? _outcome;
     private static RunState? _outcomeRun;
     internal static bool Enabled { get; private set; } = true;
+    internal static FeatureSettings Settings { get; private set; } = new();
+    // What the panel shows: the error the controller stopped on, its warning, its
+    // current decision and the recent ones; the reset count the controller watches.
+    internal static int ResetCount { get; private set; }
+    internal static string? HaltError { get; private set; }
+    internal static DateTime HaltedAt { get; private set; }
+    internal static string? Notice { get; private set; }
+    internal static string? Current { get; private set; }
+    internal static readonly List<string> Decisions = new();
+    internal static bool Connected => DateTime.UtcNow - _lastRequest < TimeSpan.FromSeconds(30);
+    private static bool InCombat => CombatManager.Instance?.IsInProgress == true;
+    private static bool Playing => InCombat ? Settings.ControlCombat : Settings.ControlOutside;
     internal static string Status => !Enabled ? "接管：已暂停" :
-        DateTime.UtcNow - _lastRequest < TimeSpan.FromSeconds(30) ? "接管：已连接" : "接管：等待模型连接";
+        HaltError != null ? "接管：已停止，等待重置" :
+        !Connected ? "接管：等待模型连接" :
+        !Playing ? (InCombat ? "接管：战斗由你操作" : "接管：局外由你操作") : "接管：模型操作中";
     private static string DirectoryPath => Path.Combine(Recorder.OutputDirectory, "bridge");
 
-    internal static void SetEnabled(bool enabled)
+    internal static void Configure(FeatureSettings settings)
     {
+        bool enabled = settings.ControlEnabled;
         if (Enabled != enabled) _token = _hash = "";
         if (!enabled) { LiveRewards.Reset(); _rewardError = null; }
         Enabled = enabled;
+        Settings = settings;
+    }
+
+    // The panel's reset: forget the error and whatever was under way, and let the
+    // controller know by the count so that it observes afresh.
+    internal static void ResetByUser()
+    {
+        HaltError = null;
+        Notice = null;
+        ResetCount++;
+        _token = _hash = "";
+        Pending.Clear();
+        LiveRewards.Reset();
+        _rewardError = null;
     }
 
     internal static void RunEnded(bool victory)
@@ -126,15 +159,22 @@ internal static class LiveBridge
                 Reply(id, new { status = "error", error = rewardError }, uniqueResponse);
                 return;
             }
+            var command = request.GetProperty("command").GetString();
+            if (HaltError != null && command != "report")
+            {
+                Reply(id, new { status = "halted", error = HaltError }, uniqueResponse);
+                return;
+            }
             object result;
             Origin.Value = true;
             try
             {
-                result = request.GetProperty("command").GetString() switch
+                result = command switch
                 {
                     "observe" => Observe(),
                     "execute" => Execute(request),
                     "advance" => Advance(),
+                    "report" => Report(request),
                     _ => throw new InvalidOperationException("Unknown bridge command")
                 };
             }
@@ -178,6 +218,8 @@ internal static class LiveBridge
         // The controller refuses a bridge that publishes or executes differently.
         node["protocol"] = Protocol;
         node["recorder"] = typeof(LiveBridge).Assembly.GetName().Version?.ToString(3);
+        node["reset_count"] = ResetCount;
+        node["settings"] = JsonSerializer.SerializeToNode(Settings);
         // Python may be reading the previous response on a WSL mount. A fresh
         // filename avoids Windows denying replacement of an open response.json.
         string destination = Path.Combine(DirectoryPath, uniqueResponse && Guid.TryParseExact(id, "N", out _)
@@ -202,9 +244,9 @@ internal static class LiveBridge
             Pending.Clear();
             LiveRewards.Reset();
             _rewardError = null;
+            Notice = null;
+            Current = null;
         }
-        if (run.AscensionLevel is < 0 or > 10)
-            throw new InvalidOperationException("Model expects a single-player A0-A10 game");
         return true;
     }
 
@@ -271,8 +313,9 @@ internal static class LiveBridge
 
     private static object Observe()
     {
-        if (!Ready()) return new { status = "waiting", reason = "Start or load a single-player run matching the model's ascension" };
+        if (!Ready()) return new { status = "waiting", reason = "Start or load a single-player run" };
         if (_outcome is bool outcome) return new { status = "terminal", victory = outcome };
+        if (!Playing) return new { status = "manual", reason = InCombat ? "Combat is played by hand" : "The map and the rooms are played by hand" };
         var captured = Capture();
         if (captured == null) return new { status = "waiting", reason = "Game is animating or waiting for its UI" };
         var state = captured.Value;
@@ -289,6 +332,7 @@ internal static class LiveBridge
     {
         if (!Ready() || request.GetProperty("token").GetString() != _token || _token == "")
             return new { status = "stale" };
+        if (!Playing) { _token = ""; return new { status = "manual" }; }
         var current = Capture();
         if (current == null || Hash(current.Value) != _hash) { _token = ""; return new { status = "stale" }; }
         var action = request.GetProperty("action");
@@ -383,9 +427,43 @@ internal static class LiveBridge
         throw new InvalidOperationException("Selection UI is not ready");
     }
 
+    // What the controller tells the panel: a decision it made, an error it stopped on,
+    // a warning (such as an ascension the checkpoint was not trained at).
+    private static object Report(JsonElement request)
+    {
+        string Field(string name) => request.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? "" : "";
+        switch (request.GetProperty("kind").GetString())
+        {
+            case "decision":
+                string floor = request.TryGetProperty("floor", out var f) && f.ValueKind == JsonValueKind.Number ? "F" + f.GetInt32() + " " : "";
+                bool rule = request.TryGetProperty("controller", out var c) && c.ValueKind == JsonValueKind.True;
+                Current = (floor + Field("phase") + " " + Field("summary") + (rule ? "（规则）" : "")).Trim();
+                Remember(Current);
+                break;
+            case "error":
+                HaltError = Field("error") is { Length: > 0 } error ? error : "unknown error";
+                HaltedAt = DateTime.UtcNow;
+                Remember("错误：" + HaltError);
+                break;
+            case "warning":
+                Notice = Field("message");
+                break;
+            default:
+                throw new InvalidOperationException("Unknown report kind");
+        }
+        return new { status = "reported" };
+    }
+
+    private static void Remember(string line)
+    {
+        Decisions.Add($"{DateTime.Now:HH:mm:ss} {line}");
+        if (Decisions.Count > HistoryLimit) Decisions.RemoveAt(0);
+    }
+
     private static object Advance()
     {
-        if (!Ready() || _outcome != null || LiveRewards.BlocksCapture() || SelectionCapture.Active != null ||
+        if (!Ready() || !Settings.ControlOutside || _outcome != null || LiveRewards.BlocksCapture() || SelectionCapture.Active != null ||
             RunManager.Instance.ActionExecutor?.IsRunning == true ||
             CombatManager.Instance.IsInProgress || DateTime.UtcNow - _lastAdvance < TimeSpan.FromSeconds(.5))
             return new { status = "waiting" };

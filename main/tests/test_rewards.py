@@ -6,7 +6,8 @@ from copy import deepcopy
 import pytest
 
 from main.network.checkpoint import load_model, save_checkpoint
-from main.cli import _learner, parser, vocabulary_for
+from main.cli import parser
+from main.commands import vocabulary_for
 from main.network.config import ModelConfig, TrainConfig
 from main.data.shards import validate_run
 from main.network.model import PolicyNetwork
@@ -139,7 +140,7 @@ def test_checkpoint_keeps_explicit_difficulty_and_rejects_implicit_migration(tmp
                     progress={"reward_version": "milestones-v1"})
     _, _, manifest = load_model(path)
     assert manifest["training"]["ascension"] == 10
-    assert _learner(path, "cpu", weights_only=True)[0].config.ascension == 10
+    assert Learner.load(path, "cpu", weights_only=True)[0].config.ascension == 10
     assert json.loads((path / "manifest.json").read_text())["progress"]["reward_version"] == "milestones-v1"
     del manifest["training"]["ascension"]
     (path / "manifest.json").write_text(json.dumps(manifest))
@@ -159,7 +160,7 @@ def test_a_bc_checkpoint_resumes_whatever_reward_it_names(tmp_path):
 
     # Demonstrations taught it all it knows: no reward has shaped its policy.
     cloned = saved("cloned", completed_bootstrap_epochs=17)
-    assert _learner(cloned, "cpu")[0].config == training
+    assert Learner.load(cloned, "cpu")[0].config == training
 
 
 def test_a_rollout_pays_its_outcome_once_at_its_end():

@@ -19,7 +19,7 @@ form of `wire`, each decision with the temperature it is drawn at. They stay fro
 to round with their engines: an engine process begins its next run without loading
 the game again. Between rounds that something else needs the memory for, the engines
 can end while the processes stay (`Samplers.rest`). Every run is written where it was played, or handed over compressed
-for the round's shards (`main/play/buffer.py`) as it ends; nothing of a round stays in
+for the wave's shards (`main/play/groups.py`) as it ends; nothing of a round stays in
 memory for whatever learns from it.
 """
 

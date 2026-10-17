@@ -4,9 +4,12 @@ import random
 import time
 from collections import defaultdict
 from itertools import count
+from pathlib import Path
 
 import torch
 
+from main.env.rewards import MilestoneLedger
+from main.network.checkpoint import load_model, restore_training, save_checkpoint
 from main.network.config import TrainConfig
 from main.data.shards import HELDOUT_FRACTION, RunShards, extent, samples, split_held_out
 from main.learn.loader import batches, stream
@@ -57,6 +60,76 @@ class Learner:
             table_decay_updates=cfg.embedding_decay_updates,
         )
         self.policy_version, self.updates = policy_version, 0
+        self.checkpoint_metadata = {}  # what the checkpoint it came from recorded
+
+    @classmethod
+    def load(cls, checkpoint, device, *, weights_only=False, training=None, decay_updates=0, inference=False,
+             rates=None):
+        """A checkpoint's policy with its training state, as (learner, manifest).
+        `inference` loads it to play only: nothing is resumed, so a checkpoint whose
+        training has ended, a finished decay among them, is accepted. `weights_only`
+        starts a new run from its weights. `rates` (`LearningRates`) are the rates the
+        run trains at instead of the checkpoint's; the optimizer's state and the
+        schedule's progress go on."""
+        model, vocab, manifest = load_model(checkpoint, device, allow_legacy_encoding=weights_only)
+        progress = manifest.get("progress", {})
+        saved_training = TrainConfig(**manifest["training"])
+        if not weights_only and training is not None:
+            # The sampling settings are the profile's, the rates a file's if given; the profile
+            # may differ from the checkpoint in nothing else.
+            training = saved_training.with_sampling(training, rates=rates is not None)
+        if rates is not None:
+            training = (training or saved_training).with_rates(rates)
+        if weights_only:
+            vocab = vocab.expanded()
+        learner = cls(model, vocab, training or saved_training,
+                      policy_version=0 if weights_only else progress.get("policy_version", 0),
+                      decay_updates=decay_updates)
+        if weights_only:
+            learner.checkpoint_metadata = {
+                "training_seeds": progress.get("training_seeds", []),
+                "initialization": "weights-only",
+                "source_checkpoint": str(Path(checkpoint).resolve()),
+                "source_updates": progress.get("updates", 0),
+            }
+            return learner, manifest
+        if inference:
+            learner.updates = progress.get("updates", 0)
+        else:
+            if "optimizer" not in manifest:
+                raise ValueError("Checkpoint has no optimizer state; use --weights-only")
+            progress = restore_training(checkpoint, learner.optimizer, learner.scheduler)
+            learner.updates = progress.get("updates", 0)
+        learner.checkpoint_metadata = {
+            k: v for k, v in manifest["progress"].items() if k not in {"policy_version", "updates"}
+        }
+        return learner, manifest
+
+    def save(self, path, extra=None):
+        """Write the policy with its optimizer and schedule to `path`, under the metadata
+        it was loaded with and `extra` on top; the training seeds of both accumulate.
+        A `current` is replaced in place."""
+        metadata = {**self.checkpoint_metadata, **(extra or {})}
+        metadata["training_seeds"] = sorted(
+            set(self.checkpoint_metadata.get("training_seeds", []))
+            | set(metadata.get("training_seeds", []))
+        )
+        save_checkpoint(
+            path,
+            self.model,
+            self.vocabulary,
+            self.optimizer,
+            self.scheduler,
+            overwrite=Path(path).name == "current",
+            training=self.config,
+            progress={
+                **metadata,
+                "reward_version": MilestoneLedger().version,
+                "policy_version": self.policy_version,
+                "updates": self.updates,
+            },
+        )
+        self.checkpoint_metadata = metadata
 
     def _replay(self, prepared, *, with_accuracy=False):
         """Macro-action (log-prob, entropy) rows of a prepared batch, at temperature 1:

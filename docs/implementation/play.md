@@ -1,13 +1,12 @@
 # play：对局循环、采样、幕组与评估
 
-`main/play/`。`collect`（采样）与 `evaluate`（评估）共用同一个对局循环，写出的东西不同。
+`main/play/`。评估（`evaluate`、迭代里的评估）与幕组采样共用同一个对局循环，写出的东西不同。
 
 | 模块 | 内容 |
 | --- | --- |
 | `rollout.py` | 对局循环（`RolloutRunner`）、温度与战斗边界、`collect_round` |
 | `sampling.py` | 多进程采样（`Samplers`）：引擎与帧解析在采样进程里，采集进程只跑网络 |
 | `wire.py` | 打包好的决策的跨进程扁平格式 |
-| `buffer.py` | `collect` 的采样轮写成分片加索引 |
 | `groups.py` | 幕组：按边界幕把一局切成几波，第一波从开局、之后每波从上一波的幕开头存档续打，各写成分片 |
 | `evaluation.py` | 评估报告、配对符号检验（`compare_evaluations`）、留出 NLL 的表格 |
 | `testing.py` | 合成引擎（`SyntheticEngine`，不是游戏模拟器）与合成示范，供测试和 `smoke` |
@@ -22,31 +21,20 @@
 - 采集进程是唯一串行的环节，消息与张量的固定开销会超过前向本身，所以跨进程用 `wire.py` 的扁平格式：去掉填充，一条消息只有表头、一个整数数组和一个数值数组，任意多条消息在设备上用固定次数的数组运算合并。
 - 采样进程连同引擎跨轮保留；每打完一局清掉解析缓存，把空闲内存还给系统。每对“引擎 + 采样进程”占 250–300 MB（引擎约 150–200 MB；改 .NET 的 GC 参数不会更低）。
 - 采集进程按轮记自己的账（`Samplers.timing`，幕组每波 `summary.json` 的 `collector`、`iterate` 的 `sample` 记录）：`passes`（前向次数）、`decisions`、`decisions_per_pass`、`decisions_per_second`、`seconds_per_pass`，以及等采样进程（`waiting_seconds`）、解包（`unpacking_seconds`）、选择（`choosing_seconds`：前向加把结果拷回主机）、回传（`sending_seconds`）各花的秒数。读法：等待占比小、每次前向的决策数远少于引擎数，说明引擎在等采集进程，加引擎能提吞吐；每次前向耗时随决策数线性涨，说明前向本身是瓶颈。20M 策略一次前向约 27 ms 的固定开销与决策数无关，32 个引擎时每次只带约 14 条决策，64 个引擎约 24 条、吞吐高四成。
-- `Samplers.rest()` 结束引擎、留下进程，下一次 `collect` 按需重启引擎。迭代驱动用它在训练期间腾出引擎的内存，同时保住训练之前 fork 的进程（见 [learn](learn.md#迭代驱动)）。
+- `Samplers.rest()` 结束引擎、留下进程，下一次采样按需重启引擎。迭代驱动用它在训练期间腾出引擎的内存，同时保住训练之前 fork 的进程（见 [learn](learn.md#迭代驱动)）。
 - 采样进程要在父进程训练之前 fork：训练过的父进程堆里布满空闲块，子进程新分配的对象落进继承来的页，每写一页就复制一页。32 个采样进程的私有内存因此从约 1.5 GB 涨到约 7 GB。
 
 ## 温度与战斗边界
 
-一场战斗从引擎的 `encounter_started` 到它打赢后的第一个决策之前；其中的出牌和战斗中的选牌（`card_select`：弃牌、消耗）按 `combat_temperature`，其余决策按 `other_temperature`（默认 0.3／0.5，记在检查点和对局里；BC 检查点记的是训练时 profile 的值，采样时用 `--config` 换成当前 profile 的）。`collect --config <profile>` 换成 profile 里的温度。greedy 的 `evaluate` 记 `temperature: null`，概率按温度 1 记。
+一场战斗从引擎的 `encounter_started` 到它打赢后的第一个决策之前；其中的出牌和战斗中的选牌（`card_select`：弃牌、消耗）按 `combat_temperature`，其余决策按 `other_temperature`（默认 0.3／0.5，记在检查点和对局里；BC 检查点记的是训练时 profile 的值，采样时用 `--config` 换成当前 profile 的）。greedy 的 `evaluate` 记 `temperature: null`，概率按温度 1 记。
 
-## 采样轮的格式
+## 采样对局的格式
 
-`collect` 的一轮写到 `<输出>/round-N/`，与示范导入相同的分片加索引（见 [data](data.md)），`bootstrap --data <输出>/round-N` 直接读。
+幕组的每一波是一个数据目录：与示范导入相同的分片加索引（见 [data](data.md)），目录布局见[幕组](#幕组)。
 
-| 文件 | 内容 |
-| --- | --- |
-| `accepted/*.jsonl.gz` | 打完的对局，每局一行；每个分片约 `--shard-samples`（默认 2000）个保存的决策步 |
-| `index.jsonl.gz` | 每局一行，另加 `policy_version`、`policy_digest`、`iteration`、`victory` |
-| `summary.json` | 迭代号、策略版本与 digest、温度、难度、控制与奖励版本、对局数与胜场、各组宏动作数、战斗与存档计数、引擎契约、按全部尝试统计的通关率报告；有隔离对局时 `comparable: false` |
-| `<角色>-<序号>.saves.jsonl.gz` | 每场战斗的入场存档 |
-| `metadata/seeds.json` | 种子分配 |
-| `quarantine/<角色>-<序号>.json.gz` | 没打完的对局（超时、引擎出错） |
+对局（`source: "rollout"`）记每个策略宏动作的帧、完整候选、所选动作、`old_log_prob`、阶段、奖励；段保留全部帧，战斗在内。不保留战斗帧的布局（`combat_frames=False`，迭代里的评估）里，战斗中的宏动作只记 `phase`、`fight`（第几场）、`branches`、`decisions`、`old_log_prob` 与 `reward`，`samples()` 读到它们时不作训练样本。每局另记 `status`、`victory`、`ledger`、`climb`、seed、角色、难度、策略版本、温度、`fights`（胜、负、没打完的场数）。
 
-对局（`source: "rollout"`）只保存战斗之外的决策：每个策略宏动作的帧、完整候选、所选动作、`old_log_prob`、阶段、奖励。战斗里的宏动作只记 `phase`、`fight`（第几场）、`branches`、`decisions`、`old_log_prob` 与 `reward`，不保存帧；`samples()` 读到它们时不作训练样本。每局另记 `status`、`victory`、`ledger`、`climb`、seed、角色、难度、策略版本、温度、`fights`（胜、负、没打完的场数）与存档计数。`--journals` 另写每局的流水账。
-
-入场存档的每行带 `run_id`、`seed`、角色、难度、`fight`、`encounter_id`、`encounter`、`kind`（normal／elite／boss）、`act`、`floor`、`map_point_type`、`second_boss`、`from_event`、`result`（学生这一场的胜负）、`relics`（入场帧的遗物公开实体）和 `save`；引擎拒绝存档时 `save` 为空并带 `error`。重进方式见 [env](env.md#入场存档)。
-
-采样进程一局内只保留压缩后的帧与存档，一局结束把对局压成一行交给采集进程追加写出；采集进程不持有对局。不写对局文件的布局（采样轮、幕组）收尾时不再把帧解回对象：`rollout.packed_line` 把各帧压缩前的 JSON 文本逐个拼进分片行，读回与 `member(run)` 相同，一段的内存峰值从约 40–60 MB 降到约 1–2 MB（采样进程会一直占着它打过的最大一段的峰值）。未完成的对局让 `collect` 报错，但轮仍写出供检查。
+采样进程一局内只保留压缩后的帧，一局结束把对局压成一行交给采集进程追加写出；采集进程不持有对局。不写对局文件的布局收尾时不再把帧解回对象：`rollout.packed_line` 把各帧压缩前的 JSON 文本逐个拼进分片行，读回与 `member(run)` 相同，一段的内存峰值从约 40–60 MB 降到约 1–2 MB（采样进程会一直占着它打过的最大一段的峰值）。
 
 ## 幕组
 

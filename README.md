@@ -92,11 +92,9 @@ python -m main --device cuda bootstrap --data data/bootstrap data/a10-battles \
 python -m main --device cuda evaluate --checkpoint <检查点> --seeds seeds.json --output runs/eval-x \
   --workers 32 --processes 32
 python -m main compare runs/eval-x runs/eval-y --head 60      # 配对符号检验
-python -m main --device cuda collect --checkpoint <检查点> --seeds seeds.json --output runs/collect \
-  --workers 44 --iteration 0      # 按检查点的两个温度采样一轮，写到 round-N
 ```
 
-评估默认按检查点训练时的难度对局，`--ascension 10` 改在 A10 评估。`--workers` 是同时运行的引擎数，每对“引擎 + 采样进程”占 250–300 MB 内存。报告与采样轮的格式见 [play](docs/implementation/play.md)。
+评估默认按检查点训练时的难度对局，`--ascension 10` 改在 A10 评估。`--workers` 是同时运行的引擎数，每对“引擎 + 采样进程”占 250–300 MB 内存。报告的格式见 [play](docs/implementation/play.md#评估报告)。
 
 ## 迭代
 
@@ -117,7 +115,7 @@ python -m main --device cuda iterate --kl 0.1 --learning-rates configs/learning-
 ```bash
 python steam_recorder/install.py --game-dir "$GAME_DIR" --install
 python -m main import-recorder "$RECORDING_DIR" --bootstrap-only --output data/steam-001
-python -m main --device cuda play-steam --checkpoint <检查点> --bridge-dir "$RECORDING_DIR/bridge"
+python -m main --device cuda play-steam --checkpoint <检查点> --bridge-dir "$RECORDING_DIR/bridge" --run-for 8h
 ```
 
-见 [steam](docs/implementation/steam.md)。
+接管的开关、每步间隔、决策记录与报错后的重置都在游戏内的“模型”面板上；见 [steam](docs/implementation/steam.md)。

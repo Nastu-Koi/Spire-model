@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from main.cli import vocabulary_for
+from main.commands import vocabulary_for
 from main.network.config import ModelConfig, TrainConfig
 from main.env.control import is_policy_frame
 from main.learn.history import TrainingHistory

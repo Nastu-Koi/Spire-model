@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from main.cli import vocabulary_for
+from main.commands import vocabulary_for
 from main.data.shards import samples
 from main.env.protocol import ProtocolError
 from main.learn.grpo import Clipped

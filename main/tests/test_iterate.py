@@ -15,14 +15,15 @@ import torch._dynamo
 
 from main.learn import batches
 from main.learn.advantage import FILE
-from main.cli import _learner, main, parser
+from main.cli import main, parser
 from main.learn.history import TrainingHistory
+from main.learn.trainer import Learner
 from main.network.config import LearningRates
 from main.iterate import COMPILED_VARIANTS, Driver, Settings, canonical, round_seeds, seeds_of
 from main.env.protocol import CHARACTERS, ProtocolError
-from main.play.testing import Journey
 from main.play.groups import groups_summary
 from main.tests import journeys
+from main.tests.journeys import Journey
 from main.env.seeds import split_group
 
 
@@ -132,7 +133,7 @@ def test_a_run_goes_on_from_the_step_it_was_cut_off_in(world):
     state = driver(world, eval_seeds=None).run(3)
     assert state["iterations"]["2"]["update"] == recorded and state["iterations"]["2"]["complete"]
     assert len(lines(world.output / "updates.jsonl")) == written
-    assert _learner(world.output / "policy/current", "cpu")[0].updates == recorded["updates"]
+    assert Learner.load(world.output / "policy/current", "cpu")[0].updates == recorded["updates"]
     # Finished iterations are left alone; another checkpoint's or seed root's output is
     # not continued, nor one that another process is writing.
     assert driver(world, eval_seeds=None).run(3) == state
@@ -312,7 +313,7 @@ def test_act_group_iterations_stop_once_the_policy_has_lost_its_entropy(world):
 def test_act_group_iterations_with_the_clipped_objective_anchor_to_the_checkpoint(world):
     acts = dict(eval_seeds=None)
     # The run's own rates: half the checkpoint's in every group.
-    saved = _learner(world.checkpoint, "cpu")[0]
+    saved = Learner.load(world.checkpoint, "cpu")[0]
     rates = world.root / "rates.json"
     rates.write_text(json.dumps({name: rate / 2 for name, rate in asdict(LearningRates.of(saved.config)).items()}))
     state = driver(world, **acts, learning_rates=str(rates)).run(2)

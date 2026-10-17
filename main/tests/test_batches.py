@@ -11,31 +11,39 @@ from main.learn import batches as awr
 from main.learn.advantage import FILE
 from main.data import shards
 from main.data.shards import RunShards, group_weights, samples
-from main.tests import journeys
+from main.env.protocol import CHARACTERS
+from main.play.groups import sample_groups, wave_summary
+from main.play.sampling import Samplers
+from main.tests.journeys import learner
+from main.tests.test_groups import BOUNDARIES, engine, runner
 
 
 def test_a_waves_advantages_are_kept_beside_it_with_what_made_them(tmp_path):
-    policy = journeys.learner()
-    directory = tmp_path / "round-0"
-    summary = journeys.sampled_round(policy, directory)
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, runner(policy), seeds, tmp_path / "groups", n=2, m=2, boundaries=BOUNDARIES)
+    directory = tmp_path / "groups" / "act1"
     shards = sorted(path.read_bytes() for path in (directory / "accepted").iterdir())
-    # The samples of a round are its decisions outside fights: every other macro-action.
+    # The samples of a wave are every decision of its segments, fights included.
     items = samples(next(RunShards(directory).windows(8)))
     places = {}
     for entry in items:
         places.setdefault(entry.run_id, []).append(entry.index)
-    assert len(places) == summary["accepted_runs"] == 10 and all(sorted(p) == [1, 3, 5] for p in places.values())
+    assert len(places) == wave_summary(directory)["written"] == 10
+    assert all(place and sorted(place) == list(range(len(place))) for place in places.values())
     runs = {run: [(index, 0.1 * index, 0.5 - 0.1 * index) for index in sorted(place)] for run, place in places.items()}
     identity = dict(kind="act-groups", ridge=1.0)
     header = advantage.write(directory, identity, runs)
     assert (header["format"], header["kind"], header["ridge"]) == ("rollout-advantages-v1", "act-groups", 1.0)
-    assert (header["runs"], header["decisions"], header["advantage"]["n"]) == (10, 30, 30)
+    assert (header["runs"], header["decisions"], header["advantage"]["n"]) == (10, len(items), len(items))
     assert advantage.header(directory) == header and advantage.current(directory, identity)
     assert not advantage.current(directory, dict(identity, ridge=2.0))
     table = advantage.read([directory])
     run = next(iter(places))
     assert set(table) == {(entry.run_id, entry.index) for entry in items}
-    assert [table[run, index] for index in (1, 3, 5)] == pytest.approx([0.4, 0.2, 0.0], abs=1e-6)
+    assert [table[run, index] for index in sorted(places[run])] == pytest.approx(
+        [0.5 - 0.1 * index for index in sorted(places[run])], abs=1e-6)
     # The shards are as they were.
     assert sorted(path.read_bytes() for path in (directory / "accepted").iterdir()) == shards
     with gzip.open(directory / FILE, "rt") as stream:

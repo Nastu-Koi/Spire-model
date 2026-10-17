@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from main.env.protocol import CHARACTERS, SCHEMA, ProtocolError, segment_key, validate_frame
-from main.encoding.representation import clean_frame
+from main.encoding.frames import clean_frame
 from main.env.rewards import require_reward_version
 from main.env.control import CONTROL_VERSION, controller_for, is_policy_frame, policy_macros
 from main.data.index import INDEX, read_index, row_source, sample_source
@@ -241,12 +241,6 @@ def group_weights(source_counts):
     return {key: 1 / (len(groups) * groups[key[:2]]) for key, n in source_counts.items() if n}
 
 
-def weight_totals(weights, source_counts):
-    """The total weight of every (character, phase, source): what a report shows of
-    the shares."""
-    return {key: weights[key] * n for key, n in source_counts.items() if n}
-
-
 def source_counts_of(runs):
     """Policy macro-actions per (character, phase, source) of runs in memory."""
     return Counter((r["character"], m["phase"], sample_source(r)) for r in runs for m in policy_macros(r))
@@ -258,7 +252,7 @@ class RunShards:
     The index holds one small row per run (identity, seed, character, macro counts
     by phase, source, shard), so splits and sample weights need no pass over the
     data. `directory` is one data directory or a list of them, read as one data
-    set: imports of demonstrations, or the rounds of a buffer. A row of a directory after the first remembers which it is
+    set: imports of demonstrations, or the waves of a round of act groups. A row of a directory after the first remembers which it is
     (`root`); a shard is named by (root, file). The first directory's rows are kept
     as they are read, so the large one goes first: every feeder holds the index.
     """

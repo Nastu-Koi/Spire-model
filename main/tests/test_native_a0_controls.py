@@ -19,7 +19,7 @@ from combat_solver_cli.trajectory import native_replay_error
 from main.env.crystal_rule import collection_candidate, plan
 from main.env.control import environment_action, is_policy_frame
 from main.env.protocol import action_semantics, execution_command, validate_frame
-from main.encoding.representation import clean_frame
+from main.encoding.frames import clean_frame
 from main.env.rewards import MilestoneLedger
 from main.env.treasure_rule import collection_candidate as treasure_candidate
 

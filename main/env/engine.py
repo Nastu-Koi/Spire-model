@@ -159,27 +159,6 @@ class CliEngine:
             raise ProtocolError("resume_fight: " + str(reply.get("message") or reply))
         return reply if reply.get("type") == "decision_frame" else self.send({"cmd": "advance_to_boundary"})
 
-    def enter_fight(self, commands):
-        """Enter a fight again from its entry save: `commands` are the two that
-        `saves.anchor_commands` gives. Returns the fight's first frame, as `reset` returns
-        a run's; the process is reused or replaced as `reset` does."""
-        install, room = commands
-        if self.closed or self.proc.poll() is not None or self.runs >= RUNS_PER_PROCESS:
-            self.close()
-            self._start()
-        reply = self.send(install)
-        if reply.get("code") == "run_not_ended":
-            self.close()
-            self._start()
-            reply = self.send(install)
-        self.runs += 1
-        if reply.get("type") != "anchor_installed":
-            raise ProtocolError("enter_anchor: " + str(reply.get("message") or reply))
-        frame = self.send(room)
-        if frame.get("type") == "error":
-            raise ProtocolError("anchor_room: " + str(frame.get("message") or frame))
-        return frame if frame.get("type") == "decision_frame" else self.send({"cmd": "advance_to_boundary"})
-
     def close(self):
         if self.closed:
             return

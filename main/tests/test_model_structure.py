@@ -11,7 +11,7 @@ import pytest
 import torch
 
 import main.network.model as network
-from main.cli import vocabulary_for
+from main.commands import vocabulary_for
 from main.network.config import ModelConfig, TrainConfig
 from main.data.shards import samples
 from main.learn.loader import batches

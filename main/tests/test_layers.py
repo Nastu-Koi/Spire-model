@@ -1,11 +1,12 @@
 """The subpackages of `main` depend on each other in one direction only.
 
-    env <- encoding <- data, network <- play <- learn <- iterate, cli
-                                  demos <- steam, cli
+    env <- encoding <- data, network <- play <- learn <- iterate <- commands <- cli
+                                  demos <- steam <- commands
 
 A subpackage imports from those of lower rank and from itself; `data` and `network`
 stand side by side and import neither each other. The modules at the top (`iterate`,
-`cli`, `steam`) may import anything below them.
+`steam`, `commands`) may import anything below them; `cli` is the entry and
+imports `commands`, and nothing imports `cli`.
 """
 
 import ast
@@ -61,4 +62,17 @@ def test_only_the_top_reaches_outside_main():
             continue
         wrong += [f"{module} -> {target}" for target in imports(path)
                   if target.split(".")[0] in ("spire_codex_data", "combat_solver_cli")]
+    assert not wrong, "\n".join(sorted(wrong))
+
+
+def test_nothing_imports_the_command_line_entry():
+    wrong = []
+    for path in MAIN.rglob("*.py"):
+        if "tests" in path.parts or path.name == "__main__.py":
+            continue
+        module = ".".join(path.relative_to(MAIN.parent).with_suffix("").parts)
+        if module == "main.cli":
+            continue
+        wrong += [f"{module} -> {target}" for target in imports(path)
+                  if target == "main.cli" or target.startswith("main.cli.")]
     assert not wrong, "\n".join(sorted(wrong))

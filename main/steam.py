@@ -1,9 +1,20 @@
-"""Live Steam inference, using exactly the recorder's public-state representation."""
+"""Live Steam inference, using exactly the recorder's public-state representation.
+
+The controller (`Controller`, run by `play`) stays beside the game for as long as it
+is asked to: it observes through the mod's bridge, decides, executes, and reports
+each decision to the mod's panel. The mod holds the switches (which phases the model
+plays, how long to wait between steps) and sends them with every observation. A
+phase the model does not play is `manual`; a run's end is `terminal` and the next run
+goes on; an error the controller meets is written down, reported, and halts the
+controller until the panel's reset.
+"""
 
 import fcntl
 import json
+import re
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import torch
@@ -12,13 +23,21 @@ from main.network.checkpoint import load_model
 from main.network.policy import SessionPolicy
 from main.env.control import environment_action
 from main.env.protocol import ProtocolError, validate_frame
-from main.encoding.representation import clean_frame
-from main.demos.recorder import PHASES, SELECTION_CANCEL, PublicSnapshot, cancel_offered, require
+from main.encoding.frames import clean_frame
+from main.demos.recorder.macros import PHASES, SELECTION_CANCEL, cancel_offered
+from main.demos.recorder.snapshot import PublicSnapshot, require
 from main.play.rollout import precision_context
 from main.env.public_history import HISTORY_VERSION
 
-# What the bridge must speak: card rewards arrive with their cards, a chest is opened by an action.
-PROTOCOL = "steam-live-v2"
+# What the bridge must speak: settings and the reset count with every answer, `manual`
+# and `halted` statuses, the `report` command.
+PROTOCOL = "steam-live-v3"
+DECISIONS, ERRORS, RUNS = "decisions.jsonl", "errors.jsonl", "runs.jsonl"
+RANKED = 5  # candidates reported beside the chosen one
+# What halts the controller until the panel's reset: anything the bridge, the frame or
+# the model can get wrong, short of a bug in this module's own control flow.
+HALTING = (ProtocolError, TimeoutError, RuntimeError, KeyError, ValueError, TypeError, OSError)
+IDLE = ("waiting", "manual", "paused", "halted")
 
 
 class SteamBridge:
@@ -36,6 +55,9 @@ class SteamBridge:
             ) from None
 
     def request(self, command, **payload):
+        """One request to the game and its answer. An answer of status `error` is
+        raised; `paused` (control switched off in the panel) is returned like the other
+        idle statuses, for the caller to wait out."""
         request_id = uuid.uuid4().hex
         request = self.directory / "request.json"
         # An answer of its own: the game cannot replace a file this side still has open.
@@ -58,8 +80,6 @@ class SteamBridge:
                         )
                     if result.get("status") == "error":
                         raise ProtocolError(result.get("error", "Steam bridge failed"))
-                    if result.get("status") == "paused":
-                        raise ProtocolError("Model control is switched off in the game's RunRecorder panel")
                     return result
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
@@ -74,11 +94,22 @@ class SteamBridge:
         self.lock.close()
 
 
+def parse_duration(text):
+    """Seconds of a duration such as `8h`, `45m`, `1h30m`, `90s` or `90`."""
+    text = str(text).strip().lower()
+    if re.fullmatch(r"\d+(\.\d+)?", text):
+        return float(text)
+    parts = re.findall(r"(\d+(?:\.\d+)?)([hms])", text)
+    if not parts or "".join(number + unit for number, unit in parts) != text:
+        raise ValueError(f"Not a duration (such as 8h, 45m, 1h30m or 90s): {text}")
+    return sum(float(number) * {"h": 3600, "m": 60, "s": 1}[unit] for number, unit in parts)
+
+
 def live_frame(message, selected=()):
     """The decision frame of a Steam state, in the engine protocol's terms."""
     state, token = message["state"], message["token"]
     ascension = state["run"]["ascension"]
-    require(type(ascension) is int and 0 <= ascension <= 10, "Start or load a single-player run")
+    require(type(ascension) is int and ascension >= 0, "Start or load a single-player run")
     raw_legal = state["legal"]
     require(raw_legal["status"] == "complete", "Steam has no complete legal action set")
     scope = raw_legal["scope"]
@@ -187,15 +218,40 @@ def live_frame(message, selected=()):
     }
 
 
-def choose_action(policy, message):
+def summary_of(frame, candidate_ref):
+    """A candidate in a few words: its verb, what it acts with and what it acts on,
+    named by the content of the entities it refers to."""
+    candidate = next(c for c in frame["legal"]["candidates"] if c["candidate_ref"] == candidate_ref)
+    names = {e["ref"]: e.get("content_id") or e.get("entity_type") for e in frame["public"]["entities"] if "ref" in e}
+
+    def named(refs):
+        return " ".join(str(names.get(ref, ref)).split(".")[-1] for ref in refs)
+    text = candidate["verb"]
+    if candidate.get("source_refs"):
+        text += " " + named(candidate["source_refs"])
+    if candidate.get("target_refs"):
+        text += " → " + named(candidate["target_refs"])
+    return text
+
+
+def decide(policy, message):
+    """The action to execute for a Steam decision, and what to tell the panel about it:
+    a selection is walked step by step as the model makes it. Returns (action, detail);
+    `detail` has the phase, the summary of the (last) choice, whether a controller
+    rule chose it, and the model's ranking of the alternatives."""
     selected = []
     while True:
         frame, commands = live_frame(message, selected)
+        phase = frame["public"]["phase"]
         rule = environment_action(frame)
         if rule is not None:
             # Use the same controller decision and reveal order as rollouts.
-            return commands[rule["candidate_ref"]]
-        choice = policy.choose(frame, sample=False)
+            return commands[rule["candidate_ref"]], dict(
+                phase=phase, summary=summary_of(frame, rule["candidate_ref"]), controller=True, ranking=[])
+        choice = policy.choose(frame, sample=False, top_k=RANKED)
+        detail = dict(phase=phase, summary=summary_of(frame, choice.candidate_ref), controller=False,
+                      ranking=[dict(summary=summary_of(frame, r["candidate_ref"]), probability=round(r["probability"], 4))
+                               for r in (getattr(choice, "ranking", None) or [])])
         action = commands[choice.candidate_ref]
         if action["command"] == "select_card" and message["state"]["legal"].get(
             "selection"
@@ -209,70 +265,182 @@ def choose_action(policy, message):
                     if action["command"] == "cancel"
                     else selected
                 },
-            }
+            }, detail
         else:
-            return action
+            return action, detail
 
 
-def play(checkpoint, directory, device="cpu", timeout=120, max_decisions=10000):
-    if timeout <= 0 or max_decisions < 1:
-        raise ValueError("timeout and max-decisions must be positive")
+def choose_action(policy, message):
+    return decide(policy, message)[0]
+
+
+def _now():
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+class Controller:
+    """The loop beside the game. `bridge` answers `request(command, **payload)`
+    (`SteamBridge`); `policy` chooses (`SessionPolicy`). The files the controller
+    writes under `directory` are the decisions, the errors and the runs' ends, one
+    JSON line each. `clock` and `sleep` are the monotonic clock and the pause, so
+    that a test can drive time."""
+
+    def __init__(self, bridge, policy, *, directory, trained_ascension=None, run_for=None, max_decisions=None,
+                 poll=0.2, clock=time.monotonic, sleep=time.sleep, say=None):
+        if run_for is not None and run_for <= 0 or max_decisions is not None and max_decisions < 1:
+            raise ValueError("run_for and max_decisions must be positive")
+        self.bridge, self.policy, self.directory = bridge, policy, Path(directory)
+        self.trained, self.run_for, self.max_decisions = trained_ascension, run_for, max_decisions
+        self.poll, self.clock, self.sleep = poll, clock, sleep
+        self.say = say or (lambda record: print(json.dumps(record, ensure_ascii=False), flush=True))
+        self.stats = dict(runs=0, wins=0, decisions=0, errors=0)
+        self.deadline = None
+        self.last_executed = None
+        self.previous = None  # the last status observed
+        self.reset_count = None  # the panel's reset count, as the bridge last told it
+        self.warned = None  # the episode the ascension warning was given for
+
+    def write(self, name, record):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with (self.directory / name).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def due(self):
+        """Why the controller should stop now, or None."""
+        if self.deadline is not None and self.clock() >= self.deadline:
+            return "run_for"
+        if self.max_decisions is not None and self.stats["decisions"] >= self.max_decisions:
+            return "decision_limit"
+        return None
+
+    def run(self):
+        if self.run_for is not None:
+            self.deadline = self.clock() + self.run_for
+        status = None
+        try:
+            while (status := self.due()) is None:
+                try:
+                    self.step()
+                except HALTING as exc:
+                    status = self.halt(exc)
+                    if status:
+                        break
+        except KeyboardInterrupt:
+            status = "interrupted"
+        return dict(self.stats, status=status)
+
+    def note_reset(self, message):
+        """The panel's reset count: a change means the user reset the game side, so
+        the session starts over from the state as it stands."""
+        count = message.get("reset_count")
+        if self.reset_count is None:
+            self.reset_count = count
+        elif count != self.reset_count:
+            self.reset_count = count
+            self.policy.reset()
+
+    def step(self):
+        message = self.bridge.request("observe")
+        self.note_reset(message)
+        status = message["status"]
+        if status == "decision":
+            self.act(message, message.get("settings") or {})
+        elif status == "terminal":
+            if self.previous != "terminal":
+                record = dict(time=_now(), victory=message.get("victory"), decisions=self.stats["decisions"])
+                self.stats["runs"] += 1
+                self.stats["wins"] += bool(message.get("victory"))
+                self.write(RUNS, record)
+                self.say(dict(run=self.stats["runs"], **record))
+            self.sleep(self.poll)
+        elif status == "waiting":
+            # A screen with nothing to decide: the mod advances it when it is one it
+            # may, and answers `waiting` otherwise (the menu, an animation, a manual phase).
+            self.bridge.request("advance")
+            self.sleep(self.poll)
+        elif status in IDLE:
+            self.sleep(self.poll)
+        else:
+            raise ProtocolError("Unexpected Steam bridge status: " + str(status))
+        self.previous = status
+
+    def act(self, message, settings):
+        ascension, episode = message["state"]["run"]["ascension"], message.get("episode")
+        if self.trained is not None and ascension != self.trained and self.warned != episode:
+            self.warned = episode
+            self.bridge.request("report", kind="warning", time=_now(),
+                                message=f"检查点在 A{self.trained} 训练，当前对局是 A{ascension}")
+        action, detail = decide(self.policy, message)
+        interval = float(settings.get("step_interval_seconds") or 0)
+        if self.last_executed is not None and interval > 0:
+            wait = self.last_executed + interval - self.clock()
+            if wait > 0:
+                self.sleep(wait)
+        result = self.bridge.request("execute", token=message["token"], action=action)
+        if result["status"] == "stale" or result["status"] in IDLE:
+            # The game moved on, or the panel changed its mind, between observing and
+            # acting: look again.
+            self.policy.reset()
+            return
+        require(result["status"] == "executed", "Steam did not execute the action")
+        self.stats["decisions"] += 1
+        self.last_executed = self.clock()
+        run = message["state"]["run"]
+        record = dict(time=_now(), episode=episode, decision=self.stats["decisions"], act=run.get("act"),
+                      floor=run.get("floor"), action=action, **detail)
+        self.write(DECISIONS, record)
+        self.say(record)
+        self.bridge.request("report", kind="decision", **record)
+
+    def halt(self, exc):
+        """An error: write it down, report it to the panel, and wait for the panel's
+        reset before going on. Returns the reason to stop instead, if one comes due
+        while waiting."""
+        record = dict(time=_now(), error=str(exc), exception=type(exc).__name__, after=self.previous)
+        self.stats["errors"] += 1
+        self.write(ERRORS, record)
+        self.say(dict(halted=record))
+        self.policy.reset()
+        waited, acknowledged = self.reset_count, False
+        while True:
+            if (status := self.due()) is not None:
+                return status
+            try:
+                if not acknowledged:
+                    self.bridge.request("report", kind="error", **record)
+                    acknowledged = True
+                message = self.bridge.request("observe")
+            except HALTING:
+                # The game may be gone for a while: keep trying, without a new record each time.
+                self.sleep(max(self.poll, 1.0))
+                continue
+            count = message.get("reset_count")
+            if count is None:
+                return None  # a bridge that cannot halt: go on as before
+            if count != waited:
+                self.reset_count = count
+                self.policy.reset()
+                self.previous = None
+                return None
+            self.sleep(self.poll)
+
+
+def play(checkpoint, directory, device="cpu", *, request_timeout=120, run_for=None, max_decisions=None):
+    """Control the game through the bridge in `directory` until `run_for` seconds
+    pass, `max_decisions` are made, or the process is interrupted; returns the counts."""
+    if request_timeout <= 0:
+        raise ValueError("request_timeout must be positive")
     model, vocabulary, manifest = load_model(checkpoint, device)
     model.eval()
     policy = SessionPolicy(model, vocabulary)
-    trained = manifest["training"]["ascension"]
-    bridge = SteamBridge(directory, timeout)
-    count, last_progress = 0, time.monotonic()
+    bridge = SteamBridge(directory, request_timeout)
     try:
         with (
             torch.inference_mode(),
             precision_context(model, manifest["training"]["precision"]),
         ):
-            while count < max_decisions:
-                message = bridge.request("observe")
-                status = message["status"]
-                if status == "terminal":
-                    return {
-                        "decisions": count,
-                        "status": status,
-                        "victory": message.get("victory"),
-                    }
-                if status == "decision":
-                    require(message["state"]["run"]["ascension"] == trained,
-                            f"The checkpoint was trained on ascension {trained}")
-                    action = choose_action(policy, message)
-                    result = bridge.request(
-                        "execute", token=message["token"], action=action
-                    )
-                    if result["status"] == "stale":
-                        # The game moved on between observing and acting: look again,
-                        # but not forever.
-                        if time.monotonic() - last_progress > timeout:
-                            raise TimeoutError("Steam state kept changing before an action could be executed")
-                        policy.reset()
-                        continue
-                    require(
-                        result["status"] == "executed",
-                        "Steam did not execute the action",
-                    )
-                    count += 1
-                    last_progress = time.monotonic()
-                    print(
-                        json.dumps(
-                            {"decision": count, "action": action}, ensure_ascii=False
-                        ),
-                        flush=True,
-                    )
-                elif status == "waiting":
-                    if time.monotonic() - last_progress > timeout:
-                        raise TimeoutError(
-                            "No playable Steam decision: "
-                            + message.get("reason", "waiting")
-                        )
-                    bridge.request("advance")
-                    time.sleep(0.2)
-                else:
-                    raise ProtocolError("Unexpected Steam bridge status: " + status)
-        return {"decisions": count, "status": "decision_limit"}
+            return Controller(bridge, policy, directory=bridge.directory,
+                              trained_ascension=manifest["training"]["ascension"],
+                              run_for=run_for, max_decisions=max_decisions).run()
     finally:
         bridge.close()

@@ -15,7 +15,8 @@ import torch
 from main.encoding import rules
 from main.network.config import ModelConfig, TrainConfig
 from main.network.model import PolicyNetwork
-from main.encoding.representation import ENCODING_VERSION, Vocabulary
+from main.encoding.representation import ENCODING_VERSION
+from main.encoding.vocabulary import Vocabulary
 from main.network.optim import TRAINING_VERSION
 from main.env.rewards import REWARD_VERSION
 from main.env.public_history import HISTORY_VERSION, require_history_version
