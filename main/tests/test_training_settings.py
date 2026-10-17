@@ -512,3 +512,31 @@ def test_a_profile_sets_the_sampling_temperatures_anew_and_nothing_else(tmp_path
     del manifest["training"]["combat_temperature"], manifest["training"]["other_temperature"]
     (saved / "manifest.json").write_text(json.dumps(manifest))
     assert _learner(saved, "cpu", inference=True)[0].config.temperatures == TrainConfig().temperatures
+
+
+def test_batched_muon_steps_as_torch_muon_does_matrix_by_matrix():
+    from main.network.optim import BatchedMuon
+
+    torch.manual_seed(0)
+    shapes = [(16, 24), (16, 24), (40, 8), (12, 12)]
+    theirs = [torch.nn.Parameter(torch.randn(shape)) for shape in shapes]
+    ours = [torch.nn.Parameter(parameter.detach().clone()) for parameter in theirs]
+    reference = torch.optim.Muon(theirs, lr=0.02, weight_decay=0.1, momentum=0.9, ns_steps=5)
+    batched = BatchedMuon(ours, lr=0.02, weight_decay=0.1, momentum=0.9, ns_steps=5)
+    for _ in range(3):
+        grads = [torch.randn(shape) for shape in shapes]
+        for parameter, grad in zip(theirs, grads):
+            parameter.grad = grad.clone()
+        for parameter, grad in zip(ours, grads):
+            parameter.grad = grad.clone()
+        reference.step()
+        batched.step()
+        for a, b in zip(theirs, ours):
+            torch.testing.assert_close(a, b, rtol=1e-2, atol=1e-3)
+        for a, b in zip(theirs, ours):
+            torch.testing.assert_close(reference.state[a]["momentum_buffer"], batched.state[b]["momentum_buffer"],
+                                       rtol=0, atol=0)
+    # A checkpoint of one resumes with the other: the state is the parent's.
+    again = BatchedMuon([torch.nn.Parameter(p.detach().clone()) for p in theirs], lr=0.02)
+    again.load_state_dict(reference.state_dict())
+    assert set(again.state_dict()["state"][0]) == {"momentum_buffer"}

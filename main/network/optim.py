@@ -107,6 +107,79 @@ class BootstrapSchedule:
         self.prepare()
 
 
+class BatchedMuon(torch.optim.Muon):
+    """Muon whose Newton-Schulz iterations run on the matrices of one shape together.
+
+    PyTorch's Muon orthogonalizes every matrix on its own: five iterations of three
+    small matrix products for each of a hundred-odd matrices, a thousand kernel
+    launches an update, the host taking longer to launch them than the GPU to run
+    them. Here the gradients of one shape are stacked and iterated as one batched
+    product; the momentum, the iteration's arithmetic and the update are those of
+    `torch.optim.Muon` matrix by matrix, up to the rounding of batched kernels. The
+    state is the parent's, so a checkpoint of either resumes with the other."""
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            params, grads, buffers = [], [], []
+            self._init_group(group, params, grads, buffers)
+            if not params:
+                continue
+            momentum, lr = group["momentum"], _scalar(group["lr"])
+            torch._foreach_lerp_(buffers, grads, 1 - momentum)
+            updates = torch._foreach_lerp(grads, buffers, momentum) if group["nesterov"] else buffers
+            by_shape = {}
+            for index, param in enumerate(params):
+                by_shape.setdefault(tuple(param.shape), []).append(index)
+            for shape, indices in by_shape.items():
+                orthogonal = _orthogonalized(torch.stack([updates[index] for index in indices]),
+                                             group["ns_coefficients"], group["ns_steps"], group["eps"])
+                adjusted = _adjust_lr(lr, group["adjust_lr_fn"], torch.Size(shape))
+                chosen = [params[index] for index in indices]
+                torch._foreach_mul_(chosen, 1 - lr * group["weight_decay"])
+                torch._foreach_add_(chosen, list(orthogonal.unbind(0)), alpha=-adjusted)
+        return loss
+
+
+def _scalar(value):
+    return float(value) if isinstance(value, torch.Tensor) else value
+
+
+def _orthogonalized(grads, coefficients, steps, eps):
+    """`_zeropower_via_newtonschulz` of `torch.optim._muon` over a stack of matrices
+    [n, rows, columns], one batched product in place of n."""
+    a, b, c = coefficients
+    x = grads.bfloat16()
+    if grads.size(1) > grads.size(2):
+        x = x.transpose(1, 2)
+    x = x / x.norm(dim=(1, 2), keepdim=True).clamp(min=eps)
+    for _ in range(steps):
+        gram = x @ x.transpose(1, 2)
+        gram = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+        x = torch.baddbmm(x, gram, x, beta=a)
+    if grads.size(1) > grads.size(2):
+        x = x.transpose(1, 2)
+    return x
+
+
+def _adjust_lr(lr, adjust_lr_fn, shape):
+    """Muon's learning rate for a matrix's shape (`torch.optim._muon._adjust_lr`)."""
+    rows, columns = shape[:2]
+    if adjust_lr_fn is None or adjust_lr_fn == "original":
+        ratio = math.sqrt(max(1, rows / columns))
+    elif adjust_lr_fn == "match_rms_adamw":
+        ratio = 0.2 * math.sqrt(max(rows, columns))
+    elif adjust_lr_fn == "spectral_unclamped":
+        ratio = math.sqrt(rows / columns)
+    else:
+        ratio = 1.0
+    return lr * ratio
+
+
 class HybridOptimizer(torch.optim.Optimizer):
     """Expose Muon and AdamW as one optimizer to schedulers and Accelerate."""
 
@@ -212,7 +285,7 @@ def build_optimizer(model, config):
         eps=1e-8,
         fused=fused,
     )
-    muon = torch.optim.Muon(
+    muon = BatchedMuon(
         [
             {
                 "params": [parameter for _, parameter in muon_parameters],
