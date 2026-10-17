@@ -44,19 +44,25 @@ def relation_biases(tables, edges, valid, *, dtype=None, elements=BIAS_ELEMENTS)
     chunk = max(1, min(len(tables), elements // max(pairs * heads, 1)))
     if edges.numel():
         sequence, query, key, role = edges.unbind(-1)
-        cells = (sequence * tokens + query) * tokens + key
+        # Scattered straight into the [layer, sequence, head, query, key] layout the
+        # layers read, so that no pass over the dense bias is spent rearranging it:
+        # an edge's cell in every (layer, head) plane.
+        cells = (sequence * heads * tokens + query) * tokens + key
+        planes = torch.arange(heads, device=edges.device) * tokens * tokens
     biases = []
     for start in range(0, len(tables), chunk):
         part = tables[start:start + chunk]
         weight = torch.cat([table.weight for table in part], dim=1) if len(part) > 1 else part[0].weight
-        flat = weight.new_zeros((pairs, weight.shape[1]))
+        bias = weight.new_zeros((len(part), sequences, heads, tokens, tokens))
         if edges.numel():
-            flat = flat.index_add(0, cells, F.embedding(role, weight, padding_idx=0))
-        bias = flat.view(sequences, tokens, tokens, len(part), heads).permute(3, 0, 4, 1, 2)
-        bias = bias.masked_fill(~valid[None, :, None, None, :], -float("inf"))
+            layers = torch.arange(len(part), device=edges.device) * sequences * heads * tokens * tokens
+            targets = cells[:, None, None] + layers[None, :, None] + planes[None, None, :]
+            # In place into the fresh buffer: one pass over the dense bias fewer.
+            bias.view(-1).index_add_(0, targets.reshape(-1), F.embedding(role, weight, padding_idx=0).reshape(-1))
+        bias = bias.masked_fill_(~valid[None, :, None, None, :], -float("inf"))
         if dtype is not None:
             bias = bias.to(dtype)
-        biases.extend(bias.contiguous().unbind(0))
+        biases.extend(bias.unbind(0))
     return biases
 
 
