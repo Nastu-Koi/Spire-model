@@ -171,6 +171,11 @@ class TrainConfig:
     # Demonstrations keep their own; the player entity carries it into the model.
     ascension: int = 0
 
+    @classmethod
+    def from_profile(cls, path):
+        """The training section of a native profile (`configs/*.json`)."""
+        return cls(**json.loads(Path(path).read_text())["training"])
+
     @property
     def temperatures(self):
         """The sampling temperature of each phase, as runs record it."""
@@ -255,8 +260,3 @@ class TrainConfig:
         ):
             raise ValueError("Capacity buckets must be sorted unique positive sizes")
 
-
-def save_config(path, model, training):
-    Path(path).write_text(
-        json.dumps({"model": asdict(model), "training": asdict(training)}, indent=2)
-    )

@@ -9,8 +9,7 @@ from main.env.protocol import CHARACTERS, ProtocolError
 from main.play.groups import cuts, groups_summary, per_wave, resume_jobs, sample_groups, save_rows, start_jobs, waves
 from main.play.rollout import RolloutRunner, stand
 from main.play.sampling import Samplers
-from main.play.testing import Journey
-from main.tests.journeys import TEMPERATURES, learner
+from main.tests.journeys import TEMPERATURES, Journey, learner
 
 ROOMS, ACTS = 6, 2  # three acts of two rooms
 BOUNDARIES = (2, 3)

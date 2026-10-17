@@ -241,12 +241,6 @@ def group_weights(source_counts):
     return {key: 1 / (len(groups) * groups[key[:2]]) for key, n in source_counts.items() if n}
 
 
-def weight_totals(weights, source_counts):
-    """The total weight of every (character, phase, source): what a report shows of
-    the shares."""
-    return {key: weights[key] * n for key, n in source_counts.items() if n}
-
-
 def source_counts_of(runs):
     """Policy macro-actions per (character, phase, source) of runs in memory."""
     return Counter((r["character"], m["phase"], sample_source(r)) for r in runs for m in policy_macros(r))

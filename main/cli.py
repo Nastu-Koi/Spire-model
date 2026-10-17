@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 from main.play.buffer import sample_round
-from main.network.checkpoint import archive_checkpoint, load_model, restore_training, save_checkpoint
+from main.network.checkpoint import archive_checkpoint, load_model, save_checkpoint
 from main.network.config import LearningRates, ModelConfig, TrainConfig
 from main.env.control import environment_action
 from main.data.shards import (HELDOUT_FRACTION, RunShards, at_ascension, audit_files, combat_from, extent, load_runs,
@@ -29,7 +29,6 @@ from main.env.protocol import (
     validate_frame,
 )
 from main.encoding.representation import Vocabulary
-from main.env.rewards import MilestoneLedger
 from main.play.rollout import RolloutRunner, collect_round, precision_context, write_run
 from main.play.sampling import Samplers
 from main.env.runtime import configure_runtime
@@ -344,78 +343,6 @@ def parser():
     return p
 
 
-def _learner(checkpoint, device, *, weights_only=False, training=None, decay_updates=0, inference=False,
-             rates=None):
-    """A checkpoint's policy with its training state. `inference` loads it to play only:
-    nothing is resumed, so a checkpoint whose training has ended, a finished decay among
-    them, is accepted. `rates` (`LearningRates`) are the rates the run trains at
-    instead of the checkpoint's; the optimizer's state and the schedule's progress go on."""
-    model, vocab, manifest = load_model(checkpoint, device, allow_legacy_encoding=weights_only)
-    progress = manifest.get("progress", {})
-    saved_training = TrainConfig(**manifest["training"])
-    if not weights_only and training is not None:
-        # The sampling settings are the profile's, the rates a file's if given; the profile
-        # may differ from the checkpoint in nothing else.
-        training = saved_training.with_sampling(training, rates=rates is not None)
-    if rates is not None:
-        training = (training or saved_training).with_rates(rates)
-    if weights_only:
-        vocab = vocab.expanded()
-    learner = Learner(
-        model,
-        vocab,
-        training or saved_training,
-        policy_version=0 if weights_only else progress.get("policy_version", 0),
-        decay_updates=decay_updates,
-    )
-    if weights_only:
-        learner.checkpoint_metadata = {
-            "training_seeds": progress.get("training_seeds", []),
-            "initialization": "weights-only",
-            "source_checkpoint": str(Path(checkpoint).resolve()),
-            "source_updates": progress.get("updates", 0),
-        }
-        return learner, manifest
-    if inference:
-        learner.updates = progress.get("updates", 0)
-    else:
-        if "optimizer" not in manifest:
-            raise ValueError("Checkpoint has no optimizer state; use --weights-only")
-        progress = restore_training(checkpoint, learner.optimizer, learner.scheduler)
-        learner.updates = progress.get("updates", 0)
-    learner.checkpoint_metadata = {
-        k: v
-        for k, v in manifest["progress"].items()
-        if k not in {"policy_version", "updates"}
-    }
-    return learner, manifest
-
-
-def _save(path, learner, extra=None):
-    previous = getattr(learner, "checkpoint_metadata", {})
-    metadata = {**previous, **(extra or {})}
-    metadata["training_seeds"] = sorted(
-        set(previous.get("training_seeds", []))
-        | set(metadata.get("training_seeds", []))
-    )
-    save_checkpoint(
-        path,
-        learner.model,
-        learner.vocabulary,
-        learner.optimizer,
-        learner.scheduler,
-        overwrite=Path(path).name == "current",
-        training=learner.config,
-        progress={
-            **metadata,
-            "reward_version": MilestoneLedger().version,
-            "policy_version": learner.policy_version,
-            "updates": learner.updates,
-        },
-    )
-    learner.checkpoint_metadata = metadata
-
-
 def _data_metadata(runs):
     contracts = {fingerprint(r["contract"]): r["contract"] for r in runs}
     return {
@@ -425,11 +352,6 @@ def _data_metadata(runs):
             sorted((r["character"], str(r["seed"])) for r in runs)
         ),
     }
-
-
-def _profile(path):
-    """The training section of a native profile, or None without a path."""
-    return TrainConfig(**json.loads(Path(path).read_text())["training"]) if path else None
 
 
 def _dataset(paths):
@@ -498,9 +420,8 @@ def main(argv=None):
             with torch.device(args.device):
                 model = PolicyNetwork(config)
             learner = Learner(model, vocabulary, training)
-            _save(
+            learner.save(
                 args.output,
-                learner,
                 {
                     "runtime": runtime,
                     "engine_contract": frames[0]["contract"],
@@ -586,7 +507,7 @@ def main(argv=None):
             profile = json.loads(Path(args.config).read_text()) if args.config else None
             rates = LearningRates.load(args.learning_rates) if args.learning_rates else None
             if args.checkpoint:
-                learner, _ = _learner(args.checkpoint, args.device,
+                learner, _ = Learner.load(args.checkpoint, args.device,
                                       weights_only=args.weights_only,
                                       training=TrainConfig(**profile["training"]) if profile else None,
                                       decay_updates=args.decay_updates, rates=rates)
@@ -632,9 +553,8 @@ def main(argv=None):
                     duration_seconds=time.monotonic() - epoch_started,
                     policy_version=learner.policy_version,
                 )
-                _save(
+                learner.save(
                     output / "current",
-                    learner,
                     {
                         **metadata,
                         "completed_bootstrap_epochs": epoch,
@@ -660,7 +580,7 @@ def main(argv=None):
                 runs = at_ascension(runs, args.ascension)
             if args.combat_from:
                 runs = combat_from(runs, args.combat_from)
-            learner, _ = _learner(args.checkpoint, args.device, inference=True)
+            learner, _ = Learner.load(args.checkpoint, args.device, inference=True)
             _, held = split_held_out(runs)
             if not extent(held)["macros"]:
                 raise ProtocolError("The data set has no macro-actions in its held-out seed groups")
@@ -729,9 +649,9 @@ def main(argv=None):
             # collect and evaluate: the policy plays, in the engines of sampling processes.
             if args.workers < 1 or (args.processes is not None and args.processes < 1):
                 raise ValueError("Sampling needs positive numbers of engines and processes")
-            learner, manifest = _learner(
+            learner, manifest = Learner.load(
                 args.checkpoint, args.device, inference=True,
-                training=_profile(args.config) if args.command == "collect" else None,
+                training=TrainConfig.from_profile(args.config) if args.command == "collect" else None,
             )
             seeds = json.loads(Path(args.seeds).read_text())
             if args.command == "evaluate":

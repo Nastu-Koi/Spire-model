@@ -8,11 +8,16 @@ from collections import Counter
 import pytest
 
 from main.cli import main
-from main.data.shards import RunShards, at_ascension, combat_from, extent, group_weights, samples, weight_totals
+from main.data.shards import RunShards, at_ascension, combat_from, extent, group_weights, samples
 from main.data.index import INDEX, index_row, read_index, rebuild_index, row_source, sample_source
 from main.demos.independent import convert_group, import_samples
 from main.env.protocol import CHARACTERS, ProtocolError, execution_command
 from main.play.testing import SyntheticEngine
+
+
+def weight_totals(weights, source_counts):
+    """The total weight of every (character, phase, source)."""
+    return {key: weights[key] * n for key, n in source_counts.items() if n}
 from main.tests.test_independent import learner_for
 from spire_codex_data.anchor import row
 

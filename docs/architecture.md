@@ -30,7 +30,7 @@ steam_recorder/     Steam Mod：录制与控制桥接（C#）
 sts2-cli/           无头引擎
 ```
 
-依赖只朝一个方向：`env ← encoding ← data, network ← play ← learn ← iterate, cli`；`demos` 在 `data` 之上，供 `cli` 与 `steam` 使用。`data` 与 `network` 互不依赖。`main` 内部除顶层模块外不引用 `spire_codex_data` 与 `combat_solver_cli`，后两者反过来引用 `main`。`main/tests/test_layers.py` 检查这一点。
+依赖只朝一个方向：`env ← encoding ← data, network ← play ← learn ← iterate ← cli`；`demos` 在 `data` 之上，供 `cli` 与 `steam` 使用；`cli` 是入口，没有模块引用它。`data` 与 `network` 互不依赖。`main` 内部除顶层模块外不引用 `spire_codex_data` 与 `combat_solver_cli`，后两者反过来引用 `main`。`main/tests/test_layers.py` 检查这一点。
 
 ## 数据流
 
