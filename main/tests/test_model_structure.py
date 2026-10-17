@@ -144,3 +144,32 @@ def test_200m_configuration_meets_its_budget():
     # near the 20M profile's budget (41943040 pairs x 4 heads).
     assert training.pair_budget * config.num_heads <= 41943040 * 4 * 1.25
     assert training.token_budget * config.hidden_size <= 163840 * 256 * 2
+
+
+def test_the_biases_of_every_layer_from_one_scatter_equal_the_layers_own():
+    from main.network.attention import relation_bias, relation_biases
+
+    torch.manual_seed(0)
+    tables = torch.nn.ModuleList([torch.nn.Embedding(16, 4, padding_idx=0) for _ in range(5)])
+    for table in tables:
+        torch.nn.init.normal_(table.weight)
+        with torch.no_grad():
+            table.weight[0].zero_()
+    valid = torch.tensor([[True] * 6 + [False] * 2, [True] * 3 + [False] * 5, [True] * 8])
+    # Several relations between one pair add up; a padded key is masked whatever its relations.
+    edges = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 7], [0, 5, 7, 1], [1, 0, 1, 9], [2, 7, 0, 15], [2, 7, 0, 15]])
+    expected = [relation_bias(table, edges, valid) for table in tables]
+    for elements in (1 << 26, 1):  # every table at once; one at a time
+        found = relation_biases(list(tables), edges, valid, elements=elements)
+        assert len(found) == len(tables) and all(torch.equal(a, b) for a, b in zip(found, expected))
+        assert all(bias.is_contiguous() for bias in found)
+    assert relation_biases(list(tables), edges, valid, dtype=torch.bfloat16)[1].dtype == torch.bfloat16
+    assert torch.equal(relation_biases(list(tables), edges[:0], valid)[2], relation_bias(tables[2], edges[:0], valid))
+    # The gradients are the tables' own, and the padding row takes none.
+    sum(bias.masked_fill(~torch.isfinite(bias), 0).pow(2).sum() for bias in expected).backward()
+    wanted = [table.weight.grad.clone() for table in tables]
+    for table in tables:
+        table.weight.grad = None
+    sum(bias.masked_fill(~torch.isfinite(bias), 0).pow(2).sum() for bias in relation_biases(list(tables), edges, valid)).backward()
+    assert all(torch.allclose(table.weight.grad, grad) for table, grad in zip(tables, wanted))
+    assert all(table.weight.grad[0].eq(0).all() for table in tables)

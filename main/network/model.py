@@ -8,7 +8,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
-from main.network.attention import Attention, relation_bias
+from main.network.attention import Attention, relation_bias, relation_biases
 from main.encoding.batch import collate
 from main.network.config import ModelConfig
 from main.encoding.representation import Observation
@@ -240,13 +240,12 @@ class PolicyNetwork(nn.Module):
     def device(self):
         return self.query.weight.device
 
-    def _relation_bias(self, table, edges, valid):
-        bias = relation_bias(table, edges, valid)
-        # Every head of the layer reads this bias: convert it to the attention dtype once.
+    def _relation_biases(self, edges, valid):
+        """Every global layer's relation bias, from as few scatters as the batch's
+        pairs allow (`relation_biases`), in the attention dtype."""
         device = valid.device.type
-        if torch.is_autocast_enabled(device):
-            bias = bias.to(torch.get_autocast_dtype(device))
-        return bias.contiguous()
+        dtype = torch.get_autocast_dtype(device) if torch.is_autocast_enabled(device) else None
+        return relation_biases(list(self.relation), edges, valid, dtype=dtype)
 
     def _entities(self, batch):
         """Run the entity encoder in FP32 and return its tokens.
@@ -288,8 +287,7 @@ class PolicyNetwork(nn.Module):
             .index_copy(0, slots, tokens)
             .view(rows, pad, -1)
         )
-        for block, table in zip(self.blocks, self.relation):
-            bias = self._relation_bias(table, batch.relations, valid)
+        for block, bias in zip(self.blocks, self._relation_biases(batch.relations, valid)):
             if (
                 self.config.checkpoint_layers
                 and self.training

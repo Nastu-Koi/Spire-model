@@ -26,6 +26,40 @@ def relation_bias(table, edges, valid):
     return bias.masked_fill(~valid[:, None, None, :], -float("inf"))
 
 
+# Elements of bias (pairs x heads x layers) one scatter of `relation_biases` builds at
+# most: a quarter of a gigabyte in FP32. A sampling pass (a few thousand pairs) gets
+# every layer's bias from one scatter; a training microbatch at its pair budget
+# (tens of millions of pairs) goes layer by layer, as `relation_bias` would.
+BIAS_ELEMENTS = 1 << 26
+
+
+def relation_biases(tables, edges, valid, *, dtype=None, elements=BIAS_ELEMENTS):
+    """The biases of several layers' tables at once, equal in value to `relation_bias`
+    of each: the tables are looked up side by side, so that a pass makes a few
+    scatters and fills instead of one of each per layer. Returns a list, one
+    [sequences, heads, tokens, tokens] bias per table, converted to `dtype` if given."""
+    sequences, tokens = valid.shape
+    pairs = sequences * tokens * tokens
+    heads = tables[0].embedding_dim
+    chunk = max(1, min(len(tables), elements // max(pairs * heads, 1)))
+    if edges.numel():
+        sequence, query, key, role = edges.unbind(-1)
+        cells = (sequence * tokens + query) * tokens + key
+    biases = []
+    for start in range(0, len(tables), chunk):
+        part = tables[start:start + chunk]
+        weight = torch.cat([table.weight for table in part], dim=1) if len(part) > 1 else part[0].weight
+        flat = weight.new_zeros((pairs, weight.shape[1]))
+        if edges.numel():
+            flat = flat.index_add(0, cells, F.embedding(role, weight, padding_idx=0))
+        bias = flat.view(sequences, tokens, tokens, len(part), heads).permute(3, 0, 4, 1, 2)
+        bias = bias.masked_fill(~valid[None, :, None, None, :], -float("inf"))
+        if dtype is not None:
+            bias = bias.to(dtype)
+        biases.extend(bias.contiguous().unbind(0))
+    return biases
+
+
 class Attention(nn.Module):
     def __init__(self, width, heads, *, backend="sdpa"):
         super().__init__()
