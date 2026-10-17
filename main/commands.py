@@ -110,15 +110,8 @@ def _dataset(paths):
 def run_play_steam(args, runtime):
     from main.steam import play
 
-    emit(
-        play(
-            args.checkpoint,
-            args.bridge_dir,
-            args.device,
-            args.timeout,
-            args.max_decisions,
-        )
-    )
+    emit(play(args.checkpoint, args.bridge_dir, args.device, request_timeout=args.request_timeout,
+              run_for=args.run_for, max_decisions=args.max_decisions))
 
 
 def run_parameters(args, runtime):

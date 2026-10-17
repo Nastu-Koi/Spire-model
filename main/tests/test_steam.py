@@ -32,7 +32,7 @@ class Policy:
     def __init__(self, verb):
         self.verb, self.frames = verb, []
 
-    def choose(self, frame, sample=False):
+    def choose(self, frame, sample=False, top_k=0):
         self.frames.append(frame)
         return type("Choice", (), dict(candidate_ref=next(
             c["candidate_ref"] for c in frame["legal"]["candidates"] if c["verb"] == self.verb)))
@@ -214,8 +214,10 @@ def test_the_bridge_must_speak_the_controllers_protocol(tmp_path, monkeypatch):
     assert reply(tmp_path, monkeypatch, status="waiting", protocol=PROTOCOL)["status"] == "waiting"
     with pytest.raises(ProtocolError, match="reinstall"):
         reply(tmp_path, monkeypatch, status="waiting")
-    with pytest.raises(ProtocolError, match="switched off"):
-        reply(tmp_path, monkeypatch, status="paused", protocol=PROTOCOL)
+    # Control switched off in the panel is an idle answer the controller waits out, not an error.
+    assert reply(tmp_path, monkeypatch, status="paused", protocol=PROTOCOL)["status"] == "paused"
+    with pytest.raises(ProtocolError, match="not ready"):
+        reply(tmp_path, monkeypatch, status="error", error="Game UI is not ready", protocol=PROTOCOL)
 
 
 def test_the_map_names_the_bosses_of_the_act():

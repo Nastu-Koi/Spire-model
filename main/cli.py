@@ -12,6 +12,7 @@ import torch
 from main.env.protocol import CHARACTERS, ProtocolError
 from main.env.runtime import configure_runtime
 from main.commands import COMMANDS
+from main.steam import parse_duration
 
 
 def parser():
@@ -236,8 +237,11 @@ def parser():
     )
     x.add_argument("--checkpoint", required=True)
     x.add_argument("--bridge-dir", required=True)
-    x.add_argument("--timeout", type=float, default=120)
-    x.add_argument("--max-decisions", type=int, default=10000)
+    x.add_argument("--run-for", type=parse_duration,
+                   help="How long to stay beside the game, such as 8h, 45m or 90s; default until interrupted")
+    x.add_argument("--request-timeout", type=float, default=120,
+                   help="Seconds to wait for the game to answer one bridge request")
+    x.add_argument("--max-decisions", type=int, help="Stop after this many decisions; default no limit")
     x = sub.add_parser("inspect")
     x.add_argument("--engine-root")
     x.add_argument("--character", choices=CHARACTERS, default="Ironclad")
