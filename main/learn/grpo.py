@@ -34,6 +34,7 @@ from dataclasses import replace
 import torch
 
 from main.data.shards import extent
+from main.encoding.batch import given
 from main.env.protocol import ProtocolError
 from main.learn import batches
 from main.play.rollout import precision_context
@@ -56,12 +57,11 @@ class Clipped:
             raise ValueError("The KL coefficient is not negative")
         self.reference, self.clip, self.kl = reference, clip, kl
         reference.eval().requires_grad_(False)
-        self._seen = self._empty()
-        self._all = self._empty()
-
-    @staticmethod
-    def _empty():
-        return dict(samples=0, ratio=0.0, clipped=0, kl=0.0, zero=0)
+        # Tallies of [ratio sum, clipped, kl sum, zero advantages] since the last flush
+        # and over everything, kept on the device: reading them would make the host
+        # wait for the step (`flush`, `means`).
+        self._seen = self._all = None
+        self._samples = self._samples_all = 0
 
     def __call__(self, learner, prepared, micro):
         """(loss, entropy at temperature 1, accuracy counts) of every macro-action of a
@@ -73,42 +73,50 @@ class Clipped:
                                 "or advantage; a clipped update needs all three")
         model = learner.model
         prepared = prepared.to(model.device)
-        temperatures = torch.tensor([item.temperature for item in micro], dtype=torch.float32, device=model.device)
+        temperatures = given([item.temperature for item in micro], model.device)
         with precision_context(model, learner.config.precision):
             with torch.no_grad():
                 reference = self.reference.decision_log_probs(prepared, temperatures)
             log_prob, entropy, accuracy, kl = model.replay(
                 prepared, with_accuracy=True, temperatures=temperatures, reference=reference)
-        old = log_prob.new_tensor([item.old_log_prob for item in micro], dtype=torch.float32)
-        advantage = log_prob.new_tensor([item.advantage for item in micro], dtype=torch.float32)
+        old = given([item.old_log_prob for item in micro], model.device)
+        advantage = given([item.advantage for item in micro], model.device)
         ratio = (log_prob.float() - old).clamp(-LOG_RATIO_BOUND, LOG_RATIO_BOUND).exp()
         bounded = ratio.clamp(1 - self.clip, 1 + self.clip)
         surrogate = torch.minimum(ratio * advantage, bounded * advantage)
         loss = -surrogate + self.kl * kl.float()
         with torch.no_grad():
             # Clipped: the bound is the smaller term, so the ratio no longer moves it.
-            clipped = int(((bounded * advantage < ratio * advantage) & (advantage != 0)).sum())
-            values = dict(samples=len(micro), ratio=float(ratio.sum()), clipped=clipped,
-                          kl=float(kl.float().sum()), zero=int((advantage == 0).sum()))
-        for seen in (self._seen, self._all):
-            for key, value in values.items():
-                seen[key] += value
+            clipped = ((bounded * advantage < ratio * advantage) & (advantage != 0)).sum()
+            tally = torch.stack([ratio.sum(), clipped.to(ratio.dtype), kl.float().sum(),
+                                 (advantage == 0).sum().to(ratio.dtype)]).double()
+        self._seen = tally if self._seen is None else self._seen + tally
+        self._all = tally if self._all is None else self._all + tally
+        self._samples += len(micro)
+        self._samples_all += len(micro)
         return loss, entropy, accuracy
 
+    def flush(self):
+        """The tally since the last flush and its macro-action count, the tally still on
+        the device: what the trainer reads back with the step's own numbers (`means`)."""
+        seen, samples = self._seen, self._samples
+        self._seen, self._samples = None, 0
+        return seen, samples
+
     @staticmethod
-    def _means(seen):
-        count = max(seen["samples"], 1)
-        return dict(ratio_mean=seen["ratio"] / count, clip_fraction=seen["clipped"] / count,
-                    kl=seen["kl"] / count, zero_share=seen["zero"] / count)
+    def means(tally, samples):
+        """The report of a tally (on any device; waits for it) over `samples` macro-actions."""
+        count = max(samples, 1)
+        ratio, clipped, kl, zero = tally.tolist() if tally is not None else (0.0, 0.0, 0.0, 0.0)
+        return dict(ratio_mean=ratio / count, clip_fraction=clipped / count, kl=kl / count, zero_share=zero / count)
 
     def take(self):
-        """What was seen since the last `take`, as means over its macro-actions."""
-        seen, self._seen = self._seen, self._empty()
-        return self._means(seen)
+        """What was seen since the last `take` or `flush`, as means over its macro-actions."""
+        return self.means(*self.flush())
 
     def summary(self):
         """The same over everything seen."""
-        return dict(self._means(self._all), samples=self._all["samples"])
+        return dict(self.means(self._all, self._samples_all), samples=self._samples_all)
 
 
 def _priced(table, source, scale):
@@ -159,8 +167,9 @@ def group_update(learner, waves, reference, *, clip=CLIP, kl=KL, updates=None, w
     def told(metrics):
         losses = {name: metrics["sources"].get(name, {}).get("loss") for name in streams}
         done = joint.last
+        # The objective's means of the step (`Clipped.means`) come in `metrics`.
         on_update(dict(
-            metrics, **objective.take(),
+            metrics,
             **{f"{name}_loss": losses[name] for name in waves},
             **{f"{name}_zero_share": done[name]["zero"] / max(done[name]["samples"], 1) for name in waves}))
 

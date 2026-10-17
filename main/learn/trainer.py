@@ -1,5 +1,6 @@
 """Single-device Accelerate behavior cloning: a weighted NLL over macro-actions."""
 
+import math
 import random
 import time
 from collections import defaultdict
@@ -12,6 +13,7 @@ from main.env.rewards import MilestoneLedger
 from main.network.checkpoint import load_model, restore_training, save_checkpoint
 from main.network.config import TrainConfig
 from main.data.shards import HELDOUT_FRACTION, RunShards, extent, samples, split_held_out
+from main.encoding.batch import given
 from main.learn.loader import batches, stream
 from main.network.optim import BootstrapSchedule, build_optimizer
 from main.play.rollout import precision_context
@@ -21,6 +23,38 @@ def _by_source(sources):
     """{source: weighted mean loss, total weight, samples} of what was accumulated."""
     return {name: {"loss": loss / max(weight, 1e-12), "weight": weight, "samples": count}
             for name, (loss, weight, count) in sorted(sources.items())}
+
+
+class _Readback:
+    """A step's numbers on their way to the host: per-sample (loss, entropy) rows, the
+    accuracy counts, the gradient norm and the objective's tally, copied into pinned
+    memory behind the step's kernels and read (`wait`) once the next step is launched.
+    On the CPU they are simply kept."""
+
+    def __init__(self, rows, accuracy, norm, tally, **info):
+        parts = [rows.flatten(), accuracy.flatten(), norm.reshape(1)] + ([tally.flatten()] if tally is not None else [])
+        packed = torch.cat([part.detach().double() for part in parts])
+        self.sizes = [part.numel() for part in parts]
+        self.width = rows.shape[1] if rows.dim() == 2 else 2
+        if packed.device.type == "cuda":
+            self.host = torch.empty(packed.shape, dtype=packed.dtype, pin_memory=True)
+            self.host.copy_(packed, non_blocking=True)
+            self.event = torch.cuda.Event()
+            self.event.record()
+        else:
+            self.host, self.event = packed, None
+        self.__dict__.update(info)
+
+    def wait(self):
+        """(rows, accuracy counts, norm, tally) once they have arrived."""
+        if self.event is not None:
+            self.event.synchronize()
+        parts = torch.split(self.host, self.sizes)
+        rows = parts[0].view(-1, self.width).tolist()
+        correct, decisions = (int(round(value)) for value in parts[1].tolist())
+        norm = float(parts[2][0])
+        tally = parts[3] if len(parts) > 3 else None
+        return rows, (correct, decisions), norm, tally
 
 
 class Learner:
@@ -150,7 +184,14 @@ class Learner:
         ending early once the schedule's decay is spent. `total` is the macro count of
         the whole data set: the scale of every batch's loss. Each macro-action's loss is
         its negative log-likelihood, or what `objective` makes of the microbatch
-        (`fit`)."""
+        (`fit`).
+
+        The host never waits for a step: its numbers (per-sample rows, accuracy counts,
+        gradient norm, the objective's tally) are queued to pinned memory behind its
+        kernels (`_Readback`) and read once the next step is launched, so that the CPU
+        launching kernels and the GPU running them overlap. Non-finite gradients are
+        therefore seen one step late: the pass fails there, and the policy on disk is
+        the last archive's."""
         cfg = self.config
         if total is None or total < 1:
             raise ValueError("BC updates require the full training split's macro count")
@@ -171,6 +212,49 @@ class Learner:
         last_rates = {}
         waited_seconds = 0.0  # blocked on the loader for the next logical batch
         duration_seconds = 0.0
+        tallies = objective is not None and hasattr(objective, "flush")
+        pending = []  # steps whose numbers are on their way to the host
+
+        def finish(step):
+            """Account a step whose numbers have arrived: totals, then `on_update`."""
+            nonlocal weights, accuracy_correct, accuracy_decisions, gradient_clipped
+            host_rows, (correct, decisions), norm, tally = step.wait()
+            if not math.isfinite(norm):
+                raise FloatingPointError(
+                    f"Non-finite gradients in update {step.updates}; the pass cannot go on"
+                )
+            grad_norms.append(norm)
+            gradient_clipped += norm > cfg.max_grad_norm
+            total_metrics["last_grad_norm"] = norm
+            batch_weight = 0.0
+            batch_metrics = defaultdict(float)
+            batch_sources = defaultdict(lambda: [0.0, 0.0, 0])
+            for item, (loss, entropy) in zip(step.items, host_rows):
+                w = item.weight
+                batch_weight += w
+                for key, value in (("loss", loss), ("entropy", entropy)):
+                    total_metrics[key] += value * w
+                    batch_metrics[key] += value * w
+                weights += w
+                for entry in (batch_sources[item.source or "unknown"], sources[item.source or "unknown"]):
+                    entry[0] += loss * w
+                    entry[1] += w
+                    entry[2] += 1
+            accuracy_correct += correct
+            accuracy_decisions += decisions
+            if on_update:
+                on_update({
+                    **{key: value / max(batch_weight, 1e-12) for key, value in batch_metrics.items()},
+                    **(objective.means(tally, step.samples) if tallies else {}),
+                    "accuracy": correct / decisions if decisions else None,
+                    "accuracy_correct": correct, "accuracy_decisions": decisions,
+                    "updates": step.updates, "samples": len(step.items), "weight": batch_weight,
+                    "last_grad_norm": norm, "gradient_clip_fraction": float(norm > cfg.max_grad_norm),
+                    "learning_rates": step.rates, "parameter_updates": step.changes,
+                    "loss_scale": loss_scale, "sources": _by_source(batch_sources),
+                    "duration_seconds": step.duration, "wait_seconds": step.waited,
+                })
+
         logicals = iter(logicals)
         update_started = time.monotonic()
         while True:
@@ -193,25 +277,22 @@ class Learner:
                     loss, entropy, accuracy = objective(self, prepared, micro)
                 logical_accuracy.append(accuracy.sum(0))
                 with precision_context(self.model, cfg.precision):
-                    weight = loss.new_tensor([item.weight for item in micro], dtype=torch.float32)
+                    weight = given([item.weight for item in micro], loss.device)
                     weighted_loss = (weight * loss).sum() * loss_scale
                     rows = torch.stack([loss.float(), entropy.float()], dim=1)
-                # A non-finite loss gives non-finite gradients, which the norm check
-                # below cancels; checking the loss here would stall the GPU queue.
+                # A non-finite loss gives non-finite gradients, which the norm read back
+                # below reports; checking here would stall the GPU queue.
                 self.accelerator.backward(weighted_loss)
                 logical_rows.append(rows.detach())
                 logical_items.extend(micro)
             samples_seen += len(logical_items)
+            # The step before has finished on the GPU by now: account it while this
+            # one's backward runs, before the update counter moves on.
+            while pending:
+                finish(pending.pop(0))
             norm = self.accelerator.clip_grad_norm_(
                 self.model.parameters(), cfg.max_grad_norm
             )
-            if not bool(torch.isfinite(norm)):
-                self.optimizer.zero_grad(set_to_none=True)
-                raise FloatingPointError(
-                    "Non-finite gradients; optimizer update cancelled"
-                )
-            grad_norms.append(float(norm))
-            gradient_clipped += float(norm) > cfg.max_grad_norm
             self.scheduler.prepare()
             last_rates = {g["name"]: g["lr"] for g in self.optimizer.param_groups}
             snapshots = []
@@ -235,41 +316,17 @@ class Learner:
                 parameter_changes[name] = {"delta_l2": float(delta), "relative_l2": relative}
             self.scheduler.step()
             self.updates += 1
-            total_metrics["last_grad_norm"] = float(norm)
-            # Transfer all per-sample diagnostics for this logical batch once.
-            host_rows = torch.cat(logical_rows).cpu().tolist()
-            batch_weight = 0.0
-            batch_metrics = defaultdict(float)
-            batch_sources = defaultdict(lambda: [0.0, 0.0, 0])
-            for item, (loss, entropy) in zip(logical_items, host_rows):
-                w = item.weight
-                batch_weight += w
-                for key, value in (("loss", loss), ("entropy", entropy)):
-                    total_metrics[key] += value * w
-                    batch_metrics[key] += value * w
-                weights += w
-                for entry in (batch_sources[item.source or "unknown"], sources[item.source or "unknown"]):
-                    entry[0] += loss * w
-                    entry[1] += w
-                    entry[2] += 1
-            correct, decisions = torch.stack(logical_accuracy).sum(0).cpu().tolist()
-            accuracy_correct += correct
-            accuracy_decisions += decisions
+            tally, tallied = objective.flush() if tallies else (None, 0)
             duration = time.monotonic() - update_started  # waiting for the batch included
             waited_seconds += waited
             duration_seconds += duration
-            if on_update:
-                on_update({
-                    **{key: value / max(batch_weight, 1e-12) for key, value in batch_metrics.items()},
-                    "accuracy": correct / decisions if decisions else None,
-                    "accuracy_correct": correct, "accuracy_decisions": decisions,
-                    "updates": self.updates, "samples": len(logical_items), "weight": batch_weight,
-                    "last_grad_norm": float(norm), "gradient_clip_fraction": float(float(norm) > cfg.max_grad_norm),
-                    "learning_rates": last_rates, "parameter_updates": parameter_changes,
-                    "loss_scale": loss_scale, "sources": _by_source(batch_sources),
-                    "duration_seconds": duration, "wait_seconds": waited,
-                })
+            step = _Readback(torch.cat(logical_rows), torch.stack(logical_accuracy).sum(0), norm, tally,
+                             items=logical_items, samples=tallied, updates=self.updates, rates=last_rates,
+                             changes=parameter_changes, duration=duration, waited=waited)
+            pending.append(step)
             update_started = time.monotonic()
+        while pending:
+            finish(pending.pop(0))
         if self.vocabulary.unregistered():
             total_metrics["unregistered_names"] = self.vocabulary.unregistered()
         for key in ("loss", "entropy"):

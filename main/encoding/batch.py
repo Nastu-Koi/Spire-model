@@ -15,12 +15,21 @@ from main.encoding.vocabulary import REFERENCE_ROLES
 
 def _move(value, device):
     if isinstance(value, torch.Tensor):
+        if value.device.type == "cpu" and torch.device(device).type == "cuda" and not value.is_pinned():
+            # A copy from pageable memory makes the host wait for everything queued on the
+            # stream; one from pinned memory is queued behind it.
+            value = value.pin_memory()
         return value.to(device, non_blocking=True)
     if isinstance(value, list):
         return [_move(item, device) for item in value]
     if isinstance(value, Packed):
         return value.to(device)
     return value
+
+
+def given(values, device, dtype=torch.float32):
+    """A few host numbers as a tensor on `device`, queued rather than waited for."""
+    return _move(torch.tensor(values, dtype=dtype), device)
 
 
 class Packed:
