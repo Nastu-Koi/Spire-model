@@ -115,7 +115,7 @@ python -m main --device cuda iterate --kl 0.1 --learning-rates configs/learning-
 ```bash
 python steam_recorder/install.py --game-dir "$GAME_DIR" --install
 python -m main import-recorder "$RECORDING_DIR" --bootstrap-only --output data/steam-001
-python -m main --device cuda play-steam --checkpoint <检查点> --bridge-dir "$RECORDING_DIR/bridge"
+python -m main --device cuda play-steam --checkpoint <检查点> --bridge-dir "$RECORDING_DIR/bridge" --run-for 8h
 ```
 
-见 [steam](docs/implementation/steam.md)。
+接管的开关、每步间隔、决策记录与报错后的重置都在游戏内的“模型”面板上；见 [steam](docs/implementation/steam.md)。

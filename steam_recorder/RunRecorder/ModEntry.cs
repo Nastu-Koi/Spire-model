@@ -62,44 +62,13 @@ public static class ModEntry
 			WaitTime = 0.1,
 			Autostart = true
 		};
-		CanvasLayer canvasLayer = new CanvasLayer
-		{
-			Name = "RunRecorderStatus",
-			Layer = 999
-		};
-        var panel = new VBoxContainer
-        {
-            AnchorTop = 1f, AnchorBottom = 1f,
-            OffsetLeft = 18f, OffsetTop = -80f, OffsetBottom = -12f,
-            MouseFilter = Control.MouseFilterEnum.Pass
-        };
-        var switches = new HBoxContainer { MouseFilter = Control.MouseFilterEnum.Pass };
-        var recording = new CheckButton
-        {
-            Text = "录制数据", ButtonPressed = _settings.RecordingEnabled,
-            TooltipText = "记录状态和动作供训练使用；关闭后模型仍可接管。"
-        };
-        var control = new CheckButton
-        {
-            Text = "允许模型接管", ButtonPressed = _settings.ControlEnabled,
-            TooltipText = "允许运行中的模型控制游戏；关闭后暂停接管，可继续手动操作。"
-        };
-        recording.Toggled += value => { _settings.RecordingEnabled = value; ApplySettings(); };
-        control.Toggled += value => { _settings.ControlEnabled = value; ApplySettings(); };
-        switches.AddChild(recording);
-        switches.AddChild(control);
-        panel.AddChild(switches);
-        var label = new Label { MouseFilter = Control.MouseFilterEnum.Ignore };
-		label.AddThemeFontSizeOverride("font_size", 18);
-        panel.AddChild(label);
-		canvasLayer.AddChild(panel, forceReadableName: false, Node.InternalMode.Disabled);
-		NGame.Instance.AddChild(canvasLayer, forceReadableName: false, Node.InternalMode.Disabled);
+        var panel = LivePanel.Create(NGame.Instance, _settings, ApplySettings);
 		_timer.Timeout += delegate
 		{
             SelectionCapture.Safe(SelectionCapture.Tick);
 			Recorder.Tick();
             LiveBridge.Tick();
-			label.Text = Recorder.Status + " · " + LiveBridge.Status;
+            panel.Refresh();
 		};
 		_timer.TreeExiting += delegate
 		{
@@ -114,7 +83,7 @@ public static class ModEntry
     private static void ApplySettings()
     {
         Recorder.SetEnabled(_settings.RecordingEnabled);
-        LiveBridge.SetEnabled(_settings.ControlEnabled);
+        LiveBridge.Configure(_settings);
         try { _settings.Save(SettingsPath); }
         catch (Exception ex) { GD.PushWarning("[RunRecorder] Settings changed for this session but could not be saved: " + ex.Message); }
     }
