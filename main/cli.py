@@ -297,6 +297,9 @@ def parser():
     x.add_argument("--group-n", type=int, default=8, help="Segments from each seed in the first wave")
     x.add_argument("--group-m", type=int, nargs="+", default=[8],
                    help="Segments from each save, one number or one for each later wave")
+    x.add_argument("--overlap", action="store_true",
+                   help="Sample the next round (and evaluate) on a sampling side of its own while the policy "
+                        "is updated: a round is played by the policy before the update under way")
     x.add_argument("--clip", type=float, default=0.2, help="The ratio's clip ε")
     x.add_argument("--kl", type=float, default=0.01, help="The coefficient of the KL to the reference")
     x.add_argument("--reference-every", type=int, default=0,
@@ -692,7 +695,7 @@ def main(argv=None):
                 window_shards=args.window_shards,
                 evaluate_every=args.evaluate_every,
                 eval_seeds=args.eval_seeds, eval_runs_per_character=args.eval_runs_per_character,
-                eval_workers=args.eval_workers)
+                eval_workers=args.eval_workers, overlap=args.overlap)
             state = Driver(args.output, settings, args.device, runtime=runtime).run(args.iterations)
             emit({"output": str(args.output), "iterations": sum(
                 bool(entry.get("complete")) for entry in state["iterations"].values())})

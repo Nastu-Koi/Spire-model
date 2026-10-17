@@ -133,6 +133,26 @@ def load_model(path, device="cpu", *, allow_legacy_encoding=False):
     with torch.device("meta"):
         model = PolicyNetwork(config)
     model.to_empty(device=device)
+    _load_weights(model, path, manifest, device)
+    vocabulary = Vocabulary.from_state(manifest["vocabulary"], config)
+    return model, vocabulary, manifest
+
+
+def load_weights(model, path, device="cpu"):
+    """Put a checkpoint's weights into `model`, a network of the same shape, in place:
+    what a process that keeps one model object does to follow a run's archives
+    (`main/overlap.py`). Returns the checkpoint's manifest."""
+    path = Path(path)
+    manifest = json.loads((path / "manifest.json").read_text())
+    if manifest.get("format") != 1:
+        raise ValueError("Unsupported checkpoint format")
+    if ModelConfig.from_dict(manifest["model"]) != model.config:
+        raise ValueError("The checkpoint's network has another shape than the model in hand")
+    _load_weights(model, path, manifest, device)
+    return manifest
+
+
+def _load_weights(model, path, manifest, device):
     expected = set(model.state_dict())
     loaded = set()
     for name in manifest["weights"]:
@@ -144,8 +164,6 @@ def load_model(path, device="cpu", *, allow_legacy_encoding=False):
         del shard
     if loaded != expected:
         raise ValueError("Checkpoint is missing model tensors")
-    vocabulary = Vocabulary.from_state(manifest["vocabulary"], config)
-    return model, vocabulary, manifest
 
 
 def restore_training(path, optimizer, scheduler=None):

@@ -170,6 +170,8 @@ def test_the_command_line_runs_the_iterations(world, monkeypatch, capsys):
     arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "3"])
     assert (arguments.runs_per_character, arguments.evaluate_every, arguments.updates) == (200, 5, "round")
     assert (arguments.clip, arguments.kl) == (0.2, 0.01) and arguments.wave_shares is None
+    assert arguments.overlap is False
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "3", "--overlap"]).overlap
     assert arguments.weight_cap == batches.WEIGHT_CAP == Settings(checkpoint="c").weight_cap
     monkeypatch.setattr(engine_module, "CliEngine", lambda root=None: chain())
     common = ["iterate", "--checkpoint", str(world.checkpoint), "--output", str(world.output), "--iterations", "1",
@@ -404,3 +406,58 @@ def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
     arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
                                      "--reference-every", "3"])
     assert arguments.reference_every == 3 and Settings(checkpoint="c").reference_every == 0
+
+
+def test_an_overlapped_run_samples_the_next_round_a_version_behind_on_a_sampling_side(world):
+    starts = world.root / "starts"
+
+    def counted():
+        # Told from a sampling process: its own pid and its parent's, the collector's.
+        with starts.open("a") as stream:
+            stream.write(f"{os.getpid()} {os.getppid()}\n")
+        return chain()
+
+    state = Driver(world.output, settings(world, overlap=True), engine=counted, say=lambda _: None).run(3)
+    iterations = state["iterations"]
+    assert all(iterations[str(number)]["complete"] for number in range(3))
+    start = read(world.checkpoint / "manifest.json")["progress"]["policy_version"]
+    # Round N + 1 is sampled during update N, by the policy before it: the starting
+    # policy plays the first two rounds, the policy of update 0 the third.
+    versions = [read(world.output / f"groups/round-{number}/summary.json")["policy_version"] for number in range(3)]
+    assert versions == [start, start, start + 1]
+    assert [iterations[str(number)]["sample"]["policy_version"] for number in range(3)] == versions
+    # The evaluation of iteration 1's policy (due every two) was made on the sampling
+    # side during iteration 2's update and recorded under iteration 1; the history
+    # line of iteration 2 carries it.
+    assert iterations["1"]["evaluation"]["policy_version"] == start + 2 and "evaluation" not in iterations["0"]
+    assert "evaluation" not in iterations["2"]
+    history = lines(world.output / "history.jsonl")
+    assert [line["round"] for line in history] == [0, 1, 2]
+    assert "eval_win_rate" not in history[1]["metrics"] and history[2]["metrics"]["eval_iteration"] == 1
+    # Every engine ran in a sampling process of the side, not of the driver's process.
+    parents = {line.split()[1] for line in starts.read_text().splitlines()}
+    assert len(parents) == 1 and str(os.getpid()) not in parents
+
+    # Brought further, the run samples the round it has not got yet, and the last
+    # iteration's policy is evaluated at once.
+    state = Driver(world.output, settings(world, overlap=True), engine=counted, say=lambda _: None).run(4)
+    assert state["iterations"]["3"]["complete"] and state["iterations"]["3"]["evaluation"]["policy_version"] == start + 4
+    assert read(world.output / "groups/round-3/summary.json")["policy_version"] == start + 2
+
+
+def test_an_overlapped_run_cut_off_in_its_update_goes_on_with_the_round_the_side_was_playing(world):
+    def failing(self, iteration):
+        if iteration == 1:
+            raise ProtocolError("update of iteration 1")
+        return original(self, iteration)
+
+    original = Driver.update
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Driver, "update", failing)
+        with pytest.raises(ProtocolError, match="update of iteration 1"):
+            Driver(world.output, settings(world, overlap=True), engine=chain, say=lambda _: None).run(3)
+    state = read(world.output / "state.json")
+    assert state["iterations"]["0"]["complete"] and set(state["iterations"]["1"]) == {"settings", "sample", "advantages"}
+    assert read(world.output / "status.json")["state"] == "failed"
+    state = Driver(world.output, settings(world, overlap=True), engine=chain, say=lambda _: None).run(3)
+    assert all(state["iterations"][str(number)]["complete"] for number in range(3))
