@@ -367,11 +367,7 @@ class PolicyNetwork(nn.Module):
         )
         starts = batch.lengths.cumsum(0) - batch.lengths
         slots = row * pad_ + torch.arange(total, device=tokens.device) - starts[row]
-        hidden = (
-            tokens.new_zeros((rows_ * pad_, tokens.shape[-1]))
-            .index_copy(0, slots, tokens)
-            .view(rows_, pad_, -1)
-        )
+        hidden = tokens.new_zeros((rows_ * pad_, tokens.shape[-1])).index_copy_(0, slots, tokens).view(rows_, pad_, -1)
         biases = self._relation_biases(batch.relations, valid)
         if graphed:
             return self._graphs(hidden, valid, biases)[:rows, :pad]

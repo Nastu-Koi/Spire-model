@@ -37,7 +37,12 @@ def relation_biases(tables, edges, valid, *, dtype=None, elements=BIAS_ELEMENTS)
     """The biases of several layers' tables at once, equal in value to `relation_bias`
     of each: the tables are looked up side by side, so that a pass makes a few
     scatters and fills instead of one of each per layer. Returns a list, one
-    [sequences, heads, tokens, tokens] bias per table, converted to `dtype` if given."""
+    [sequences, heads, tokens, tokens] bias per table.
+
+    With `dtype` (the attention's, under autocast) the dense bias is built in that
+    dtype from the start, sparing a pass that converts it: a pair with one relation
+    gets the same rounded value, one with several has their sum rounded in that dtype
+    rather than in FP32, within one unit of its last place."""
     sequences, tokens = valid.shape
     pairs = sequences * tokens * tokens
     heads = tables[0].embedding_dim
@@ -53,15 +58,14 @@ def relation_biases(tables, edges, valid, *, dtype=None, elements=BIAS_ELEMENTS)
     for start in range(0, len(tables), chunk):
         part = tables[start:start + chunk]
         weight = torch.cat([table.weight for table in part], dim=1) if len(part) > 1 else part[0].weight
-        bias = weight.new_zeros((len(part), sequences, heads, tokens, tokens))
+        bias = weight.new_zeros((len(part), sequences, heads, tokens, tokens), dtype=dtype or weight.dtype)
         if edges.numel():
             layers = torch.arange(len(part), device=edges.device) * sequences * heads * tokens * tokens
             targets = cells[:, None, None] + layers[None, :, None] + planes[None, None, :]
+            values = F.embedding(role, weight, padding_idx=0).to(bias.dtype)
             # In place into the fresh buffer: one pass over the dense bias fewer.
-            bias.view(-1).index_add_(0, targets.reshape(-1), F.embedding(role, weight, padding_idx=0).reshape(-1))
+            bias.view(-1).index_add_(0, targets.reshape(-1), values.reshape(-1))
         bias = bias.masked_fill_(~valid[None, :, None, None, :], -float("inf"))
-        if dtype is not None:
-            bias = bias.to(dtype)
         biases.extend(bias.unbind(0))
     return biases
 

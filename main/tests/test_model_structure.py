@@ -163,7 +163,16 @@ def test_the_biases_of_every_layer_from_one_scatter_equal_the_layers_own():
         found = relation_biases(list(tables), edges, valid, elements=elements)
         assert len(found) == len(tables) and all(torch.equal(a, b) for a, b in zip(found, expected))
         assert all(bias.is_contiguous() for bias in found)
-    assert relation_biases(list(tables), edges, valid, dtype=torch.bfloat16)[1].dtype == torch.bfloat16
+    # Built in the attention's dtype from the start: a pair's single relation rounds as
+    # the FP32 bias would; several relations are summed in that dtype, so their sum is
+    # off by up to a unit in the last place of the summands.
+    halves = relation_biases(list(tables), edges, valid, dtype=torch.bfloat16)
+    assert halves[1].dtype == torch.bfloat16
+    largest = max(float(table.weight.abs().max()) for table in tables)
+    for half, full in zip(halves, expected):
+        assert torch.equal(torch.isinf(half), torch.isinf(full))
+        finite = torch.isfinite(full)
+        assert torch.allclose(half[finite].float(), full[finite], rtol=2 ** -7, atol=largest * 2 ** -7)
     assert torch.equal(relation_biases(list(tables), edges[:0], valid)[2], relation_bias(tables[2], edges[:0], valid))
     # The gradients are the tables' own, and the padding row takes none.
     sum(bias.masked_fill(~torch.isfinite(bias), 0).pow(2).sum() for bias in expected).backward()
