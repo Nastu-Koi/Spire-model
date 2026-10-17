@@ -96,10 +96,17 @@ class Learner:
         # sources tells apart. The update itself sums by weight alone.
         sources = defaultdict(lambda: [0.0, 0.0, 0])
         last_rates = {}
+        waited_seconds = 0.0  # blocked on the loader for the next logical batch
+        duration_seconds = 0.0
+        logicals = iter(logicals)
         update_started = time.monotonic()
-        for logical in logicals:
+        while True:
             if self.scheduler.exhausted:
                 total_metrics["decay_exhausted"] = 1
+                break
+            logical = next(logicals, None)
+            waited = time.monotonic() - update_started
+            if logical is None:
                 break
             self.optimizer.zero_grad(set_to_none=True)
             logical_rows = []
@@ -175,6 +182,9 @@ class Learner:
             correct, decisions = torch.stack(logical_accuracy).sum(0).cpu().tolist()
             accuracy_correct += correct
             accuracy_decisions += decisions
+            duration = time.monotonic() - update_started  # waiting for the batch included
+            waited_seconds += waited
+            duration_seconds += duration
             if on_update:
                 on_update({
                     **{key: value / max(batch_weight, 1e-12) for key, value in batch_metrics.items()},
@@ -184,7 +194,7 @@ class Learner:
                     "last_grad_norm": float(norm), "gradient_clip_fraction": float(float(norm) > cfg.max_grad_norm),
                     "learning_rates": last_rates, "parameter_updates": parameter_changes,
                     "loss_scale": loss_scale, "sources": _by_source(batch_sources),
-                    "duration_seconds": time.monotonic() - update_started,
+                    "duration_seconds": duration, "wait_seconds": waited,
                 })
             update_started = time.monotonic()
         if self.vocabulary.unregistered():
@@ -195,6 +205,8 @@ class Learner:
         # The macro-actions the loader delivered to this pass.
         total_metrics["samples"] = samples_seen
         total_metrics["weight"] = weights
+        total_metrics["wait_seconds"] = waited_seconds
+        total_metrics["duration_seconds"] = duration_seconds
         total_metrics["loss_scale"] = loss_scale
         total_metrics["sources"] = _by_source(sources)
         total_metrics["learning_rates"] = last_rates

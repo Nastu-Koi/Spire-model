@@ -475,6 +475,8 @@ class Driver:
             loss=metrics["loss"], accuracy=metrics["accuracy"], entropy=metrics.get("entropy"),
             losses=done["losses"], shares=done["shares"], sizes=done["sizes"], decisions=done["decisions"],
             waves=done["waves"], grad_norm=metrics.get("grad_norm"), seconds=round(time.monotonic() - started, 1),
+            wait_seconds=round(metrics["wait_seconds"], 1),
+            wait_share=round(metrics["wait_seconds"] / max(metrics["duration_seconds"], 1e-9), 4),
             clip=done["clip"], kl=done["kl"], phase_weights=done["phase_weights"], seen=done["seen"],
             reference=str(anchored.relative_to(self.output) if anchored.is_relative_to(self.output) else anchored))
         seeds = set().union(*(RunShards(path).seeds for path in waves.values()))
@@ -543,7 +545,7 @@ class Driver:
             policy_updated=True, pass_updates=update["pass_updates"], loss=update["loss"],
             accuracy=update["accuracy"], entropy=update.get("entropy"),
             ratio_mean=seen["ratio_mean"], clip_fraction=seen["clip_fraction"], kl=seen["kl"],
-            zero_share=seen["zero_share"],
+            zero_share=seen["zero_share"], update_wait_share=update["wait_share"],
             **{f"{wave}_loss": update["losses"].get(wave) for wave in waves},
             **{f"{wave}_zero_share": update["waves"][wave]["zero_share"] for wave in waves})
         if evaluation:

@@ -230,6 +230,7 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
     assert sum(update["sizes"].values()) == 8 and set(update["sizes"]) == {"act1", "act2", "act3"}
     assert set(update["losses"]) == {"act1", "act2", "act3"} and "anchor" not in update and "window" not in update
     assert update["pass_updates"] == -(-decisions // 8) == update["updates"] and "primary" not in update
+    assert 0 <= update["wait_seconds"] <= update["seconds"] and 0 <= update["wait_share"] <= 1
     for wave, count in priced.items():
         assert update["waves"][wave]["data"]["macros"] == count
         assert abs(update["waves"][wave]["samples"] - count) <= update["pass_updates"] + 8
@@ -256,7 +257,8 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
     assert all(key in metrics for key in (
         "sampled_segments", "sampled_win_rate", "reach_rate_act1", "between_share_act2", "r2_within_act3",
         "pass_updates", "loss", "ratio_mean", "clip_fraction", "kl", "zero_share", "act1_loss", "act2_zero_share",
-        "entropy", "eval_win_rate"))
+        "entropy", "eval_win_rate", "update_wait_share"))
+    assert 0 <= metrics["update_wait_share"] <= 1
     assert metrics["policy_updated"] is True and "beta" not in metrics and "anchor_loss" not in metrics
     updates = lines(world.output / "updates.jsonl")
     assert {record["stage"] for record in updates} == {"groups"}

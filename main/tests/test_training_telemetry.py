@@ -2,6 +2,7 @@
 
 import json
 import copy
+import time
 from dataclasses import asdict
 import random
 from types import SimpleNamespace
@@ -167,3 +168,23 @@ def test_an_update_limit_stops_in_the_middle_of_an_epoch_and_reports_it():
     assert len(learner.bootstrap(runs, epochs=3, max_updates=whole)) == 1 and learner.updates == whole
     with pytest.raises(ValueError, match="at least one update"):
         learner.bootstrap(runs, max_updates=0)
+
+
+def test_the_time_an_update_waits_for_its_batch_is_told_apart_from_its_duration():
+    learner, runs = setup_learner()
+    items = samples(runs)[:7]
+
+    def slowly(logicals):
+        for logical in logicals:
+            time.sleep(0.05)
+            yield logical
+
+    records = []
+    metrics = learner._optimize(slowly(batches(items, learner.vocabulary, learner.config)),
+                                total=len(items), on_update=records.append)
+    assert len(records) == 3
+    for row in records:
+        assert 0.05 <= row["wait_seconds"] <= row["duration_seconds"]
+    assert metrics["wait_seconds"] == pytest.approx(sum(row["wait_seconds"] for row in records))
+    assert metrics["duration_seconds"] == pytest.approx(sum(row["duration_seconds"] for row in records))
+    assert metrics["wait_seconds"] <= metrics["duration_seconds"]
