@@ -13,7 +13,6 @@ from types import SimpleNamespace
 import pytest
 import torch._dynamo
 
-from main.learn import advantage
 from main.learn import batches
 from main.learn.advantage import FILE
 from main.cli import _learner, main, parser
@@ -119,7 +118,9 @@ def test_a_run_goes_on_from_the_step_it_was_cut_off_in(world):
     (world.output / "groups/round-2/metadata/seeds.json").write_text("{}")
     state = driver(world, eval_seeds=None).run(3)
     assert state["iterations"]["2"]["sample"]["written"] == 70
-    assert (world.output / "interrupted/groups-round-2.0/metadata/seeds.json").read_text() == "{}"
+    assert read(world.output / "groups/round-2/metadata/seeds.json") == read(world.output / "seeds/iteration-0002.json")
+    # What it left was set aside for the second attempt and removed at the cleanup.
+    assert not (world.output / "interrupted").exists()
 
     # Cut off after the update was saved and before it was recorded: the policy in hand
     # is the updated one, and it is not updated a second time.
@@ -216,8 +217,7 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
     for wave, head in first["advantages"].items():
         assert head["runs"] > 0 and head["decisions"] > 0 and head["groups"] > 0 and head["r2_within"] is not None
     assert first["advantages"]["act3"]["groups"] == 20
-    header = advantage.header(world.output / "groups/round-0/act2")
-    assert header["kind"] == "act-groups" and header["wave"] == "act2"
+    assert first["advantages"]["act2"]["advantage"]["n"] > 0
 
     # Updated with the clipped objective: the waves by their decisions; as many
     # updates as a pass over the priced decisions makes, which sees every wave about once.
@@ -242,13 +242,13 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
     assert (progress["iteration"], progress["advantage"]) == (1, "act-groups")
     assert set(read(world.output / "seeds/iteration-0001.json")["Ironclad"]) <= set(progress["training_seeds"])
 
-    # Cleaned up: the frames and saves of the round are gone, its summaries, indexes
-    # and advantages stay; the archive of an iteration nobody evaluated goes too.
+    # Cleaned up: the frames, saves, indexes and advantages of the round are gone, its
+    # summaries stay; the archive of an iteration nobody evaluated goes too.
     for wave in ("act1", "act2", "act3"):
         directory = world.output / "groups/round-0" / wave
-        assert not (directory / "accepted").exists() and not (directory / "saves").exists()
-        assert (directory / "index.jsonl.gz").exists() and (directory / "summary.json").exists()
-        assert (directory / FILE).exists()
+        for name in ("accepted", "saves", "index.jsonl.gz", FILE):
+            assert not (directory / name).exists()
+        assert (directory / "summary.json").exists()
     assert groups_summary(world.output / "groups/round-0")["waves"] == ["act1", "act2", "act3"]
     assert not (world.output / "policy/iteration-0000").exists() and (world.output / "policy/iteration-0001").exists()
 
@@ -385,15 +385,18 @@ def test_every_round_and_evaluation_of_a_run_is_played_by_the_processes_forked_b
 
 def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
     acts = dict(eval_seeds=None, reference_every=2)
+    state = driver(world, **acts).run(3)
+    # The reference archive survives the cleanups that remove the others not evaluated,
+    # for as long as the next update refers to it.
+    archives = lambda: sorted(path.name for path in (world.output / "policy").glob("iteration-*"))  # noqa: E731
+    assert archives() == ["iteration-0001", "iteration-0002"]
     state = driver(world, **acts).run(4)
+    assert archives() == ["iteration-0003"]
     updates = {number: entry["update"] for number, entry in state["iterations"].items()}
     # Iterations 0 and 1 anchor to the starting checkpoint; 2 and 3 to the policy after
     # iteration 1, as it stood when their stretch began.
     assert updates["0"]["reference"] == updates["1"]["reference"] == str(world.checkpoint)
     assert updates["2"]["reference"] == updates["3"]["reference"] == "policy/iteration-0001"
-    # The reference archive survives the cleanup that removes the others not evaluated.
-    assert (world.output / "policy/iteration-0001").exists()
-    assert not (world.output / "policy/iteration-0000").exists() and not (world.output / "policy/iteration-0002").exists()
     # The first update of a stretch is on-policy with its reference: the KL starts at zero.
     first_of_stretch = [record["metrics"] for record in lines(world.output / "updates.jsonl") if record["round"] == 2][0]
     assert first_of_stretch["kl"] == pytest.approx(0.0, abs=1e-5)

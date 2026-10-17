@@ -76,7 +76,7 @@ L = −min(r·A, clip(r, 1 − ε, 1 + ε)·A) + κ·KL
 | `advantages` | 每波的回报与优势（[幕组的优势](#幕组的优势)），记各波的组数、组间方差占比、树覆盖、组内 R² | `groups/round-N/<波>/advantages.json.gz` |
 | `update` | 一遍[裁剪目标](#幕组的裁剪目标)的更新（批见[幕组批](#幕组批)） | `policy/current`、`policy/iteration-NNNN/` |
 | `evaluation` | 每 `--evaluate-every`（默认 5）次迭代，用 `--eval-seeds` 每角色前 `--eval-runs-per-character` 个种子 greedy 评估，只写去掉帧的对局文件 | `evaluation/iteration-NNNN/report.json` |
-| `cleanup` | 删到这次为止各轮每波的 `accepted/` 分片与 `saves/`，留 `summary.json`、索引、`advantages.json.gz`、`quarantine/`；删没有评估的迭代的策略归档 | 记下释放的空间 |
+| `cleanup` | 删这次更新之后没有人再读的东西：到这次为止各轮每波的 `accepted/` 分片、`saves/`、`index.jsonl.gz`、`advantages.json.gz`（留 `summary.json`、`quarantine/`）；策略归档只留评估过的（关键存档点）、到期待评估的、下一次更新的 KL 参考和这次的；`interrupted/` 整个删 | 记下释放的空间 |
 
 - 一轮的形状：`--runs-per-character` 是每角色的种子数，`--boundary-acts`（默认 `2 3`）、`--boundary-bosses`（默认无；如 `3` 在第三幕 Boss 入场再切一级，波 `boss3`）、`--group-n`（8）、`--group-m`（8，或每个后续波一个数，波数 = 切点数）。每轮的组不复用。
 - `--clip`、`--kl`：[裁剪目标](#幕组的裁剪目标)的 ε 与 κ。`--reference-every k`：KL 的参考每 k 次迭代换成当时的策略（第 N 次迭代用 `policy/iteration-{k·⌊N/k⌋ − 1}`，N < k 用起点检查点），这些归档不被清理，更新记录的 `reference` 记下用的是哪份；默认 0，参考始终是 `--checkpoint`。`--learning-rates <json>` 给这次运行各组的学习率（不给时沿用检查点的），写进这次运行保存的检查点。
@@ -84,11 +84,11 @@ L = −min(r·A, clip(r, 1 − ε, 1 + ε)·A) + κ·KL
 - `--wave-shares`：各波在批里的相对份额，按波的顺序每波一个数；不给时按各波的决策数（见[幕组批](#幕组批)）。`--updates`：`round`（ΣN / B 次，默认）或一个数。
 - 采样种子由 `--seed-root` 与迭代号派生（十六位十六进制，每角色等量）；避开 `--exclude-seeds`、`--eval-seeds` 和检查点记下的训练种子，按原样、按游戏读法（O 作 0、I 作 1）和按 `split_group` 三种写法核对。
 - 记录：检查点的 `progress` 记迭代号、优势来源（`act-groups`）和这次更新的摘要，`training_seeds` 累积各波的种子；`state.json` 记每次迭代各步的结果与当时的设置；标准输出每完成一步打印一行 JSON。
-- 断点续跑：重跑同一条命令（`--iterations` 可加大）。每一步落盘后才记入 `state.json`；被打断的步骤留下的目录移到 `interrupted/` 后重做；策略更新已保存而未记入时不会再更新一次（只认这次运行自己的 `policy/current`，从另一次运行的检查点起步时，那份检查点元数据里的更新不算）。SIGTERM 与 Ctrl+C 一样结束正在进行的步骤，`status.json` 记下停在哪一步。除 `--checkpoint` 与 `--seed-root` 外的设置都可以在两次运行之间改。同一输出目录不能同时被两个进程写。
+- 断点续跑：重跑同一条命令（`--iterations` 可加大）。每一步落盘后才记入 `state.json`；被打断的步骤留下的目录移到 `interrupted/` 后重做（这次迭代的清理把它删掉）；策略更新已保存而未记入时不会再更新一次（只认这次运行自己的 `policy/current`，从另一次运行的检查点起步时，那份检查点元数据里的更新不算）。SIGTERM 与 Ctrl+C 一样结束正在进行的步骤，`status.json` 记下停在哪一步。除 `--checkpoint` 与 `--seed-root` 外的设置都可以在两次运行之间改。同一输出目录不能同时被两个进程写。
 - 采样、策略更新与裁剪目标的参考前向在同一个进程里轮流用 GPU，每步结束归还显存缓存；全局层是同一个被编译的函数，各步的梯度模式、精度和模块不同，所以驱动放宽编译器对同一函数变体数的上限（`COMPILED_VARIANTS`），否则后出现的运行方式一直不被编译。
-- 存储：每次迭代的帧在清理时删除，留下的是各波的摘要、索引与优势；评估几 MB；策略归档每份约 170 MB（只留评估过的）。
+- 存储：每次迭代的帧、索引与优势在清理时删除，留下的是各波的摘要；评估几 MB（逐局结果留给配对比较）；策略归档每份约 170 MB，评估过的留下，其余用完即删。
 
-- 重叠模式（`--overlap`，默认关；续跑时可改）：第 N 次迭代的更新与第 N+1 轮的采样同时进行，一次迭代接近 max(采样, 更新)。采样与评估都由**采样侧**（`overlap.py`）做：驱动在载入策略、初始化 CUDA 之前 fork 出它，它持一份自己的模型对象与采样池，每份任务按归档路径把权重就地载入同一个对象（`checkpoint.load_weights`，`Samplers.collect` 要求模型同一）。流水线：优势(N) → 发任务「第 N+1 轮，用 P_{N−1}；评估 P_{N−1}（到期且未记）」→ 更新(N) → 收结果记入 `state.json` → 清理(N)。P_{N−1} 是 `policy/iteration-{N−1}`，前两轮用起点检查点，归档已删（之前不是重叠模式）时用 `policy/current`。第 N+1 轮由第 N 次更新之前的策略采：比值 r 用采样时记下的 `old_log_prob`，数值仍精确，数据晚一版由裁剪与 KL 兜住，第一次试跑要看 `ratio_mean` 与 `clip_fraction`。第 0 轮、续跑时缺的轮、最后一次迭代到期的评估经采样侧同步做。第 N−1 次的评估在第 N 次迭代里才到：记在第 N−1 次的 `evaluation`，`history.jsonl` 第 N 行带 `eval_*` 与 `eval_iteration`。重叠模式下策略归档多留一代（采样侧还要读 P_{N−1}），驱动不再 fork 自己的采样池。中断：驱动结束采样侧（整个进程组），写了一半的轮留在目录里，续跑接着打。内存按采样期加训练期之和估：64 引擎可能放不下，先 32 或 48，带内存看门狗。
+- 重叠模式（`--overlap`，默认关；续跑时可改）：第 N 次迭代的更新与第 N+1 轮的采样同时进行，一次迭代接近 max(采样, 更新)。采样与评估都由**采样侧**（`overlap.py`）做：驱动在载入策略、初始化 CUDA 之前 fork 出它，它持一份自己的模型对象与采样池，每份任务按归档路径把权重就地载入同一个对象（`checkpoint.load_weights`，`Samplers.collect` 要求模型同一）。流水线：优势(N) → 发任务「第 N+1 轮，用 P_{N−1}；评估 P_{N−1}（到期且未记）」→ 更新(N) → 收结果记入 `state.json` → 清理(N)。P_{N−1} 是 `policy/iteration-{N−1}`，前两轮用起点检查点，归档已删（之前不是重叠模式）时用 `policy/current`。第 N+1 轮由第 N 次更新之前的策略采：比值 r 用采样时记下的 `old_log_prob`，数值仍精确，数据晚一版由裁剪与 KL 兜住，第一次试跑要看 `ratio_mean` 与 `clip_fraction`。第 0 轮、续跑时缺的轮、最后一次迭代到期的评估经采样侧同步做。第 N−1 次的评估在第 N 次迭代里才到：记在第 N−1 次的 `evaluation`，`history.jsonl` 第 N 行带 `eval_*` 与 `eval_iteration`。归档不多留：第 N+1 轮收齐后 P_{N−1} 就按清理规则处理，续跑时缺了用 `policy/current` 兜底；驱动不再 fork 自己的采样池。中断：驱动结束采样侧（整个进程组），写了一半的轮留在目录里，续跑接着打。内存按采样期加训练期之和估：64 引擎可能放不下，先 32 或 48，带内存看门狗。
 - 采样进程：驱动加载策略后、第一次更新之前 fork 一组（`--workers` 个引擎，`--processes` 个进程），整个运行的各轮采样和评估都用它（`--eval-workers` 不同时，评估另起一组）。每轮结束后它们的引擎退出、进程留下（`Samplers.rest`），训练期只占进程本身（每个约 16 MB）。原因见 [play](play.md#采样进程分工)。
 
 资源（32 引擎、每角色 4–10 种子实测）：采样期采集进程约 1.5–2 GB、32 个采样进程私有内存合计约 1.5–5.7 GB（随段变长而涨；`ps` 的 RSS 含 fork 共享页，每个能显示到 2 GB，不能相加）、32 个引擎 4–6.5 GB；策略更新的加载进程与窗口与 BC 相同、在各路之间平分，合计 4–5 GB 私有内存。

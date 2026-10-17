@@ -13,14 +13,16 @@ One iteration, repeated (`python -m main iterate`):
    starting checkpoint (`grpo.group_update`).
 4. **Evaluate** the policy greedily on fixed seeds every few iterations; the
    evaluation keeps each run's outcome, not its frames.
-5. **Clean up** what the next iterations do not read: the round's frames, policy
-   archives no evaluation was made of.
+5. **Clean up** what nothing reads any more: the round's frames, indexes and
+   advantages, policy archives that were not evaluated and no later update refers to,
+   what interrupted steps left behind.
 
 Everything is written under one output directory, and every step is skipped when its
 result is already there: an interrupted run goes on from the step it was in. What
-an interrupted step left is moved under `interrupted/`, never deleted.
+an interrupted step left is moved under `interrupted/`, out of the way of its second
+attempt, and removed at the iteration's cleanup.
 
-    groups/round-N/            the rounds: a directory per wave, each with its advantages.json.gz
+    groups/round-N/            the rounds: a directory per wave; after the update only the summaries
     policy/current, policy/iteration-NNNN/   the policy after its update of iteration N
     evaluation/iteration-NNNN/ the evaluation after iteration N, with report.json
     seeds/, logs/              the seeds of each round; the output of the commands run
@@ -43,6 +45,7 @@ import torch
 from main.env.seeds import split_group
 
 from main.learn import batches, grpo
+from main.learn.advantage import FILE as ADVANTAGES
 from main.learn.groups import KIND as GROUPS, advantages as group_advantages
 from main.play import groups as act_groups
 from main.play.groups import group_rounds, groups_summary, sample_groups
@@ -518,37 +521,41 @@ class Driver:
         return self.policy / f"iteration-{(iteration // every) * every - 1:04d}"
 
     def is_reference(self, number):
-        """Whether the archive of iteration `number` serves as a KL reference later."""
+        """Whether the archive of iteration `number` serves as a KL reference at some point."""
         every = self.settings.reference_every
         return bool(every) and (number + 1) % every == 0
 
     def prune_archives(self, iteration):
-        """Remove the policy archives of earlier iterations nobody evaluated, except
-        those an evaluation is due of and those a later update's KL refers to."""
+        """Remove the policy archives of earlier iterations that nothing reads any more.
+        An evaluated archive is kept, as are one an evaluation is due of, the one the
+        next update's KL refers to, and this iteration's own (an overlapped run's
+        sampling side plays the round after next with it)."""
         evaluated = {int(number) for number, entry in self.state["iterations"].items() if entry.get("evaluation")}
-        # The sampling side of an overlapped run still reads the archive before this iteration's.
-        latest = iteration - 1 if self.settings.overlap else iteration
+        due = {number for number in range(iteration) if self.settings.eval_seeds
+               and (number + 1) % self.settings.evaluate_every == 0}
+        reference = self.reference(iteration + 1)
         freed = 0
         for archive in self.policy.glob("iteration-*"):
             number = int(archive.name.split("-")[1])
-            if (number < latest and number not in evaluated and (number + 1) % self.settings.evaluate_every
-                    and not self.is_reference(number)):
+            if number < iteration and number not in evaluated and number not in due and archive != reference:
                 freed += self.remove(archive)
         return freed
 
     def cleanup(self, iteration):
-        """Remove the frames of the rounds of act groups up to this iteration (their
-        shards and saves; the summaries, indexes and advantages stay), and policy
-        archives of iterations not evaluated."""
+        """Remove what nothing reads after this iteration's update: the shards, saves,
+        indexes and advantages of the rounds of act groups up to it (their summaries
+        and quarantines stay), the policy archives nothing refers to any more
+        (`prune_archives`), and what interrupted steps left under `interrupted/`."""
         freed = 0
         for directory in group_rounds(self.groups):
             summary = groups_summary(directory)
             if summary["iteration"] > iteration:
                 continue
             for wave in summary["waves"]:
-                for name in ("accepted", act_groups.SAVES):
+                for name in ("accepted", act_groups.SAVES, "index.jsonl.gz", ADVANTAGES):
                     freed += self.remove(directory / wave / name)
         freed += self.prune_archives(iteration)
+        freed += self.remove(self.output / "interrupted")
         return dict(freed_gb=round(freed / 2**30, 3))
 
     def update(self, iteration):
