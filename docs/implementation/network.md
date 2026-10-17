@@ -4,7 +4,7 @@
 
 | 模块 | 内容 |
 | --- | --- |
-| `model.py`、`attention.py` | `PolicyNetwork`：实体编码器、字段间注意力、局部程序编码器、带关系偏置的全局层、决策头 |
+| `model.py`、`attention.py` | `PolicyNetwork`：实体编码器、字段间注意力、局部程序编码器、带关系偏置的全局层、决策头；`GraphedStack` 把采样时的全局层按桶补齐后作 CUDA graph 重放 |
 | `config.py` | profile 的 `model` 与 `training` 节（`ModelConfig`、`TrainConfig`），采样温度 |
 | `optim.py` | Muon／AdamW 分组、BC 学习率日程（预热、查找表衰减、收尾衰减） |
 | `checkpoint.py` | 检查点保存、载入、版本检查、归档 |
@@ -62,3 +62,7 @@
 
 - 查找表的学习率只能在从初始化出发时取高值；对一个已围绕固定随机表训练过的网络，`1e-2` 会破坏已学内容。改变表的学习率要从初始化重新训练。
 - 其余 AdamW 组的学习率提高十倍或百倍没有带来留出样本上的改善，这些值未作进一步筛选。
+
+## 采样时的全局层：CUDA graph
+
+一次采样前向只带十几条决策，24 层全局层要发射几百个小核函数，解释器与分发器发射它们的时间比 GPU 跑完还长。采样进程（`Samplers`）打开 `PolicyNetwork.graphed()`：无梯度、评估模式、在 GPU 上的前向把批补齐到桶形状（行数 `ROW_BUCKETS`、每条决策的 token 数 `PAD_BUCKETS`；补的行各有一个有效 token，注意力才有限），每种形状第一次出现时录一张 CUDA graph（录前在旁路流上热身两次），之后把输入拷进图的缓冲区重放，输出切回原形状。重放的核函数就是 eager 在补齐批上发射的那些，所以 greedy 选择与 eager 相同，对数概率只差补齐带来的 bf16 舍入（平均约 1e-4、最大约 1e-2）。训练与可微重放不走这条路。超出最大桶的批退回 eager。

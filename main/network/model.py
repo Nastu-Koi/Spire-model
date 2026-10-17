@@ -198,6 +198,62 @@ class DecisionOutput:
         return indices, values
 
 
+# The shapes a graphed pass pads its batch to: decisions (rows) and tokens of a decision
+# (pad). One CUDA graph is captured for each pair that comes up; a batch beyond the
+# largest runs the layers eagerly.
+ROW_BUCKETS = (8, 16, 32, 64, 128, 256)
+PAD_BUCKETS = (64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096)
+
+
+def bucket(count, buckets):
+    """The smallest of `buckets` that holds `count`, or None beyond them."""
+    return next((size for size in buckets if size >= count), None)
+
+
+class GraphedStack:
+    """The global layers as CUDA graphs, one per padded shape, for sampling.
+
+    A pass of a handful of decisions is bound by the host: the layers launch a few
+    hundred small kernels, and the interpreter and dispatcher take longer to launch
+    them than the GPU takes to run them. A graph replays the kernels that one pass of
+    a shape launched, the same kernels in the same order, so the numbers are those of
+    the eager pass on the padded batch: the layers see a few rows and tokens more, all
+    masked. Inputs are copied into the graph's own buffers before each replay; the
+    output buffer is read before the next replay overwrites it."""
+
+    def __init__(self, layers):
+        self.layers = layers  # layers(hidden, valid, biases) -> hidden, the eager pass
+        self.graphs = {}
+
+    def __call__(self, hidden, valid, biases):
+        key = tuple(valid.shape)
+        entry = self.graphs.get(key)
+        if entry is None:
+            entry = self.graphs[key] = self._capture(hidden, valid, biases)
+        graph, (static_hidden, static_valid, static_biases), out = entry
+        static_hidden.copy_(hidden)
+        static_valid.copy_(valid)
+        for static, bias in zip(static_biases, biases):
+            static.copy_(bias)
+        graph.replay()
+        return out
+
+    def _capture(self, hidden, valid, biases):
+        inputs = (hidden.clone(), valid.clone(), [bias.clone() for bias in biases])
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            # Warm the kernels of this shape (the compiled blocks, the attention's
+            # workspaces) outside the capture.
+            for _ in range(2):
+                self.layers(*inputs)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = self.layers(*inputs)
+        return graph, inputs, out
+
+
 class PolicyNetwork(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -231,6 +287,7 @@ class PolicyNetwork(nn.Module):
         self.key_norm = nn.RMSNorm(d)
         self.encoder_calls = 0
         self.decoder_calls = 0
+        self._graphs = None  # the global layers as CUDA graphs, for sampling (`graphed`)
         if config.compile_blocks:
             # Module.compile keeps checkpoint state_dict names unchanged.
             for block in self.blocks:
@@ -239,6 +296,24 @@ class PolicyNetwork(nn.Module):
     @property
     def device(self):
         return self.query.weight.device
+
+    def graphed(self, enabled=True):
+        """Run the global layers of a sampling pass (no gradient, evaluation mode, on
+        the GPU) as CUDA graphs (`GraphedStack`), the batch padded to bucketed shapes.
+        Training and replay are untouched: they take the eager layers as before."""
+        if not enabled:
+            self._graphs = None
+        elif self._graphs is None:
+            self._graphs = GraphedStack(self._layers)
+        return self
+
+    def _graphing(self, tokens):
+        return self._graphs is not None and tokens.is_cuda and not self.training and not torch.is_grad_enabled()
+
+    def _layers(self, hidden, valid, biases):
+        for block, bias in zip(self.blocks, biases):
+            hidden = block(hidden, valid, bias)
+        return self.final_norm(hidden)
 
     def _relation_biases(self, edges, valid):
         """Every global layer's relation bias, from as few scatters as the batch's
@@ -272,22 +347,35 @@ class PolicyNetwork(nn.Module):
         self.encoder_calls += 1
         tokens = self._entities(batch)
         rows, pad, total = len(batch.lengths), batch.pad, tokens.shape[0]
-        valid = torch.arange(pad, device=tokens.device).unsqueeze(
-            0
-        ) < batch.lengths.unsqueeze(1)
+        lengths = batch.lengths
+        # A graphed pass pads the batch to a bucketed shape: the rows added hold one
+        # valid token each, so that their attention stays finite; they are dropped after.
+        graphed = self._graphing(tokens)
+        if graphed:
+            padded_rows, padded_pad = bucket(rows, ROW_BUCKETS), bucket(pad, PAD_BUCKETS)
+            graphed = padded_rows is not None and padded_pad is not None
+        if graphed:
+            lengths = F.pad(lengths, (0, padded_rows - rows), value=1)
+            rows_, pad_ = padded_rows, padded_pad
+        else:
+            rows_, pad_ = rows, pad
+        valid = torch.arange(pad_, device=tokens.device).unsqueeze(0) < lengths.unsqueeze(1)
         # Place every token by a computed slot: a boolean index would make the
         # host wait for the token count before the backbone can be queued.
         row = torch.repeat_interleave(
             torch.arange(rows, device=tokens.device), batch.lengths, output_size=total
         )
         starts = batch.lengths.cumsum(0) - batch.lengths
-        slots = row * pad + torch.arange(total, device=tokens.device) - starts[row]
+        slots = row * pad_ + torch.arange(total, device=tokens.device) - starts[row]
         hidden = (
-            tokens.new_zeros((rows * pad, tokens.shape[-1]))
+            tokens.new_zeros((rows_ * pad_, tokens.shape[-1]))
             .index_copy(0, slots, tokens)
-            .view(rows, pad, -1)
+            .view(rows_, pad_, -1)
         )
-        for block, bias in zip(self.blocks, self._relation_biases(batch.relations, valid)):
+        biases = self._relation_biases(batch.relations, valid)
+        if graphed:
+            return self._graphs(hidden, valid, biases)[:rows, :pad]
+        for block, bias in zip(self.blocks, biases):
             if (
                 self.config.checkpoint_layers
                 and self.training

@@ -447,3 +447,34 @@ def test_the_shard_line_of_a_run_goes_to_on_run_and_is_not_kept(tmp_path):
                               layout=OUTSIDE_FRAMES)
     assert len(seen) == len(jobs) and all(seen)
     assert all(run["status"] == "complete" and "member" not in run for run in played)
+
+
+def test_the_graphed_global_layers_choose_as_the_eager_ones_do():
+    """On the GPU the global layers of a sampling pass replay as CUDA graphs on a
+    padded batch; the greedy choices are the eager pass's and the log-probabilities
+    within the padding's rounding. On the CPU the switch does nothing."""
+    frames = [map_frame(), duel("enemy:0"), map_frame(("map:1:2", "Elite"))]
+    model, vocabulary = build(frames)
+    _, decisions = prepare_decisions(vocabulary, frames)
+    model.eval()
+    with torch.no_grad():
+        eager = model.choose(decisions, sample=False)
+        model.graphed(True)
+        assert model._graphs is not None
+        again = model.choose(decisions, sample=False)
+        assert torch.equal(eager[0], again[0]) and torch.allclose(eager[1], again[1])
+        assert not model._graphs.graphs  # nothing is captured on the CPU
+        if torch.cuda.is_available():
+            model.to("cuda")
+            cuda, _ = unpack([pack(decisions)], "cuda")
+            model.graphed(False)
+            plain = model.choose(cuda, sample=False)
+            model.graphed(True)
+            graphed = model.choose(cuda, sample=False)
+            assert len(model._graphs.graphs) == 1
+            assert torch.equal(plain[0], graphed[0]) and torch.allclose(plain[1], graphed[1], atol=1e-2)
+            # A second pass of the same shape replays the one graph.
+            graphed = model.choose(cuda, sample=False)
+            assert len(model._graphs.graphs) == 1 and torch.equal(plain[0], graphed[0])
+        model.graphed(False)
+        assert model._graphs is None

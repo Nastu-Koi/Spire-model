@@ -342,6 +342,10 @@ class Samplers:
 
     def _collect(self, runner, jobs, sample, on_run, layout):
         self.model.eval()
+        # A pass of a few decisions is bound by the host: the global layers replay as
+        # CUDA graphs (`PolicyNetwork.graphed`); training's replay is untouched.
+        if hasattr(self.model, "graphed"):
+            self.model.graphed(True)
         self.taken.value = 0
         settings = {name: getattr(runner, name) for name in (
             "precision", "version", "max_steps", "timeout", "ascension", "claim_rewards",
