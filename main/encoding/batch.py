@@ -42,9 +42,12 @@ class Fields(Packed):
 
 @dataclass
 class ProgramGroup(Packed):
-    """Local programs padded to one length."""
+    """Local programs padded to one length. The fields are those of the real nodes
+    only: `nodes` says where each stands among the padded `programs * length` rows,
+    so that the encoder computes nothing for the padding and scatters the nodes
+    into place (`SharedEncoder.programs`)."""
 
-    fields: Fields  # [programs * length, width]
+    fields: Fields  # [nodes, width]
     length: int
     lengths: torch.Tensor  # [programs] nodes per program
     edges: torch.Tensor  # [edges, 4]: program, source node, target node, relation
@@ -52,6 +55,7 @@ class ProgramGroup(Packed):
     binding_sources: torch.Tensor  # flat token row of that entity
     binding_roles: torch.Tensor  # field-name index of the binding role
     slots: torch.Tensor  # [programs] row in the batch's program table
+    nodes: torch.Tensor  # [nodes] row of each node in the padded [programs * length] layout
 
 
 @dataclass
@@ -116,11 +120,12 @@ def collate(observations, vocabulary, pad_to=None):
         by_length.setdefault(1 << (len(effect.nodes) - 1).bit_length(), []).append(slot)
     groups = []
     for length, slots in sorted(by_length.items()):
-        rows, lengths, edges = [], [], []
+        rows, lengths, edges, nodes = [], [], [], []
         binding_targets, binding_sources, binding_roles = [], [], []
         for row, slot in enumerate(slots):
             effect, bindings = items[slot]
-            rows.extend(effect.nodes + [[]] * (length - len(effect.nodes)))
+            rows.extend(effect.nodes)
+            nodes.extend(row * length + node for node in range(len(effect.nodes)))
             lengths.append(len(effect.nodes))
             table = effect.edge_table(vocabulary)
             if len(table):
@@ -139,6 +144,7 @@ def collate(observations, vocabulary, pad_to=None):
                 _long(binding_sources),
                 _long(binding_roles),
                 _long(slots),
+                _long(nodes),
             )
         )
 

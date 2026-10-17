@@ -95,6 +95,31 @@ def test_qk_norm_gains_train_under_adamw_without_decay():
     assert holding[0]["weight_decay"] == 0.0
 
 
+def test_the_fields_of_a_programs_real_nodes_encode_as_the_padded_rows_did():
+    """A program group carries the fields of its real nodes with their rows in the
+    padded layout (`ProgramGroup.nodes`): encoding them compact and scattering into
+    zeros gives what encoding every padded row gave, as the padding rows came out zero."""
+    from main.encoding.batch import Fields
+    from main.network.policy import prepare_decisions
+    from main.tests.test_sampling import FRAMES, build
+
+    model, vocabulary = build(FRAMES)
+    batch = prepare_decisions(vocabulary, FRAMES)[1].batch
+    encoder = model.encoder
+    assert any(len(group.lengths) > 1 for group in batch.programs)
+    with torch.no_grad():
+        for group in batch.programs:
+            count, length, compact = len(group.lengths), group.length, group.fields
+            assert len(compact.ids) == int(group.lengths.sum()) < count * length or count * length == len(compact.ids)
+            width = compact.ids.shape[1]
+            padded = Fields(*(getattr(compact, name).new_zeros((count * length, width, *getattr(compact, name).shape[2:]))
+                              .index_copy_(0, group.nodes, getattr(compact, name))
+                              for name in ("ids", "kinds", "numbers", "mask")))
+            reference = encoder.fields(padded)
+            scattered = reference.new_zeros(reference.shape).index_copy_(0, group.nodes, encoder.fields(compact))
+            torch.testing.assert_close(scattered, reference, atol=1e-6, rtol=1e-6)
+
+
 def test_field_attention_keeps_rows_without_fields_finite():
     from main.encoding.batch import Fields
     config = ModelConfig.tiny()

@@ -13,7 +13,6 @@ hold is encoded once for each, and programs are padded into fewer groups.
 
 import numpy as np
 import torch
-from torch.nn import functional as F
 
 from main.encoding.batch import Batch, Fields, ProgramGroup
 from main.network.policy import Decisions
@@ -26,7 +25,7 @@ GLOBAL = ("rows", "ids", "kinds", "lengths", "reference_targets", "reference_sou
           "reference_roles", "token_programs", "relation_observation", "relation_query",
           "relation_key", "relation_role", "actions", "legal")
 GROUP = ("rows", "ids", "kinds", "lengths", "edge_program", "edge_source", "edge_target",
-         "edge_relation", "binding_targets", "binding_sources", "binding_roles", "slots")
+         "edge_relation", "binding_targets", "binding_sources", "binding_roles", "slots", "nodes")
 INTEGERS = len(GLOBAL) + BUCKETS * len(GROUP)
 NUMBERS = 1 + BUCKETS  # the numbers of the tokens, then of each group's nodes
 # What a pack counts: the rows that the indices of later packs move by.
@@ -50,9 +49,11 @@ def _moves():
         count[GLOBAL.index(name)] = moved
     for bucket in range(BUCKETS):
         count[_group(bucket, "edge_program")] = GROUPS + bucket
-        # A binding names a node by its place among the padded nodes of the group.
-        count[_group(bucket, "binding_targets")] = GROUPS + bucket
-        times[_group(bucket, "binding_targets")] = 1 << bucket
+        # A binding names a node by its place among the padded nodes of the group, as
+        # does the row of each node.
+        for name in ("binding_targets", "nodes"):
+            count[_group(bucket, name)] = GROUPS + bucket
+            times[_group(bucket, name)] = 1 << bucket
         count[_group(bucket, "binding_sources")] = TOKENS
         count[_group(bucket, "slots")] = PROGRAMS
     return count, times
@@ -60,9 +61,9 @@ def _moves():
 
 MOVED_BY, MOVED_TIMES = _moves()
 EMPTY = np.zeros(0, dtype=np.int32)
-# The buckets `unpack` pads into one program group each. A sampling pass is bound by
-# the interpreter, not the GPU: every group is another round of the entity encoder's
-# loop, whatever it holds, and padding a few programs further costs nothing.
+# The buckets `unpack` pads into one program group each. Every group is another round
+# of the entity encoder's loop, whatever it holds; the fields of a group are computed
+# for its real nodes only, so padding programs further costs the local blocks alone.
 GROUPED = ((0, 1, 2), tuple(range(3, BUCKETS)))
 
 
@@ -102,7 +103,7 @@ def pack(decisions):
         edges = group.edges.numpy()
         for column, name in enumerate(GROUP[4:8]):
             integers[_group(bucket, name)] = edges[:, column]
-        for name in ("lengths", "binding_targets", "binding_sources", "binding_roles", "slots"):
+        for name in ("lengths", "binding_targets", "binding_sources", "binding_roles", "slots", "nodes"):
             integers[_group(bucket, name)] = getattr(group, name).numpy()
         counts[GROUPS + bucket] = len(group.lengths)
     widths[-2:] = batch.actions.shape[1], batch.pad
@@ -176,13 +177,17 @@ def unpack(messages, device):
         def together(name):
             return torch.cat([field(_group(bucket, name)) for bucket in present])
 
-        # Every program keeps its nodes and gains empty ones up to the group's length.
-        mask = _mask(
-            torch.cat([
-                F.pad(field(_group(bucket, "rows")).view(-1, 1 << bucket), (0, length - (1 << bucket))).flatten()
-                for bucket in present
-            ]),
-            int(max(widths[1 + bucket] for bucket in present)))
+        # The fields of the real nodes, bucket after bucket; the padded layout they
+        # stand in is told by `nodes`.
+        mask = _mask(together("rows"), int(max(widths[1 + bucket] for bucket in present)))
+
+        def placed(name):
+            # A place among the padded nodes: program and node, both move.
+            return torch.cat([
+                (value // (1 << bucket) + start) * length + value % (1 << bucket)
+                for bucket, start in zip(present, first)
+                for value in [field(_group(bucket, name))]
+            ])
         groups.append(ProgramGroup(
             Fields(
                 _padded(mask, together("ids")),
@@ -199,15 +204,11 @@ def unpack(messages, device):
                            for bucket, start in zip(present, first)]),
                 *(together(name) for name in GROUP[5:8]),
             ], dim=1),
-            # A binding names a node by program and place: both move.
-            torch.cat([
-                (target // (1 << bucket) + start) * length + target % (1 << bucket)
-                for bucket, start in zip(present, first)
-                for target in [field(_group(bucket, "binding_targets"))]
-            ]),
+            placed("binding_targets"),
             together("binding_sources"),
             together("binding_roles"),
             together("slots"),
+            placed("nodes"),
         ))
     # Every message padded its actions to a width of its own.
     slots = _mask(

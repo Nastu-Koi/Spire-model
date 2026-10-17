@@ -134,6 +134,10 @@ def test_a_pack_crosses_to_the_collecting_process_with_its_programs_regrouped():
         for name in ("lengths", "slots", "binding_sources", "binding_roles"):
             assert all(sorted(torch.cat([getattr(g, name) for g in a]).tolist())
                        == sorted(torch.cat([getattr(g, name) for g in groups[0]]).tolist()) for a in groups)
+        # A group holds the fields of its real nodes only, each at its row of the padded layout.
+        for group in [*groups[0], *groups[1]]:
+            rows = torch.cat([torch.arange(n) + p * group.length for p, n in enumerate(group.lengths.tolist())])
+            assert same(group.nodes, rows) and len(group.fields.ids) == len(rows)
         with torch.no_grad():
             for a, b in zip(model.choose(arrived, sample=False), model.choose(decisions, sample=False)):
                 assert torch.allclose(a.float(), b.float(), atol=1e-5)

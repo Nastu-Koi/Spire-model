@@ -140,11 +140,17 @@ class SharedEncoder(nn.Module):
         )
 
     def programs(self, batch, base):
-        """Encode each distinct local program once; one row per program."""
+        """Encode each distinct local program once; one row per program. The fields
+        of a group are those of its real nodes: a third of the padded rows in a late
+        act's pass, whose padding would otherwise bound the pass on the GPU. They are
+        encoded compact and scattered into the padded layout, where the padding rows
+        stay the zeros the field block would have left."""
         result = base.new_zeros((batch.program_count, base.shape[-1]))
         for group in batch.programs:
             count, length = len(group.lengths), group.length
-            x = self.fields(group.fields).view(count, length, -1)
+            nodes = self.fields(group.fields)
+            x = nodes.new_zeros((count * length, nodes.shape[-1])).index_copy_(0, group.nodes, nodes)
+            x = x.view(count, length, -1)
             if group.binding_targets.numel():
                 additions = self.program_binding(
                     base.index_select(0, group.binding_sources)
