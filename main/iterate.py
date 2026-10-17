@@ -102,10 +102,15 @@ class Settings:
     learning_rates: str | None = None
     clip: float = grpo.CLIP
     kl: float = grpo.KL
+    # The probability that a sampled fight decision which could use a potion draws one
+    # of its USE_POTION candidates instead of a sample from the policy (`RolloutRunner`).
+    explore_potions: float = 0.0
 
     def __post_init__(self):
         if self.runs_per_character < 1 or self.evaluate_every < 1:
             raise ValueError("Runs per character and the evaluation interval are positive")
+        if not 0 <= self.explore_potions <= 1:
+            raise ValueError("The potion exploration rate is a probability")
         if self.learning_rates is not None:
             LearningRates.load(self.learning_rates)
         if not 0 < self.clip < 1 or self.kl < 0:
@@ -252,6 +257,7 @@ def round_result(summary, directory, settings):
                      for wave in waves[:-1] if summary[wave]["written"]},
         win_rate=round(last["outcomes"].get("win", 0) / last["written"], 4),
         decisions={wave: sum(summary[wave]["phases"].values()) for wave in waves},
+        explored={wave: summary[wave].get("explored", 0) for wave in waves},
         collector={wave: summary[wave].get("collector") for wave in waves},
         policy_version=summary["policy_version"],
         policy_digest=summary["policy_digest"], temperature=summary["temperature"], seconds=summary["seconds"])
@@ -396,7 +402,7 @@ class Driver:
         return RolloutRunner(
             learner.model, learner.vocabulary, precision=learner.config.precision, version=learner.policy_version,
             max_steps=settings.max_steps, ascension=learner.config.ascension,
-            temperatures=learner.config.temperatures, iteration=iteration)
+            temperatures=learner.config.temperatures, explore_potions=settings.explore_potions, iteration=iteration)
 
     def samplers(self, engines):
         """The sampling processes of a round of `engines` engines (`samplers_for`)."""
@@ -434,7 +440,8 @@ class Driver:
             runs=head["runs"], decisions=head["decisions"], advantage=head["advantage"],
             **{key: head["stats"][key] for key in ("groups", "return_mean", "between_share", "uniform_groups")},
             tree_share=head["stats"]["tree"]["share"], branching_share=head["stats"]["tree"]["branching_share"],
-            r2_within=head["stats"]["baseline"]["r2_within"]) for wave, head in written.items()}
+            r2_within=head["stats"]["baseline"]["r2_within"], explored=head["stats"].get("explored"))
+            for wave, head in written.items()}
 
     @staticmethod
     def remove(path):

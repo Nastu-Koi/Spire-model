@@ -523,8 +523,10 @@ class PolicyNetwork(nn.Module):
         Returns the chosen slot, its log-probability and its log-probability at
         temperature 1, each [decisions]: drawn from the scores divided by
         `temperature` (one number, or one per decision), or the most likely slot
-        when not sampling. The last is what a sample taken at another temperature
-        is corrected by (`main/learn/awr.py`).
+        when not sampling. A decision whose `explore` row marks slots is drawn among
+        those alone, at their relative odds; its log-probability is still the whole
+        distribution's for the slot drawn (what the policy itself would have drawn it
+        with), so that what is explored is the action and not the record.
         """
         batch = decisions.batch
         hidden = self.hidden(batch)
@@ -534,9 +536,13 @@ class PolicyNetwork(nn.Module):
         scores = self._score(self._query(state), keys, decisions.masks)
         temperature = torch.as_tensor(temperature, dtype=scores.dtype, device=scores.device)
         log_probs = (scores / temperature.view(-1, 1)).log_softmax(-1)
-        slots = (
-            torch.multinomial(log_probs.exp(), 1).squeeze(1) if sample else log_probs.argmax(-1)
-        )
+        if sample:
+            weights = log_probs.exp()
+            explore = decisions.explore & decisions.masks
+            weights = torch.where(explore.any(-1, keepdim=True), weights.masked_fill(~explore, 0), weights)
+            slots = torch.multinomial(weights, 1).squeeze(1)
+        else:
+            slots = log_probs.argmax(-1)
         at = slots.unsqueeze(1)
         return slots, log_probs.gather(1, at).squeeze(1), scores.log_softmax(-1).gather(1, at).squeeze(1)
 

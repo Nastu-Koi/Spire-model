@@ -3,6 +3,7 @@
 import json
 import os
 import pickle
+from copy import deepcopy
 from dataclasses import fields
 
 import pytest
@@ -14,7 +15,7 @@ from main.network.config import ModelConfig, TrainConfig
 from main.data.shards import validate_run
 from main.network.model import PolicyNetwork
 from main.network.policy import prepare_decisions, prepare_replay
-from main.env.protocol import CHARACTERS, ProtocolError
+from main.env.protocol import CHARACTERS, ProtocolError, execution_command
 from main.encoding.representation import observation
 from main.play.rollout import RolloutRunner, climbed, collect_round, stand
 from main.play.sampling import Samplers, _without_frames
@@ -482,3 +483,115 @@ def test_the_graphed_global_layers_choose_as_the_eager_ones_do():
             assert len(model._graphs.graphs) == 1 and torch.equal(plain[0], graphed[0])
         model.graphed(False)
         assert model._graphs is None
+
+
+class Drinking(Fighting):
+    """A fighting engine whose fight offers a potion once: using it is a decision of
+    its own that changes nothing else."""
+
+    def reset(self, character="Ironclad", seed="test", ascension=10):
+        self.potion = True
+        return super().reset(character, seed, ascension)
+
+    def frame(self):
+        frame = super().frame()
+        if self.stage == "selection" and self.potion:
+            frame["public"]["entities"].append({"ref": "potion:0", "entity_type": "potion", "slot": 0,
+                                                "content_id": "POTION.BLOCK_POTION", "owner_ref": "player"})
+            use = {"verb": "USE_POTION", "decoder_slot_ref": "potion:0", "source_refs": ["potion:0"],
+                   "target_refs": [], "effect_coverage": "opaque"}
+            frame["public"]["decoder_bank"].append(use)
+            candidates = frame["legal"]["candidates"]
+            candidates.append(dict(use, candidate_ref=f"c{len(candidates)}"))
+        return frame
+
+    def send(self, command):
+        before = self.frame()
+        chosen = next((c for c in before["legal"]["candidates"] if c["candidate_ref"] == command.get("candidate_ref")), None)
+        if chosen is not None and chosen["verb"] == "USE_POTION":
+            if command != execution_command(before, command["candidate_ref"]):
+                raise ProtocolError("stale_decision")
+            self.commands.append(deepcopy(command))
+            self.version += 1
+            self.potion = False
+            return self.frame()
+        return super().send(command)
+
+
+def drinking():
+    return Drinking(4, 2)
+
+
+def explored_steps(run):
+    return [step for macro in run["macros"] for step in macro["steps"] if step.get("explored")]
+
+
+def verb_of(step):
+    return next(c["verb"] for c in step["frame"]["legal"]["candidates"] if c["candidate_ref"] == step["candidate_ref"])
+
+
+def test_a_decision_marked_to_explore_is_drawn_among_its_marked_slots_with_the_policys_log_probability():
+    frames = [map_frame(), duel("enemy:0"), map_frame(("map:1:2", "Elite"))]
+    model, vocabulary = build(frames)
+    _, decisions = prepare_decisions(vocabulary, frames, restrict=[None, ["play:enemy:1"], None])
+    slot = observation(frames[1]).slot_refs.index("play:enemy:1")
+    assert decisions.explore[1].nonzero().tolist() == [[slot]] and not decisions.explore[[0, 2]].any()
+    expected = logits(model, vocabulary, frames)[1]
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for _ in range(8):
+            slots, log_probs, base = model.choose(decisions, temperature=0.5)
+            # The marked decision always draws its marked slot, and is recorded with the
+            # whole distribution's log-probability of it, as if the policy had drawn it.
+            assert int(slots[1]) == slot
+            assert torch.allclose(log_probs[1], (expected / 0.5).log_softmax(-1)[slot], atol=1e-5)
+            assert torch.allclose(base[1], expected.log_softmax(-1)[slot], atol=1e-5)
+            assert all(bool(decisions.masks[i, slots[i]]) for i in (0, 2))
+        # Greedy choices ignore the marks.
+        assert int(model.choose(decisions, sample=False)[0][1]) == int(expected.argmax())
+    # The marks cross to the collecting process with the pack.
+    crossed, _ = unpack([pack(decisions)], "cpu")
+    assert same(crossed.explore, decisions.explore) and same(crossed.masks, decisions.masks)
+    with pytest.raises(ProtocolError, match="restriction"):
+        prepare_decisions(vocabulary, frames, restrict=[None, ["play:enemy:9"], None])
+
+
+def test_a_run_explores_potion_use_at_the_rate_asked_and_records_the_policys_log_probability():
+    learner, _, _ = setup_round({"combat": 0.5, "other": 0.8})
+    exploring = RolloutRunner(learner.model, learner.vocabulary, precision="no", ascension=0,
+                              temperatures={"combat": 0.5, "other": 0.8}, explore_potions=1.0)
+    run = exploring.run(drinking(), "Ironclad", "drink")
+    assert run["status"] == "complete" and run["explore_potions"] == 1.0
+    # The fight's first decision could use the potion; exploring at rate 1 it does, once,
+    # and the step says so. The decision is still the policy's as the record has it: its
+    # log-probability is what the tempered policy gives the action, so the trainer's
+    # replay matches it like any other.
+    explored = explored_steps(run)
+    assert len(explored) == 1 and verb_of(explored[0]) == "USE_POTION"
+    assert explored[0] is run["macros"][0]["steps"][0]
+    assert all(verb_of(step) != "USE_POTION" for macro in run["macros"] for step in macro["steps"] if not step.get("explored"))
+    assert replayed_gap(learner.model, learner.vocabulary, [run]) < 1e-4
+    assert _without_frames(run)["explored"] == 1
+    validate_run(run, on_policy=True)
+    # Outside sampling, or at rate 0, nothing is explored and nothing is marked.
+    greedy = exploring.run(drinking(), "Ironclad", "greedy", sample=False)
+    assert greedy["explore_potions"] is None and not explored_steps(greedy)
+    plain = RolloutRunner(learner.model, learner.vocabulary, precision="no", ascension=0,
+                          temperatures={"combat": 0.5, "other": 0.8})
+    run = plain.run(drinking(), "Ironclad", "plain")
+    assert run["explore_potions"] == 0.0 and not explored_steps(run) and _without_frames(run)["explored"] == 0
+    assert all("explored" not in step for macro in run["macros"] for step in macro["steps"])
+    for wrong in (-0.1, 1.5):
+        with pytest.raises(ValueError, match="exploration"):
+            RolloutRunner(learner.model, learner.vocabulary, explore_potions=wrong)
+
+
+def test_sampling_processes_explore_potion_use_as_the_runner_alone_does(tmp_path):
+    learner, _, seeds = setup_round({"combat": 0.5, "other": 0.8})
+    runner = RolloutRunner(learner.model, learner.vocabulary, version=learner.policy_version, precision="no",
+                           ascension=0, temperatures={"combat": 0.5, "other": 0.8}, explore_potions=1.0)
+    with samplers(runner, drinking, engines=5, processes=3) as pool:
+        runs = read(collect_round(pool, runner, seeds, tmp_path / "round"))
+    assert all(run["explore_potions"] == 1.0 for run in runs)
+    assert all(len(explored_steps(run)) == 1 and verb_of(explored_steps(run)[0]) == "USE_POTION" for run in runs)
+    assert replayed_gap(learner.model, learner.vocabulary, runs) < 1e-4

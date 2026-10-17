@@ -54,6 +54,7 @@ class Decision:
     key: str  # the frame as the segments compare it
     action: tuple  # what was chosen, a candidate per step
     features: list
+    explored: bool = False  # drawn by exploration rather than from the policy (`RolloutRunner.explore_potions`)
 
 
 @dataclass(slots=True)
@@ -80,7 +81,8 @@ def _shard_segments(shards, names):
             act, floor, state = where(frame)
             decisions.append(Decision(
                 place[id(macro)], frame_key(frame), tuple(step["candidate_ref"] for step in macro["steps"]),
-                summary(run["character"], act, floor, state, macro.get("fight") is not None)))
+                summary(run["character"], act, floor, state, macro.get("fight") is not None),
+                any(step.get("explored") for step in macro["steps"])))
         found.append(Segment(run["run_id"], run["group"], run["character"], run["outcome"], decisions))
     return found
 
@@ -206,6 +208,7 @@ def wave_advantages(wave_segments, table, ridge=RIDGE):
             groups[segment.group].append(segment)
     weights, r2, fitted = fit(groups, table, ridge)
     counts, runs = Counter(), {}
+    explored = []  # the advantages of the explored decisions
     prefix = {}
     for members in groups.values():
         found, node_counts = tree(members, table)
@@ -226,6 +229,8 @@ def wave_advantages(wave_segments, table, ridge=RIDGE):
                     value = mean_return + float(np.dot(weights, np.asarray(decision.features) - mean_features))
                     advantage = table[segment.run_id] - value
                 entries.append((decision.index, value, advantage))
+                if decision.explored:
+                    explored.append(advantage)
             runs[segment.run_id] = entries
     between, mean_return = share([[table[s.run_id] for s in members] for members in groups.values()])
     uniform = sum(len({table[s.run_id] for s in members}) == 1 for members in groups.values())
@@ -238,7 +243,12 @@ def wave_advantages(wave_segments, table, ridge=RIDGE):
                   share=round(counts["decisions"] / decisions, 5) if decisions else 0.0,
                   branching_share=round(counts["branching_decisions"] / decisions, 5) if decisions else 0.0),
         baseline=dict(ridge=ridge, r2_within=round(r2, 5), fitted=fitted,
-                      weights={name: round(float(w), 5) for name, w in zip(NAMES, weights)}))
+                      weights={name: round(float(w), 5) for name, w in zip(NAMES, weights)}),
+        # What exploring taught: the mean advantage of the explored decisions says whether
+        # what they tried paid off on average; the signed counts how often.
+        explored=dict(decisions=len(explored),
+                      advantage_mean=round(float(np.mean(explored)), 5) if explored else None,
+                      positive=sum(a > 0 for a in explored), negative=sum(a < 0 for a in explored)))
     return runs, stats
 
 

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import random
 import re
 import time
 import zlib
@@ -159,10 +160,13 @@ class RolloutRunner:
         ascension=0,
         claim_rewards=False,
         temperatures=None,
+        explore_potions=0.0,
         iteration=None,
     ):
         if max_steps < 1 or timeout <= 0:
             raise ValueError("Rollout limits must be positive")
+        if not isinstance(explore_potions, (int, float)) or not 0 <= explore_potions <= 1:
+            raise ValueError("The potion exploration rate is a probability")
         temperatures = {"combat": 1.0, "other": 1.0} if temperatures is None else dict(temperatures)
         if set(temperatures) != {"combat", "other"} or not all(t > 0 for t in temperatures.values()):
             raise ValueError("The sampling temperatures must be positive, one for fights and one for the rest")
@@ -181,6 +185,15 @@ class RolloutRunner:
         # which are the same at every temperature. The temperatures are part of the
         # policy's definition: a run records them.
         self.temperatures = temperatures
+        # Exploration of potion use: with this probability a sampled fight decision
+        # that could use a potion draws one of its USE_POTION candidates instead of a
+        # sample from the tempered policy. The policy puts too little on using potions
+        # for the sampling temperature ever to draw one, so without it no group ever
+        # holds a segment that used one to compare against. An explored decision is
+        # recorded with the policy's own log-probability of the action, as if the
+        # policy had drawn it: the update then weighs it by its advantage in full.
+        self.explore_potions = float(explore_potions)
+        self._random = random.Random()
         # The sampling iteration the runs belong to.
         self.iteration = iteration
         self._digest = None
@@ -201,6 +214,17 @@ class RolloutRunner:
             return 1.0
         inside = fight is not None or frame["public"]["phase"] == "combat"
         return self.temperatures["combat" if inside else "other"]
+
+    def exploration_for(self, frame, fight, sample=True):
+        """The candidates a decision of `frame` is drawn among when it explores potion
+        use (`explore_potions`), or None for a decision drawn from the policy: a sampled
+        decision inside a fight that could use a potion, with the exploration rate."""
+        if not sample or fight is None or not self.explore_potions:
+            return None
+        potions = [c["candidate_ref"] for c in frame["legal"]["candidates"] if c["verb"] == "USE_POTION"]
+        if not potions or len(frame["legal"]["candidates"]) < 2 or self._random.random() >= self.explore_potions:
+            return None
+        return potions
 
     def run(self, engine, character, seed, *, sample=True, journal=None,
             combat_frames=True, resume=None, until_act=None, until_boss=None, run_id=None, group=None,
@@ -238,6 +262,7 @@ class RolloutRunner:
             "source": "rollout" if sample else "evaluation",
             "sampling": "full_distribution" if sample else "argmax",
             "temperature": dict(self.temperatures) if sample else None,
+            "explore_potions": self.explore_potions if sample else None,
             "iteration": self.iteration,
             "status": "unresolved",
             "macros": [],
@@ -263,7 +288,10 @@ class RolloutRunner:
         # A policy handed in draws its choices where the network runs; either is told
         # the temperature of each decision here, where the fight it belongs to is known.
         def choose(frame, fight, *, sample):
-            return policy.choose(frame, sample=sample, temperature=self.temperature_for(frame, sample, fight))
+            restrict = self.exploration_for(frame, fight, sample)
+            # A policy that does not explore (a test double) is asked nothing it does not know.
+            among = {} if restrict is None else {"restrict": restrict}
+            return policy.choose(frame, sample=sample, temperature=self.temperature_for(frame, sample, fight), **among)
 
         pending_steps, current_segment, active_macro = [], None, None
         waiting_since = None
@@ -368,6 +396,8 @@ class RolloutRunner:
                         "candidate_ref": choice.candidate_ref,
                         "forced": not branching,
                     }
+                    if getattr(choice, "explored", False):
+                        step["explored"] = True
                     if branching:
                         if active_macro is None:
                             active_macro = {

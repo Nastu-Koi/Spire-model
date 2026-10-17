@@ -23,7 +23,7 @@ BUCKETS = 12
 # rows travels as the length of every row and the cells its mask keeps.
 GLOBAL = ("rows", "ids", "kinds", "lengths", "reference_targets", "reference_sources",
           "reference_roles", "token_programs", "relation_observation", "relation_query",
-          "relation_key", "relation_role", "actions", "legal")
+          "relation_key", "relation_role", "actions", "legal", "explore")
 GROUP = ("rows", "ids", "kinds", "lengths", "edge_program", "edge_source", "edge_target",
          "edge_relation", "binding_targets", "binding_sources", "binding_roles", "slots", "nodes")
 INTEGERS = len(GLOBAL) + BUCKETS * len(GROUP)
@@ -70,8 +70,8 @@ GROUPED = ((0, 1, 2), tuple(range(3, BUCKETS)))
 def pack(decisions):
     """(header, integers, numbers, unregistered names) of packed decisions."""
     batch = decisions.batch
-    if decisions.masks.shape != batch.actions.shape:
-        raise ValueError("Legal masks must cover the action slots")
+    if decisions.masks.shape != batch.actions.shape or decisions.explore.shape != batch.actions.shape:
+        raise ValueError("Legal and exploration masks must cover the action slots")
     integers, numbers = [EMPTY] * INTEGERS, [np.zeros(0, dtype=np.float32)] * NUMBERS
     counts, widths = np.zeros(COUNTS, dtype=np.int64), np.zeros(WIDTHS, dtype=np.int64)
 
@@ -89,7 +89,7 @@ def pack(decisions):
         ("lengths", batch.lengths), ("reference_targets", batch.reference_targets),
         ("reference_sources", batch.reference_sources), ("reference_roles", batch.reference_roles),
         ("token_programs", batch.token_programs), ("actions", batch.actions),
-        ("legal", decisions.masks),
+        ("legal", decisions.masks), ("explore", decisions.explore),
     ):
         integers[GLOBAL.index(name)] = values.numpy().ravel()
     for column, name in enumerate(GLOBAL[8:12]):
@@ -234,4 +234,5 @@ def unpack(messages, device):
         [],
     )
     legal = _padded(slots, field(GLOBAL.index("legal")).bool())
-    return Decisions(batch, legal), sorted({name for message in messages for name in message[3]})
+    explore = _padded(slots, field(GLOBAL.index("explore")).bool())
+    return Decisions(batch, legal, explore), sorted({name for message in messages for name in message[3]})

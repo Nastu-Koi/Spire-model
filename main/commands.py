@@ -368,7 +368,7 @@ def run_iterate(args, runtime):
         wave_shares=args.wave_shares,
         boundaries=args.boundary_acts, bosses=args.boundary_bosses, group_n=args.group_n, group_m=args.group_m,
         min_entropy=args.min_entropy, clip=args.clip, kl=args.kl, reference_every=args.reference_every,
-        learning_rates=args.learning_rates,
+        learning_rates=args.learning_rates, explore_potions=args.explore_potions,
         updates=args.updates, weight_cap=args.weight_cap, phase_weights=args.phase_weights,
         window_shards=args.window_shards,
         evaluate_every=args.evaluate_every,

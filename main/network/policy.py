@@ -22,6 +22,7 @@ class Choice:
     entropy: torch.Tensor | None = None
     ranking: list[dict] | None = None
     base_log_prob: torch.Tensor | float | None = None  # at temperature 1
+    explored: bool = False  # drawn among the candidates the caller restricted it to, not from the policy
 
 
 class SessionPolicy:
@@ -48,7 +49,7 @@ class SessionPolicy:
         self.last_state_version = state_version
         return frame["legal"]["candidates"]
 
-    def choose(self, frame, *, teacher=None, sample=True, top_k=0, pad_to=None, temperature=1.0):
+    def choose(self, frame, *, teacher=None, sample=True, top_k=0, pad_to=None, temperature=1.0, restrict=None):
         return choose_batch(
             [self],
             [frame],
@@ -57,6 +58,7 @@ class SessionPolicy:
             top_k=top_k,
             pad_to=pad_to,
             temperature=temperature,
+            restrict=[restrict],
         )[0]
 
 
@@ -79,11 +81,15 @@ def _mask(model, obs, candidates):
 
 
 def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_to=None,
-                 temperature=1.0):
+                 temperature=1.0, restrict=None):
     """Choose one action for each independent session with one model batch.
 
     Forced actions bypass the model. Probabilities are those of the scores
-    divided by `temperature`.
+    divided by `temperature`. `restrict`, one entry per frame, names the candidates
+    an exploring decision is drawn among (at their relative odds under the
+    policy) instead of from the whole distribution; None draws from it. The choice
+    keeps the policy's own log-probability either way: what is explored is the
+    action, not what the policy is held to have said.
     """
     policies, frames = list(policies), list(frames)
     if len(policies) != len(frames):
@@ -93,6 +99,9 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
     teachers = [None] * len(policies) if teachers is None else list(teachers)
     if len(teachers) != len(policies):
         raise ValueError("Teachers and policies must have the same length")
+    restrict = [None] * len(policies) if restrict is None else list(restrict)
+    if len(restrict) != len(policies):
+        raise ValueError("Restrictions and policies must have the same length")
     if not policies:
         return []
     model, vocabulary = policies[0].model, policies[0].vocabulary
@@ -108,6 +117,8 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
         refs = {candidate["candidate_ref"]: candidate for candidate in candidates}
         if teacher is not None and teacher not in refs:
             raise ProtocolError("Recorded label is absent from the engine legal set")
+        if restrict[batch_index] is not None and not set(restrict[batch_index]) <= set(refs):
+            raise ProtocolError("A restriction names candidates the engine did not offer")
         if len(candidates) == 1:
             results[batch_index] = Choice(candidates[0]["candidate_ref"])
             continue
@@ -120,7 +131,7 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
             pending.append(batch_index)
             observations.append(obs)
             cache_keys.append(cache_key)
-        metadata[batch_index] = (candidates, teacher)
+        metadata[batch_index] = (candidates, teacher, restrict[batch_index])
 
     if observations:
         encoded = model.encode(observations, vocabulary, pad_to=pad_to)
@@ -139,17 +150,20 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
     outputs = model.decode_batch([policies[i].encoded for i in active], masks)
     for batch_index, legal, output in zip(active, legal_sets, outputs):
         policy = policies[batch_index]
-        candidates, teacher = metadata[batch_index]
+        candidates, teacher, allowed = metadata[batch_index]
         slots = policy.encoded.observation.slot_refs
         refs = {candidate["candidate_ref"]: candidate for candidate in candidates}
         distribution = output.distribution(temperature)
-        index = (
-            slots.index(refs[teacher]["decoder_slot_ref"])
-            if teacher is not None
-            else int(distribution.sample())
-            if sample
-            else int(output.logits.argmax())
-        )
+        if teacher is not None:
+            index = slots.index(refs[teacher]["decoder_slot_ref"])
+        elif not sample:
+            index = int(output.logits.argmax())
+        elif allowed is None:
+            index = int(distribution.sample())
+        else:
+            among = {refs[ref]["decoder_slot_ref"] for ref in allowed}
+            keep = torch.tensor([slot in among for slot in slots], device=distribution.probs.device)
+            index = int(torch.multinomial(distribution.probs.masked_fill(~keep, 0), 1))
         ranking = None
         if top_k:
             indices, _ = output.topk(top_k)
@@ -164,6 +178,7 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
             distribution.entropy(),
             ranking,
             output.distribution(1.0).log_prob(index_tensor),
+            explored=sample and allowed is not None,
         )
     return results
 
@@ -174,23 +189,33 @@ class Decisions(Packed):
 
     batch: Batch
     masks: torch.Tensor  # [decisions, actions] legal slots
+    explore: torch.Tensor  # [decisions, actions] the slots an exploring decision is drawn among; no row set otherwise
 
 
-def prepare_decisions(vocabulary, frames):
+def prepare_decisions(vocabulary, frames, restrict=None):
     """Pack one decision of each frame; returns their observations beside the pack.
-    Every frame must offer a choice: a forced action has nothing to score."""
-    observations, masks = [], []
-    for frame in frames:
+    Every frame must offer a choice: a forced action has nothing to score. `restrict`,
+    one entry per frame, names the candidates an exploring decision is drawn among
+    (`choose_batch`); None for a decision drawn from the whole distribution."""
+    restrict = [None] * len(frames) if restrict is None else list(restrict)
+    observations, masks, explore = [], [], []
+    for frame, allowed in zip(frames, restrict):
         obs = observation(frame)
-        legal = {candidate["decoder_slot_ref"] for candidate in frame["legal"]["candidates"]}
+        candidates = {candidate["candidate_ref"]: candidate["decoder_slot_ref"] for candidate in frame["legal"]["candidates"]}
+        legal = set(candidates.values())
         if not legal <= set(obs.slot_refs):
             raise ProtocolError("Unrepresented legal candidate")
+        if allowed is not None and not set(allowed) <= set(candidates):
+            raise ProtocolError("A restriction names candidates the engine did not offer")
+        among = set() if allowed is None else {candidates[ref] for ref in allowed}
         observations.append(obs)
         masks.append([slot in legal for slot in obs.slot_refs])
+        explore.append([slot in among for slot in obs.slot_refs])
     width = max(map(len, masks))
     return observations, Decisions(
         collate(observations, vocabulary),
         torch.tensor([mask + [False] * (width - len(mask)) for mask in masks]),
+        torch.tensor([mask + [False] * (width - len(mask)) for mask in explore]),
     )
 
 

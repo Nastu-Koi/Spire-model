@@ -409,3 +409,14 @@ def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
                                      "--reference-every", "3"])
     assert arguments.reference_every == 3 and Settings(checkpoint="c").reference_every == 0
 
+
+
+def test_the_potion_exploration_rate_is_a_setting_of_the_run(world):
+    arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
+                                     "--explore-potions", "0.25"])
+    assert arguments.explore_potions == 0.25
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).explore_potions == 0.0
+    assert settings(world, eval_seeds=None, explore_potions=0.25).explore_potions == 0.25
+    for wrong in (1.5, -0.1):
+        with pytest.raises(ValueError, match="exploration"):
+            settings(world, eval_seeds=None, explore_potions=wrong)

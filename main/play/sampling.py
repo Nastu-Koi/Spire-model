@@ -64,13 +64,13 @@ class _Waiting:
             def reset(self):
                 session.reset()
 
-            def choose(self, frame, *, sample=True, temperature=1.0):
+            def choose(self, frame, *, sample=True, temperature=1.0, restrict=None):
                 candidates = session.advance(frame)
                 # A forced action needs no network, hence no trip to it.
                 if len(candidates) == 1:
                     return Choice(candidates[0]["candidate_ref"])
                 result = Future()
-                requests.put((job, frame, temperature, result))
+                requests.put((job, frame, temperature, restrict, result))
                 return result.result()
 
         return Remote()
@@ -88,18 +88,18 @@ class _Waiting:
             except queue.Empty:
                 break
         observations, messages = [], []
-        for job, frame, temperature, _ in waiting:
-            (obs,), decisions = prepare_decisions(self.vocabulary, [frame])
+        for job, frame, temperature, restrict, _ in waiting:
+            (obs,), decisions = prepare_decisions(self.vocabulary, [frame], restrict=[restrict])
             observations.append(obs)
             messages.append((job, pack(decisions), temperature))
         self.send(("decisions", messages))
         chosen = self.connection.recv()
-        for (_, frame, _, result), obs, (slot, log_prob, base) in zip(waiting, observations, chosen):
+        for (_, frame, _, restrict, result), obs, (slot, log_prob, base) in zip(waiting, observations, chosen):
             slot = obs.slot_refs[int(slot)]
             result.set_result(Choice(
                 next(c["candidate_ref"] for c in frame["legal"]["candidates"]
                      if c["decoder_slot_ref"] == slot),
-                log_prob, base_log_prob=base))
+                log_prob, base_log_prob=base, explored=restrict is not None))
 
 
 def _without_frames(run):
@@ -113,7 +113,13 @@ def _without_frames(run):
              branches=sum(not step["forced"] for step in macro["steps"]), decisions=len(macro["steps"]))
         for macro in run["macros"]
     ]
+    handed["explored"] = explored_steps(run)
     return handed
+
+
+def explored_steps(run):
+    """How many of a run's decisions were explored (`RolloutRunner.explore_potions`)."""
+    return sum(bool(step.get("explored")) for macro in run["macros"] if "steps" in macro for step in macro["steps"])
 
 
 def _handed(run, layout):
@@ -349,7 +355,7 @@ class Samplers:
         self.taken.value = 0
         settings = {name: getattr(runner, name) for name in (
             "precision", "version", "max_steps", "timeout", "ascension", "claim_rewards",
-            "temperatures", "iteration")}
+            "temperatures", "explore_potions", "iteration")}
         for connection in self.connections:
             connection.send((settings, runner.digest, jobs, sample, layout))
         active = dict(enumerate(self.connections))

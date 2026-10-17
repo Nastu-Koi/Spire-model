@@ -153,7 +153,7 @@ class WaveWriter:
         self.shards = ShardWriter(self.directory, shard_samples, flush=True, resume=resume)
         self.outcomes, self.failed, self.phases = Counter(), Counter(), Counter()
         self.groups = set()
-        self.written = self.stored_steps = 0
+        self.written = self.stored_steps = self.explored = 0
         self.done = {row["run_id"] for row in self.shards.rows}
         self.resumed = len(self.shards.rows)
         for row in self.shards.rows:
@@ -161,6 +161,7 @@ class WaveWriter:
             self.phases.update(row["phases"])
             self.groups.add(row["group"])
             self.written += 1
+            self.explored += row.get("explored") or 0
         # The contracts of the rows found, from one of their runs each.
         for row in self.shards.rows:
             if row["contract"] not in self.shards.contracts:
@@ -181,6 +182,7 @@ class WaveWriter:
         self.groups.add(run["group"])
         self.written += 1
         self.stored_steps += run["stored_steps"]
+        self.explored += run.get("explored") or 0
         return True
 
     def close(self, wave, stop, jobs, seconds, collector=None):
@@ -193,6 +195,7 @@ class WaveWriter:
                        until=None if stop is None else list(stop), segments=len(jobs),
                        written=self.written, resumed=self.resumed, groups=len(self.groups),
                        outcomes=dict(self.outcomes), failed=dict(self.failed), phases=dict(sorted(self.phases.items())),
+                       explored=self.explored,
                        stored_steps=self.stored_steps, shards=len(self.shards.shards), contracts=self.shards.contracts,
                        seconds=round(seconds, 1), collector=collector)
         _write_summary(self.directory, summary)
