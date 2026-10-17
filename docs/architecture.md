@@ -22,7 +22,7 @@ main/
   play/      对局循环、多进程采样、幕组采样、采样轮、评估报告、合成引擎
   demos/     示范导入（摘要锚点导出、Steam 录制）
   learn/     数据供给、加权 NLL 训练器、幕组优势、幕组批、裁剪目标
-  iterate.py 迭代驱动；cli.py 命令入口；steam.py 实机接管
+  iterate.py 迭代驱动；cli.py 命令入口（参数与分派）；commands.py 各命令的执行；steam.py 实机接管
 spire_codex_data/   公开对局下载、来源审计、摘要账本、锚点生成（示范生成）
 combat_solver_cli/  CombatSolver worker 与客户端（示范战斗、评估参考）
 public_history/     无头与 Steam 共用的公开历史状态机（C#）

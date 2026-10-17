@@ -8,7 +8,9 @@ import torch
 from main.encoding import rules
 from main.network.config import ModelConfig
 from main.network.model import PolicyNetwork
-from main.encoding.representation import Vocabulary, clean_entity, observation
+from main.encoding.frames import clean_entity
+from main.encoding.representation import observation
+from main.encoding.vocabulary import Vocabulary
 from main.encoding.batch import collate
 
 

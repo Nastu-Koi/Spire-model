@@ -1,12 +1,12 @@
 """The subpackages of `main` depend on each other in one direction only.
 
-    env <- encoding <- data, network <- play <- learn <- iterate <- cli
-                                  demos <- steam <- cli
+    env <- encoding <- data, network <- play <- learn <- iterate <- commands <- cli
+                                  demos <- steam <- commands
 
 A subpackage imports from those of lower rank and from itself; `data` and `network`
 stand side by side and import neither each other. The modules at the top (`iterate`,
-`steam`) may import anything below them; `cli` is the entry and imports them,
-and nothing imports `cli`.
+`steam`, `commands`) may import anything below them; `cli` is the entry and
+imports `commands`, and nothing imports `cli`.
 """
 
 import ast

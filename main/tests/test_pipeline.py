@@ -3,14 +3,14 @@
 import pytest
 import torch
 
-from main.cli import vocabulary_for
+from main.commands import vocabulary_for
 from main.network.config import ModelConfig, TrainConfig
 from main.data.shards import microbatches, samples
 from main.learn.loader import batches
 from main.network.model import PolicyNetwork
 from main.network.policy import SessionPolicy, prepare_replay, replay_batch
 from main.env.protocol import CHARACTERS
-from main.encoding.representation import Table, Vocabulary
+from main.encoding.vocabulary import Table, Vocabulary
 from main.play.testing import demonstration
 
 

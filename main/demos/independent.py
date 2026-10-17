@@ -17,7 +17,7 @@ from main.env.control import controller_for
 from main.data.shards import validate_run
 from main.data.index import ShardWriter, index_row, member
 from main.env.protocol import CHARACTERS, SCHEMA, ProtocolError, segment_key, validate_frame
-from main.encoding.representation import clean_frame
+from main.encoding.frames import clean_frame
 
 SAMPLE_SCHEMA = "spire-independent-decisions-v1"
 IMPORT_VERSION = "independent-import-v6"

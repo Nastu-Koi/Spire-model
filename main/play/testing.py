@@ -236,7 +236,7 @@ class SyntheticEngine:
 def demonstration(character="Ironclad", seed="demo", count=10, select=5):
     """Generate an explicit synthetic teacher trajectory, never an on-policy claim."""
     from main.env.protocol import SCHEMA, segment_key
-    from main.encoding.representation import clean_frame
+    from main.encoding.frames import clean_frame
 
     engine = SyntheticEngine(count, select)
     frame = engine.reset(character, seed)

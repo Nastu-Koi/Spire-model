@@ -12,7 +12,7 @@ from main.demos.independent import convert_group, import_samples
 from main.learn import loader
 from main.network.model import PolicyNetwork
 from main.env.protocol import ProtocolError, action_semantics, execution_command
-from main.encoding.representation import Vocabulary
+from main.encoding.vocabulary import Vocabulary
 from main.play.testing import SyntheticEngine, demonstration
 from main.learn.trainer import Learner
 from spire_codex_data.anchor import row

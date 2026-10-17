@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from main.env.protocol import CHARACTERS, SCHEMA, ProtocolError, segment_key, validate_frame
-from main.encoding.representation import clean_frame
+from main.encoding.frames import clean_frame
 from main.env.rewards import require_reward_version
 from main.env.control import CONTROL_VERSION, controller_for, is_policy_frame, policy_macros
 from main.data.index import INDEX, read_index, row_source, sample_source

@@ -1,6 +1,6 @@
 # steam：录制 Mod 与实机接管
 
-`steam_recorder/` 是 Steam 游戏采集和模型控制 Mod，`main/steam.py` 是 Python 控制端，`main/demos/recorder.py` 导入录制。Mod 适配 Slay the Spire 2 **0.111.0、单人 A0–A10**。仓库目录名为 `steam_recorder`，游戏内 Mod ID 保持 `RunRecorder`，记录写入 `user://run_recorder`。
+`steam_recorder/` 是 Steam 游戏采集和模型控制 Mod，`main/steam.py` 是 Python 控制端，`main/demos/recorder/` 导入录制（`snapshot.py` 公开快照、`macros.py` 宏动作、`journal.py` 读取与导入）。Mod 适配 Slay the Spire 2 **0.111.0、单人 A0–A10**。仓库目录名为 `steam_recorder`，游戏内 Mod ID 保持 `RunRecorder`，记录写入 `user://run_recorder`。
 
 0.5.10 与无头共用公开历史维护代码：前回合敌人意图、公开已知牌位、药水和问号房间概率；事件和营火选项除显示的数值外，另导出显示的内容名所指的内容 ID（`displayed_names`），规则与无头引擎相同。新局从公开规则开始维护；中途加载或缺失前缀保持 unknown，不能读取保存的内部 odds 补值。Python 仍核对实际难度与检查点；领奖交给主模型，水晶球格子及工具使用公开几何规划器。
 

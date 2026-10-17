@@ -8,8 +8,8 @@ import torch
 from main.network.config import ModelConfig, TrainConfig
 from main.network.model import PolicyNetwork
 from main.env.protocol import CHARACTERS, execution_command
-from main.encoding.representation import clean_frame
-from main.encoding.representation import Vocabulary
+from main.encoding.frames import clean_frame
+from main.encoding.vocabulary import Vocabulary
 from main.play.testing import SyntheticEngine, demonstration
 
 class Journey(SyntheticEngine):

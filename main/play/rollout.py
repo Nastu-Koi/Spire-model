@@ -14,7 +14,7 @@ from main.network.policy import SessionPolicy
 from main.data.index import COMPRESSION
 from main.env.control import CONTROL_VERSION, REWARD_RULE, environment_action, free_reward, is_policy_frame
 from main.env.protocol import CHARACTERS, SCHEMA, ProtocolError, execution_command, fingerprint, segment_key, validate_frame
-from main.encoding.representation import clean_frame
+from main.encoding.frames import clean_frame
 from main.env.rewards import MilestoneLedger
 from main.env.public_history import require_history_version
 from main.env.saves import FightTracker, continue_save

@@ -9,7 +9,8 @@ from dataclasses import dataclass, fields
 import torch
 from torch.nn import functional as F
 
-from main.encoding.representation import REFERENCE_ROLES, field_tensors
+from main.encoding.fields import field_tensors
+from main.encoding.vocabulary import REFERENCE_ROLES
 
 
 def _move(value, device):

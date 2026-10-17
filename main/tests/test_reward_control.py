@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from main.network.config import ModelConfig
 from main.data.shards import validate_run
 from main.network.model import PolicyNetwork
-from main.encoding.representation import Vocabulary
+from main.encoding.vocabulary import Vocabulary
 from main.play.rollout import RolloutRunner
 from main.play.testing import SyntheticEngine
 from main.tests.test_crystal_planner import board_frame, corners

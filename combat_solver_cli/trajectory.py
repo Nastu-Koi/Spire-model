@@ -10,7 +10,7 @@ from pathlib import Path
 from main.data.shards import validate_run
 from main.env.control import controller_for
 from main.env.protocol import SCHEMA, execution_command, segment_key, validate_frame
-from main.encoding.representation import clean_frame
+from main.encoding.frames import clean_frame
 from main.env.rewards import MilestoneLedger
 
 from .client import SolverEngine, configuration

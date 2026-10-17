@@ -14,7 +14,7 @@ from main.demos.independent import convert_group
 from main.learn.loader import stream
 from main.network.model import PolicyNetwork
 from main.env.protocol import ProtocolError, action_semantics
-from main.encoding.representation import Vocabulary
+from main.encoding.vocabulary import Vocabulary
 from main.play.rollout import RolloutRunner
 from main.steam import choose_action
 from main.play.testing import demonstration

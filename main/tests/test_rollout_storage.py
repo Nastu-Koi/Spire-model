@@ -114,7 +114,7 @@ class Scripted:
 
 
 def test_evaluate_writes_full_runs(tmp_path, monkeypatch, capsys):
-    from main import cli as cli_module
+    from main import commands as cli_module
 
     assert main(["smoke", "--output", str(tmp_path / "smoke")]) == 0
     checkpoint = tmp_path / "smoke/checkpoint"

@@ -8,7 +8,7 @@ import pytest
 from main.data.shards import samples as training_samples, validate_run
 from main.demos.independent import convert_group
 from main.env.protocol import ProtocolError, action_semantics
-from main.demos.recorder import RECORDER_SCHEMA, convert_journal
+from main.demos.recorder.journal import RECORDER_SCHEMA, convert_journal
 from main.steam import choose_action
 from main.play.testing import demonstration
 from main.tests.test_crystal_planner import board_frame, corners

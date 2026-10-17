@@ -4,7 +4,12 @@
 
 | 模块 | 内容 |
 | --- | --- |
-| `representation.py` | 公开字段白名单（`clean_frame`、`clean_public`）、观察（实体、字段、引用、程序、地图前沿）、冻结词表 `Vocabulary` |
+| `frames.py` | 公开字段白名单与清洗（`clean_frame`、`clean_public`、`clean_entity`） |
+| `fields.py` | 实体的字段编码（符号、字段名、数值与 known／applicable）、按内容缓存的字段行、字段行打包成张量（`field_tensors`） |
+| `programs.py` | 局部程序：效果程序与规则文本解析成节点与类型化边（`Effect`、`effect_tree`、`entity_program`），按内容缓存 |
+| `maps.py` | 地图压缩：当前节点与地图前沿，每个前沿节点带可达地图的程序（`compress_map`、`map_relations`） |
+| `representation.py` | 一帧的观察（`Observation`、`observation`）：实体、字段、引用、程序、地图前沿；编码契约 `ENCODING_VERSION`；清缓存 `forget` |
+| `vocabulary.py` | 冻结词表（`Table`、`Vocabulary`）与名称登记（`names_from_frames`） |
 | `rules.py` | 规则文本：本地化模板的渲染与切词 |
 | `batch.py` | 观察 → 批（字段张量、引用、程序分组与去重、关系边、动作位置） |
 

@@ -6,7 +6,8 @@ from copy import deepcopy
 import pytest
 
 from main.network.checkpoint import load_model, save_checkpoint
-from main.cli import parser, vocabulary_for
+from main.cli import parser
+from main.commands import vocabulary_for
 from main.network.config import ModelConfig, TrainConfig
 from main.data.shards import validate_run
 from main.network.model import PolicyNetwork

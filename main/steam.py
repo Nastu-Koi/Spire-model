@@ -12,8 +12,9 @@ from main.network.checkpoint import load_model
 from main.network.policy import SessionPolicy
 from main.env.control import environment_action
 from main.env.protocol import ProtocolError, validate_frame
-from main.encoding.representation import clean_frame
-from main.demos.recorder import PHASES, SELECTION_CANCEL, PublicSnapshot, cancel_offered, require
+from main.encoding.frames import clean_frame
+from main.demos.recorder.macros import PHASES, SELECTION_CANCEL, cancel_offered
+from main.demos.recorder.snapshot import PublicSnapshot, require
 from main.play.rollout import precision_context
 from main.env.public_history import HISTORY_VERSION
 

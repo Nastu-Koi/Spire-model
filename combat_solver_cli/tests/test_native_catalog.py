@@ -10,7 +10,7 @@ from combat_solver_cli.client import SolverEngine
 from combat_solver_cli.search_support import collapse_noncombat_cancels, resolve
 from main.network.config import ModelConfig
 from main.env.protocol import execution_command, validate_frame
-from main.encoding.representation import Vocabulary
+from main.encoding.vocabulary import Vocabulary
 from combat_solver_cli.trajectory import native_replay_error
 
 SOLVER = {'budget_ms': 250, 'boss_budget_ms': 5000, 'potions': True, 'reuse_turn_plan': True}

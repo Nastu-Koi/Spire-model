@@ -13,7 +13,8 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-from main.encoding.representation import Effect, fields_of
+from main.encoding.fields import fields_of
+from main.encoding.programs import Effect
 
 LOCALIZATION = Path(__file__).resolve().parents[2] / "sts2-cli" / "localization_eng"
 # Longest descriptions are far shorter; the limit only bounds a malformed entry.

@@ -7,8 +7,8 @@ import pytest
 
 from main import steam
 from main.env.protocol import ProtocolError
-from main.demos.recorder import card_fields
-from main.encoding.representation import clean_public
+from main.demos.recorder.snapshot import card_fields
+from main.encoding.frames import clean_public
 from main.steam import PROTOCOL, SteamBridge, choose_action, live_frame
 
 FIXTURES = Path(__file__).parent / "fixtures"

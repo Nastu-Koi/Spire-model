@@ -11,13 +11,14 @@ import pytest
 import torch
 
 from main.network.checkpoint import load_model, save_checkpoint
-from main.cli import parser, vocabulary_for
+from main.cli import parser
+from main.commands import vocabulary_for
 from main.network.config import LearningRates, ModelConfig, TrainConfig
 from main.data.shards import RunShards, samples
 from main.learn.loader import batches, stream
 from main.network.model import PolicyNetwork
 from main.network.optim import TRAINING_VERSION, BootstrapSchedule
-from main.encoding.representation import Vocabulary
+from main.encoding.vocabulary import Vocabulary
 from main.play.testing import demonstration
 from main.learn.trainer import Learner
 

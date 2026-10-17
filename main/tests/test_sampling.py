@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from main.encoding.batch import Packed
-from main.cli import vocabulary_for
+from main.commands import vocabulary_for
 from main.network.config import ModelConfig, TrainConfig
 from main.data.shards import validate_run
 from main.network.model import PolicyNetwork
