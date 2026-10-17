@@ -43,7 +43,6 @@ from pathlib import Path
 import torch
 
 from main.env.seeds import split_group
-from main.env.runtime import configure_gpu
 
 from main.learn import batches, grpo
 from main.learn.advantage import FILE as ADVANTAGES
@@ -102,9 +101,6 @@ class Settings:
     learning_rates: str | None = None
     clip: float = grpo.CLIP
     kl: float = grpo.KL
-    # Sample the next round (and evaluate) on a sampling side of its own while the
-    # policy is updated: round N+1 is played by the policy before update N.
-    overlap: bool = False
 
     def __post_init__(self):
         if self.runs_per_character < 1 or self.evaluate_every < 1:
@@ -317,11 +313,8 @@ class Driver:
         self.engine = engine
         self.policy, self.groups = self.output / "policy", self.output / "groups"
         self.learner = self.history = None
-        # The sampling processes of every round, forked before anything is trained; or
-        # with `overlap` the sampling side that holds them (`main/overlap.py`).
-        self.pool = self.side = None
-        self.iterations = 0  # how many the run brings the output to
-        self.dispatched = None  # the job the sampling side is on during an update
+        # The sampling processes of every round, forked before anything is trained.
+        self.pool = None
         self.resumed = False  # the policy in hand is this run's own (`load`)
         self.at = {}  # the iteration and the step under way, for the status
         self.output.mkdir(parents=True, exist_ok=True)
@@ -428,66 +421,10 @@ class Driver:
         summary = groups_summary(directory)
         if summary is None:
             seeds = self.round_seeds(iteration)
-            if self.side is not None:
-                # The sampling side plays it now, with the policy the round is due.
-                return self.side.run(dict(policy=str(self.sampling_policy(iteration)),
-                                          round=self.round_job(iteration, seeds)))["round"]
             summary = play_round(self.samplers(settings.workers), self.sampler(iteration), seeds, directory,
                                  settings, self.output)
             self.release()
         return round_result(summary, directory, settings)
-
-    # ---- The sampling side of an overlapped run ----
-
-    def round_job(self, iteration, seeds):
-        return dict(iteration=iteration, seeds=seeds, directory=str(self.groups / f"round-{iteration}"))
-
-    def evaluation_job(self, iteration):
-        return dict(iteration=iteration, seeds=evaluation_seeds(self.settings),
-                    directory=str(self.output / "evaluation" / f"iteration-{iteration:04d}"))
-
-    def sampling_policy(self, iteration):
-        """The policy that samples round `iteration` of an overlapped run: the one in
-        hand when the round's sampling begins, during the update before, that is the
-        archive of iteration − 2; the starting checkpoint for the first two rounds. An
-        archive that is gone (a run that was not overlapped before) gives way to the
-        current policy."""
-        if iteration < 2:
-            return Path(self.settings.checkpoint)
-        archive = self.policy / f"iteration-{iteration - 2:04d}"
-        return archive if archive.exists() else self.policy / "current"
-
-    def evaluation_pending(self, iteration):
-        """Whether the policy of `iteration`'s update is due an evaluation not made yet."""
-        entry = self.entry(iteration) if iteration >= 0 else {}
-        return bool(self.settings.eval_seeds) and (iteration + 1) % self.settings.evaluate_every == 0 \
-            and "update" in entry and "evaluation" not in entry
-
-    def dispatch(self, iteration):
-        """Hand the sampling side what it does during this iteration's update: the next
-        round, by the policy of the iteration before this one, and that policy's
-        evaluation when due."""
-        job, following = dict(policy=str(self.sampling_policy(iteration + 1))), iteration + 1
-        if following < self.iterations and "sample" not in self.entry(following) \
-                and groups_summary(self.groups / f"round-{following}") is None:
-            job["round"] = self.round_job(following, self.round_seeds(following))
-        if self.evaluation_pending(iteration - 1):
-            job["evaluation"] = self.evaluation_job(iteration - 1)
-        if "round" in job or "evaluation" in job:
-            self.side.dispatch(job)
-            self.dispatched = job
-
-    def collect(self, iteration):
-        """Record what the sampling side did during the update. Returns it by kind."""
-        if self.dispatched is None:
-            return {}
-        job, self.dispatched = self.dispatched, None
-        results = self.side.collect()
-        if "round" in results:
-            self.record(job["round"]["iteration"], "sample", results["round"])
-        if "evaluation" in results:
-            self.record(job["evaluation"]["iteration"], "evaluation", results["evaluation"])
-        return results
 
     def advantages(self, iteration):
         """The advantages of every wave of the iteration's round of act groups, from
@@ -529,8 +466,7 @@ class Driver:
     def prune_archives(self, iteration):
         """Remove the policy archives of earlier iterations that nothing reads any more.
         An evaluated archive is kept, as are one an evaluation is due of, the one the
-        next update's KL refers to, and this iteration's own (an overlapped run's
-        sampling side plays the round after next with it)."""
+        next update's KL refers to, and this iteration's own."""
         evaluated = {int(number) for number, entry in self.state["iterations"].items() if entry.get("evaluation")}
         due = {number for number in range(iteration) if self.settings.eval_seeds
                and (number + 1) % self.settings.evaluate_every == 0}
@@ -612,10 +548,6 @@ class Driver:
 
     def evaluate(self, iteration):
         settings, directory = self.settings, self.output / "evaluation" / f"iteration-{iteration:04d}"
-        if self.side is not None and not (directory / "report.json").is_file():
-            # The sampling side evaluates the policy this iteration's update archived.
-            return self.side.run(dict(policy=str(self.policy / f"iteration-{iteration:04d}"),
-                                      evaluation=self.evaluation_job(iteration)))["evaluation"]
         result = play_evaluation(self.samplers(settings.eval_workers or settings.workers), self.sampler(),
                                  evaluation_seeds(settings), directory, iteration,
                                  getattr(self.learner, "checkpoint_metadata", {}), self.output)
@@ -640,22 +572,14 @@ class Driver:
         self.record(iteration, "settings", asdict(settings))
         sampled = self.step(iteration, "sample", self.sample)
         advantages = self.step(iteration, "advantages", self.advantages)
-        if self.side is not None:
-            self.dispatch(iteration)
         if "update" not in self.entry(iteration):
             self.begin(iteration, "update")
             self.record(iteration, "update", self.update(iteration))
         update = self.entry(iteration)["update"]
-        arrived = self.collect(iteration)
-        # Overlapped, a policy's evaluation comes with the next iteration's sampling,
-        # except the last iteration's, which nothing follows.
-        if "evaluation" not in self.entry(iteration) and self.evaluation_due(iteration) \
-                and (self.side is None or iteration + 1 >= self.iterations):
+        if "evaluation" not in self.entry(iteration) and self.evaluation_due(iteration):
             self.step(iteration, "evaluation", self.evaluate)
         self.step(iteration, "cleanup", self.cleanup)
-        evaluation, evaluated = self.entry(iteration).get("evaluation"), iteration
-        if evaluation is None and "evaluation" in arrived:
-            evaluation, evaluated = arrived["evaluation"], iteration - 1
+        evaluation = self.entry(iteration).get("evaluation")
         waves = sampled["waves"]
         seen = update["seen"]
         metrics = dict(
@@ -672,7 +596,7 @@ class Driver:
             **{f"{wave}_zero_share": update["waves"][wave]["zero_share"] for wave in waves})
         if evaluation:
             metrics.update(eval_runs=evaluation["runs"], eval_win_rate=evaluation["win_rate"],
-                           eval_mean_floor=evaluation["mean_floor"], eval_iteration=evaluated)
+                           eval_mean_floor=evaluation["mean_floor"])
         self.history.append(iteration, metrics, policy_version=self.learner.policy_version,
                             duration_seconds=time.monotonic() - started)
         self.record(iteration, "complete", True)
@@ -685,15 +609,6 @@ class Driver:
         """Bring the output to `iterations` finished iterations. Returns the state."""
         if iterations < 1:
             raise ValueError("At least one iteration")
-        self.iterations = iterations
-        if self.settings.overlap:
-            # Forked before this process touches the GPU, so that it may have a CUDA
-            # context of its own, and before the history takes the output's lock.
-            from main.overlap import SamplingSide
-
-            self.side = SamplingSide(self.engine, self.settings, self.device)
-        if "gpu" not in self.runtime:
-            self.runtime.update(configure_gpu(self.device))
         self.history = TrainingHistory(self.output, "iterate", asdict(self.settings))
         # A request to stop ends the step under way as an interruption does: the
         # engines and the loaders go with it.
@@ -702,11 +617,10 @@ class Driver:
         try:
             allow_compiled_variants()
             self.learner = self.load()
-            if self.side is None:
-                # Forked now, the processes share the heap of a policy just loaded; forked
-                # after an update, each copies page by page the trainer's heap it allocates in.
-                self.pool = Samplers(self.engine, self.learner.model, self.learner.vocabulary,
-                                     engines=self.settings.workers, processes=self.settings.processes)
+            # Forked now, the processes share the heap of a policy just loaded; forked
+            # after an update, each copies page by page the trainer's heap it allocates in.
+            self.pool = Samplers(self.engine, self.learner.model, self.learner.vocabulary,
+                                 engines=self.settings.workers, processes=self.settings.processes)
             self.history.status("running", updates=self.learner.updates)
             for iteration in range(iterations):
                 if not self.entry(iteration).get("complete"):
@@ -727,9 +641,6 @@ class Driver:
             if self.pool is not None:
                 self.pool.close()
                 self.pool = None
-            if self.side is not None:
-                self.side.close()
-                self.side = None
             self.history.close()
             if handled:
                 signal.signal(signal.SIGTERM, previous)

@@ -110,7 +110,7 @@ python -m main --device cuda iterate --kl 0.1 --learning-rates configs/learning-
   --eval-seeds <开发集种子文件> --eval-runs-per-character 100 --evaluate-every 2
 ```
 
-重跑同一条命令即断点续跑。每次迭代：按切点分波采样幕组（`--boundary-acts` 幕开头、`--boundary-bosses` Boss 入场；`--runs-per-character` 是每角色的种子数，`--group-n`、`--group-m` 是每个起点的段数）、算各波的优势、一遍更新、按间隔评估、清理。一遍默认把每一波各看一次；`--wave-shares 1 1 1` 这类相对数改各波在批里的份额，份额就是该波在梯度里的占比。更新是裁剪目标，KL 对 `--checkpoint`（`--clip`、`--kl`），`--reference-every k` 让参考每 k 次迭代换成当时的策略。`--learning-rates <json>`（`bootstrap` 也收）给这次运行自己的四组学习率，不给时沿用检查点的。`--overlap` 开重叠模式：下一轮采样与这一轮更新同时进行（采样由单独的采样侧进程做，晚一版策略），一次迭代接近两者之长；默认两者依次进行。步骤、参数、存储与资源见 [learn](docs/implementation/learn.md#迭代驱动)。
+重跑同一条命令即断点续跑。每次迭代：按切点分波采样幕组（`--boundary-acts` 幕开头、`--boundary-bosses` Boss 入场；`--runs-per-character` 是每角色的种子数，`--group-n`、`--group-m` 是每个起点的段数）、算各波的优势、一遍更新、按间隔评估、清理。一遍默认把每一波各看一次；`--wave-shares 1 1 1` 这类相对数改各波在批里的份额，份额就是该波在梯度里的占比。更新是裁剪目标，KL 对 `--checkpoint`（`--clip`、`--kl`），`--reference-every k` 让参考每 k 次迭代换成当时的策略。`--learning-rates <json>`（`bootstrap` 也收）给这次运行自己的四组学习率，不给时沿用检查点的。步骤、参数、存储与资源见 [learn](docs/implementation/learn.md#迭代驱动)。
 
 ## Steam
 

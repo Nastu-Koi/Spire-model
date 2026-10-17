@@ -22,7 +22,7 @@ main/
   play/      对局循环、多进程采样、幕组采样、采样轮、评估报告、合成引擎
   demos/     示范导入（摘要锚点导出、Steam 录制）
   learn/     数据供给、加权 NLL 训练器、幕组优势、幕组批、裁剪目标
-  iterate.py 迭代驱动；overlap.py 重叠模式的采样侧；cli.py 命令入口；steam.py 实机接管
+  iterate.py 迭代驱动；cli.py 命令入口；steam.py 实机接管
 spire_codex_data/   公开对局下载、来源审计、摘要账本、锚点生成（示范生成）
 combat_solver_cli/  CombatSolver worker 与客户端（示范战斗、评估参考）
 public_history/     无头与 Steam 共用的公开历史状态机（C#）
@@ -30,7 +30,7 @@ steam_recorder/     Steam Mod：录制与控制桥接（C#）
 sts2-cli/           无头引擎
 ```
 
-依赖只朝一个方向：`env ← encoding ← data, network ← play ← learn ← iterate, overlap, cli`；`demos` 在 `data` 之上，供 `cli` 与 `steam` 使用。`data` 与 `network` 互不依赖。`main` 内部除顶层模块外不引用 `spire_codex_data` 与 `combat_solver_cli`，后两者反过来引用 `main`。`main/tests/test_layers.py` 检查这一点。
+依赖只朝一个方向：`env ← encoding ← data, network ← play ← learn ← iterate, cli`；`demos` 在 `data` 之上，供 `cli` 与 `steam` 使用。`data` 与 `network` 互不依赖。`main` 内部除顶层模块外不引用 `spire_codex_data` 与 `combat_solver_cli`，后两者反过来引用 `main`。`main/tests/test_layers.py` 检查这一点。
 
 ## 数据流
 
@@ -141,7 +141,6 @@ Spire Codex 摘要 ─ spire_codex_data（锚点 + 求解器）─ demos 导入 
 - 信用分配粗：分叉之后一段的全部决策（第三幕约两百个）共用一个段回报，共享前缀只覆盖很少的决策；单个关键决策分到的信用很小。Boss 入场切点把 Boss 战单独成组，其余决策点仍只有段回报。
 - 步长过大时裁剪目标在噪声上扩散（熵升、KL 涨），一轮之内就把策略推离起点；防线是小学习率、KL、熵阈值和评估。
 - KL 参考默认固定为运行起点：策略真变好之后会被往回拉；可以每 k 次迭代把参考换成当时的策略，代价是约束变成只管最近 k 次的漂移。
-- 重叠模式（`--overlap`）把下一轮采样放到更新期间，一次迭代接近两者之长；代价是采样策略晚一版（一步离策略，由裁剪与 KL 兜住）和两份模型进程的内存。默认不开，启动时切换。
 
 ## 评估
 
