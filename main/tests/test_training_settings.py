@@ -505,8 +505,6 @@ def test_a_profile_sets_the_sampling_temperatures_anew_and_nothing_else(tmp_path
         Learner.load(saved, "cpu", training=replace(profile, head_lr=1e-4, logical_batch_size=8))
     # A round may be sampled at a profile's temperatures as well.
     assert Learner.load(saved, "cpu", inference=True, training=profile)[0].config.temperatures == profile.temperatures
-    assert parser().parse_args(["collect", "--checkpoint", "c", "--seeds", "s", "--output", "o",
-                                "--config", "p.json"]).config == "p.json"
     # A checkpoint saved before the temperatures existed samples at the defaults.
     manifest = json.loads((saved / "manifest.json").read_text())
     del manifest["training"]["combat_temperature"], manifest["training"]["other_temperature"]

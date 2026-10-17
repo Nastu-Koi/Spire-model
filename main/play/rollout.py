@@ -17,7 +17,7 @@ from main.env.protocol import CHARACTERS, SCHEMA, ProtocolError, execution_comma
 from main.encoding.representation import clean_frame
 from main.env.rewards import MilestoneLedger
 from main.env.public_history import require_history_version
-from main.env.saves import EntrySaves, FightTracker, continue_save
+from main.env.saves import FightTracker, continue_save
 
 
 def precision_context(model, precision):
@@ -134,18 +134,16 @@ def packed_line(run):
     return b"".join(line), dict(phases)
 
 
-# What a round writes of each run. Evaluation keeps everything: the run with every
-# frame, its journal and its fights. Sampling keeps what training reads (see
-# `main/play/buffer.py`): the frames of the decisions outside fights, the entry save of
-# each fight, the fights, and no run file of its own.
-FULL_RUNS = dict(trajectory=True, journal=True, combat_frames=True, saves=False)
-OUTSIDE_FRAMES = dict(trajectory=False, journal=False, combat_frames=False, saves=True)
+# What a round writes of each run. An evaluation of the command line keeps
+# everything: the run with every frame, its journal and its fights.
+FULL_RUNS = dict(trajectory=True, journal=True, combat_frames=True)
 # What an evaluation of the iterations keeps: each run's outcome, ledger and climb,
 # no frames and no journal; enough for its report and for `compare`.
-SUMMARY_RUNS = dict(trajectory="summary", journal=False, combat_frames=False, saves=False)
+SUMMARY_RUNS = dict(trajectory="summary", journal=False, combat_frames=False)
 # Segments of runs played in act groups (`main/play/groups.py`): every frame, fights
-# included, and the continue save where a segment stops.
-SEGMENTS = dict(trajectory=False, journal=False, combat_frames=True, saves=False, segment=True)
+# included, no run file of its own (the segment makes a line in a shard), and the
+# continue save where a segment stops.
+SEGMENTS = dict(trajectory=False, journal=False, combat_frames=True, segment=True)
 
 
 class RolloutRunner:
@@ -204,11 +202,10 @@ class RolloutRunner:
         inside = fight is not None or frame["public"]["phase"] == "combat"
         return self.temperatures["combat" if inside else "other"]
 
-    def run(self, engine, character, seed, *, sample=True, journal=None, saves=None,
+    def run(self, engine, character, seed, *, sample=True, journal=None,
             combat_frames=True, resume=None, until_act=None, until_boss=None, run_id=None, group=None,
             packed=False, _policy=None):
-        """Play one run, or a segment of one. `saves` is where the engine's save at the
-        entry of each fight goes (`main.env.saves`).
+        """Play one run, or a segment of one.
 
         With `resume` (a save a segment stopped at, as `save` below) the run goes on
         from that save instead of starting: at the map (`engine.resume`) or at the
@@ -270,7 +267,6 @@ class RolloutRunner:
 
         pending_steps, current_segment, active_macro = [], None, None
         waiting_since = None
-        entries = None
         fights, stands = FightTracker(), []
         sink = Path(journal).open("w") if journal else nullcontext()
         self.model.eval()
@@ -290,9 +286,6 @@ class RolloutRunner:
                     "episode_id", fingerprint([character, seed])
                 )
                 trace["contract"] = deepcopy(frame.get("contract", {}))
-                if saves:
-                    entries = EntrySaves(saves, seed=seed, character=character, run_id=trace["run_id"],
-                                         ascension=self.ascension)
                 steps = 0
                 while True:
                     validate_frame(frame)
@@ -353,10 +346,6 @@ class RolloutRunner:
                         trace.update(status="complete", victory=None, outcome="reached", reached_boss=entry["act"])
                         break
                     stands.append((act, floor, length))
-                    if entry and entries:
-                        # The first decision of a fight: the engine still stands at its
-                        # entry, and saves the run as it was before the room.
-                        entries.take(engine, entry, frame, floor)
                     automatic = environment_action(frame)
                     if automatic is None and self.claim_rewards:
                         automatic = free_reward(frame)
@@ -420,8 +409,6 @@ class RolloutRunner:
         if not packed:
             for action in trace["environment_actions"]:
                 action["frame"] = _unpack(action["frame"])
-        if entries:
-            trace["saves"] = entries.close(fights.results)
         return trace
 
 
@@ -453,10 +440,9 @@ def write_run(path, trace):
 
 
 def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, journal=True,
-         combat_frames=True, saves=False, segment=False):
+         combat_frames=True, segment=False):
     """One job of a round: a run and, as the layout says (`FULL_RUNS`,
-    `OUTSIDE_FRAMES`), its journal, its run file and the entry saves of its fights.
-    With `segment` the job is
+    `SUMMARY_RUNS`), its journal and its run file. With `segment` the job is
     (character, spec, None): a segment of a run (`main.play.groups`), `spec` naming
     its seed, `run_id`, `group`, `until_act` or `until_boss` and, to go on from a save,
     the file the save is in (`resume`). Returns the run; one that no file of its own is written for
@@ -478,7 +464,6 @@ def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, jour
         seed,
         sample=sample,
         journal=path.with_suffix(".jsonl") if journal else None,
-        saves=path.with_suffix(".saves.jsonl.gz") if saves else None,
         combat_frames=combat_frames,
         packed=not trajectory,
         _policy=policy,
@@ -521,8 +506,8 @@ def collect_round(samplers, runner, seeds, directory, on_run=None, *, sample=Tru
     The round is played by the engines of `samplers` (`sampling.Samplers`), each run
     in an engine of its own, while this process only runs the network. Returns where
     the runs were written, in the order of the jobs: every run with every frame,
-    beside its journal. A sampled round that training reads is written by
-    `buffer.sample_round` instead.
+    beside its journal. The segments of act groups are written by
+    `groups.sample_groups` instead.
     """
     jobs = assign(seeds, directory)
     played = samplers.collect(runner, jobs, sample=sample, on_run=on_run, layout=layout)

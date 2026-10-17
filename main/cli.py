@@ -9,7 +9,6 @@ from pathlib import Path
 
 import torch
 
-from main.play.buffer import sample_round
 from main.network.checkpoint import archive_checkpoint, load_model, save_checkpoint
 from main.network.config import LearningRates, ModelConfig, TrainConfig
 from main.env.control import environment_action
@@ -219,53 +218,37 @@ def parser():
     x.add_argument("directories", nargs="+", help="Output directories of `evaluate`")
     x.add_argument("--head", type=int, default=60,
                    help="Seeds per character of the leading subset reported beside the whole")
-    for command in ("collect", "evaluate"):
-        x = sub.add_parser(command)
-        x.add_argument("--checkpoint", required=True)
-        x.add_argument(
-            "--seeds",
-            required=True,
-            help="JSON mapping all five characters to disjoint seeds",
-        )
-        if command == "evaluate":
-            x.add_argument(
-                "--claim-rewards",
-                action="store_true",
-                help="Take gold, relics and potions the belt has room for from reward "
-                     "screens for the policy, as the demonstrations assume",
-            )
-            x.add_argument("--ascension", type=int,
-                           help="Play the runs at this ascension; default the checkpoint's")
-        else:
-            x.add_argument(
-                "--config",
-                help="Native profile whose sampling temperatures replace the checkpoint's "
-                     "for this round; it must agree with the checkpoint on the rest",
-            )
-            x.add_argument("--iteration", type=int,
-                           help="The sampling iteration the round belongs to, recorded in every run "
-                                "and index row; default the round number")
-            x.add_argument("--journals", action="store_true",
-                           help="Also write each run's journal (every frame with its reward) beside "
-                                "its fights; sampled rounds keep only what training reads otherwise")
-            x.add_argument("--shard-samples", type=int, default=2000,
-                           help="Stored decision steps per gzip shard of the round")
-        x.add_argument("--engine-root")
-        x.add_argument("--output", required=True)
-        x.add_argument("--max-steps", type=int, default=10000)
-        x.add_argument(
-            "--workers",
-            type=int,
-            default=1,
-            help="Concurrent engine processes sharing batched GPU inference",
-        )
-        x.add_argument(
-            "--processes",
-            type=int,
-            help="Sampling processes that hold the engines, parse their frames and pack "
-                 "tensors; this process then only runs the network. Default one per "
-                 "engine, which is fastest",
-        )
+    x = sub.add_parser("evaluate")
+    x.add_argument("--checkpoint", required=True)
+    x.add_argument(
+        "--seeds",
+        required=True,
+        help="JSON mapping all five characters to disjoint seeds",
+    )
+    x.add_argument(
+        "--claim-rewards",
+        action="store_true",
+        help="Take gold, relics and potions the belt has room for from reward "
+             "screens for the policy, as the demonstrations assume",
+    )
+    x.add_argument("--ascension", type=int,
+                   help="Play the runs at this ascension; default the checkpoint's")
+    x.add_argument("--engine-root")
+    x.add_argument("--output", required=True)
+    x.add_argument("--max-steps", type=int, default=10000)
+    x.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Concurrent engine processes sharing batched GPU inference",
+    )
+    x.add_argument(
+        "--processes",
+        type=int,
+        help="Sampling processes that hold the engines, parse their frames and pack "
+             "tensors; this process then only runs the network. Default one per "
+             "engine, which is fastest",
+    )
     x = sub.add_parser(
         "iterate",
         help="Improve a policy by iterations of act groups: sample segments cut at the boundary acts, "
@@ -646,47 +629,30 @@ def main(argv=None):
                         }
                     )
         else:
-            # collect and evaluate: the policy plays, in the engines of sampling processes.
+            # evaluate: the policy plays, in the engines of sampling processes.
             if args.workers < 1 or (args.processes is not None and args.processes < 1):
                 raise ValueError("Sampling needs positive numbers of engines and processes")
-            learner, manifest = Learner.load(
-                args.checkpoint, args.device, inference=True,
-                training=TrainConfig.from_profile(args.config) if args.command == "collect" else None,
-            )
+            learner, manifest = Learner.load(args.checkpoint, args.device, inference=True)
             seeds = json.loads(Path(args.seeds).read_text())
-            if args.command == "evaluate":
-                validate_evaluation_seeds(seeds, manifest["progress"])
+            validate_evaluation_seeds(seeds, manifest["progress"])
             directory = Path(args.output)
             directory.mkdir(parents=True, exist_ok=True)
-            # Never overwrite a round from an interrupted or previous invocation.
-            existing = [
-                int(p.name[6:])
-                for p in directory.glob("round-*")
-                if p.name[6:].isdigit()
-            ]
-            round_number = max(existing, default=-1) + 1
             runner = RolloutRunner(
                 learner.model,
                 learner.vocabulary,
                 precision=learner.config.precision,
                 version=learner.policy_version,
                 max_steps=args.max_steps,
-                ascension=learner.config.ascension if getattr(args, "ascension", None) is None else args.ascension,
-                claim_rewards=args.command == "evaluate" and args.claim_rewards,
+                ascension=learner.config.ascension if args.ascension is None else args.ascension,
+                claim_rewards=args.claim_rewards,
                 temperatures=learner.config.temperatures,
-                iteration=None if args.command == "evaluate"
-                else round_number if args.iteration is None else args.iteration,
+                iteration=None,
             )
             samplers = Samplers(lambda: CliEngine(root=args.engine_root), learner.model,
                                 learner.vocabulary, engines=args.workers, processes=args.processes)
-            if args.command == "evaluate":
-                paths = collect_round(samplers, runner, seeds, directory, sample=False)
-                # One run in memory at a time: together they are tens of gigabytes.
-                emit(evaluate_runs(json.loads(p.read_text()) for p in paths))
-            else:
-                # The round as training reads it: shards and index under round-N.
-                emit(sample_round(samplers, runner, seeds, directory / f"round-{round_number}",
-                                  journals=args.journals, shard_samples=args.shard_samples))
+            paths = collect_round(samplers, runner, seeds, directory, sample=False)
+            # One run in memory at a time: together they are tens of gigabytes.
+            emit(evaluate_runs(json.loads(p.read_text()) for p in paths))
     except KeyboardInterrupt:
         if history:
             history.status("interrupted")

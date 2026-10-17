@@ -7,7 +7,7 @@
 | `protocol.py` | 决策帧的校验、动作语义、执行命令、`segment_key`（多选的解码段）、角色表 |
 | `control.py`、`treasure_rule.py`、`crystal_rule.py` | 策略与控制器的分工、宝箱流程、水晶球规划器 |
 | `rewards.py` | 奖励账本：只在终局支付 ±1 |
-| `saves.py` | 战斗入场存档与重入命令 |
+| `saves.py` | 续局存档（`continue_save`）、战斗重进命令、战斗边界（`FightTracker`） |
 | `seeds.py` | `split_group`、`seed_group` 与留出划分的身份，评估种子的隔离检查 |
 | `public_history.py` | 公开历史契约的版本与 unknown 记忆 |
 | `engine.py`、`dotnet_runtime.py` | 无头引擎进程（`CliEngine`）与 .NET 运行时选择 |
@@ -44,9 +44,9 @@
 
 ## 入场存档
 
-采样时，每场战斗的第一个决策（`events` 带 `encounter_started`）让引擎 `write_continue_save` 到临时文件再读回。在房间里时引擎存的是进房前的状态（节点从已访问坐标里退回、房间清空）；`anchor_state` 序列化的是已进房的状态，不能用。`saves.anchor_commands(row)` 给出重进同一场战斗的两条命令：`enter_anchor`（存档、楼层、节点类型、是否第二 Boss）再 `anchor_room`（遭遇）。重进的战斗 HP、最大 HP、金币、幕、楼层、卡组、遗物、药水和敌人种类相同；敌人的随机 HP 与开局手牌由战斗自己的随机数重抽，所以重进是同一入场状态的另一次战斗，不是重放。在战斗开始时计数的遗物重进后可能少计一次。
+幕组在 Boss 入场切点（该幕第一场 Boss 战的第一个决策，`events` 带 `encounter_started`）让引擎 `write_continue_save` 到临时文件再读回（`saves.continue_save`）。在房间里时引擎存的是进房前的状态（节点从已访问坐标里退回、房间清空）；`anchor_state` 序列化的是已进房的状态，不能用。续打用一条命令 `resume_fight`（`saves.fight_resume_command(row)`：存档、遭遇、楼层、节点类型、是否第二 Boss），引擎加载后把节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入遭遇，回复就是战斗的第一个决策帧（`CliEngine.resume_fight`）。重进的战斗 HP、最大 HP、金币、幕、楼层、卡组、遗物、药水和敌人种类相同；敌人的随机 HP 与开局手牌由战斗自己的随机数重抽，所以重进是同一入场状态的另一次战斗，不是重放。在战斗开始时计数的遗物重进后可能少计一次。
 
-幕组在 Boss 入场切点写的也是这种存档（`rollout.RolloutRunner.run(until_boss=)`）；续打用一条命令 `resume_fight`（`saves.fight_resume_command(row)`：存档、遭遇、楼层、节点类型、是否第二 Boss），引擎加载后把节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入遭遇，回复就是战斗的第一个决策帧（`CliEngine.resume_fight`）。`enter_anchor` 走的是示范生成的路，契约标 `summary-anchor-v1`，训练不用。
+幕开头存档写在第 0 层的选图决策，用 `resume_save` 续打（`CliEngine.resume`），见 [play](play.md#幕组)。
 
 ## 种子与划分
 

@@ -92,11 +92,9 @@ python -m main --device cuda bootstrap --data data/bootstrap data/a10-battles \
 python -m main --device cuda evaluate --checkpoint <检查点> --seeds seeds.json --output runs/eval-x \
   --workers 32 --processes 32
 python -m main compare runs/eval-x runs/eval-y --head 60      # 配对符号检验
-python -m main --device cuda collect --checkpoint <检查点> --seeds seeds.json --output runs/collect \
-  --workers 44 --iteration 0      # 按检查点的两个温度采样一轮，写到 round-N
 ```
 
-评估默认按检查点训练时的难度对局，`--ascension 10` 改在 A10 评估。`--workers` 是同时运行的引擎数，每对“引擎 + 采样进程”占 250–300 MB 内存。报告与采样轮的格式见 [play](docs/implementation/play.md)。
+评估默认按检查点训练时的难度对局，`--ascension 10` 改在 A10 评估。`--workers` 是同时运行的引擎数，每对“引擎 + 采样进程”占 250–300 MB 内存。报告的格式见 [play](docs/implementation/play.md#评估报告)。
 
 ## 迭代
 

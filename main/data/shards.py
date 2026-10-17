@@ -252,7 +252,7 @@ class RunShards:
     The index holds one small row per run (identity, seed, character, macro counts
     by phase, source, shard), so splits and sample weights need no pass over the
     data. `directory` is one data directory or a list of them, read as one data
-    set: imports of demonstrations, or the rounds of a buffer. A row of a directory after the first remembers which it is
+    set: imports of demonstrations, or the waves of a round of act groups. A row of a directory after the first remembers which it is
     (`root`); a shard is named by (root, file). The first directory's rows are kept
     as they are read, so the large one goes first: every feeder holds the index.
     """

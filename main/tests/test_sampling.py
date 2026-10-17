@@ -437,14 +437,14 @@ def test_greedy_runs_have_no_temperature():
 
 
 def test_the_shard_line_of_a_run_goes_to_on_run_and_is_not_kept(tmp_path):
-    from main.play.rollout import OUTSIDE_FRAMES, assign
+    from main.play.rollout import assign
 
     _, runner, seeds = setup_round()
     jobs = assign(seeds, tmp_path / "round")
     seen = []
     with samplers(runner, engines=5, processes=3) as pool:
         played = pool.collect(runner, jobs, sample=True, on_run=lambda index, run: seen.append("member" in run),
-                              layout=OUTSIDE_FRAMES)
+                              layout=dict(trajectory=False, journal=False, combat_frames=False))
     assert len(seen) == len(jobs) and all(seen)
     assert all(run["status"] == "complete" and "member" not in run for run in played)
 

@@ -1,32 +1,23 @@
-"""The engine's save of a run at the entry of each of its fights.
+"""The engine's continue save of a run, and which fight a decision belongs to.
 
-A fight the policy walked into can be entered again from the state it was entered
-with: to play it once more (combat replay) or to have the solver play it. What that
-needs is the engine's continue save as it stands at the fight's first decision:
-written from inside a room, the engine saves the run as it was before the room was
-entered (the node is taken back out of the visited coordinates, the room cleared), and
-`enter_anchor` with the fight's floor and map point type, then `anchor_room` with its
-encounter, enters the same fight again: same HP, gold, deck, relics, potions and
-enemies. `anchor_state` serializes the state with the room already entered and does
-not serve.
-
-One row per fight of a run, written once the run has ended, so that each row says
-how the fight ended for the policy (`result`). The row also keeps the relics the policy
-entered with, as its first frame showed them: what the solver's entry is compared
-with. The save is kept compressed until then.
+A continue save written from inside a room holds the run as it was before the room
+was entered (the node is taken back out of the visited coordinates, the room cleared).
+Written at the first decision of a fight it enters the same fight again, with the same
+HP, gold, deck, relics, potions and enemies, the enemies' random HP and the opening
+hand drawn anew (`fight_resume_command`, `CliEngine.resume_fight`); written at a map
+decision it goes on from the map (`CliEngine.resume`). Act groups cut runs at both
+(`main/play/groups.py`). `anchor_state` serializes the state with the room already
+entered and does not serve.
 """
 
-import gzip
 import json
 import os
 import tempfile
-import zlib
 from collections import Counter
 from pathlib import Path
 
 from main.env.protocol import ProtocolError
 
-SCHEMA = "rollout-entry-saves-v1"
 # The engine's kind of a fight, and the map point the fight's node has on the map.
 MAP_POINTS = {"normal": "monster", "elite": "elite", "boss": "boss"}
 
@@ -103,52 +94,6 @@ class FightTracker:
         return self.current, entry
 
 
-class EntrySaves:
-    """The entry saves of one run's fights, written as `<run>.saves.jsonl.gz`."""
-
-    def __init__(self, path, *, seed, character, run_id, ascension):
-        self.path = Path(path)
-        self.identity = dict(schema=SCHEMA, seed=str(seed), run_id=run_id, character=character, ascension=ascension)
-        self.rows, self.failed = [], 0
-
-    def take(self, engine, entry, frame, floor):
-        """The save at the first decision of a fight, whose frame is `frame`. A save the
-        engine refuses is a row without one: the fight still has its result, and the
-        refusal says why."""
-        relics = [e for e in frame["public"]["entities"] if e.get("entity_type") == "relic"]
-        row = dict(self.identity, **entry, floor=floor, relics=relics, save=None)
-        try:
-            row["save"] = zlib.compress(json.dumps(continue_save(engine), separators=(",", ":")).encode(), 6)
-        except ProtocolError as exc:
-            row["error"] = str(exc)
-            self.failed += 1
-        self.rows.append(row)
-
-    def close(self, results):
-        """Write the rows. `results` maps a fight to how it ended for the policy
-        (`FightTracker.results`); a fight the run was cut off in is written without."""
-        temporary = self.path.with_name(self.path.name + ".tmp")
-        with gzip.open(temporary, "wt", encoding="utf-8") as stream:
-            for row in self.rows:
-                row = dict(row, result=results.get(row["fight"]),
-                           save=None if row["save"] is None else json.loads(zlib.decompress(row["save"])))
-                stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
-        temporary.replace(self.path)
-        return dict(path=self.path.name, schema=SCHEMA, fights=len(self.rows), failed=self.failed,
-                    from_event=sum(row["from_event"] for row in self.rows))
-
-
-def read_saves(path):
-    """The rows of a saves file."""
-    with gzip.open(path, "rt", encoding="utf-8") as stream:
-        for line in stream:
-            if line.strip():
-                row = json.loads(line)
-                if row.get("schema") != SCHEMA:
-                    raise ProtocolError(f"Unsupported entry-save schema in {path}")
-                yield row
-
-
 def fight_resume_command(row):
     """The engine command that resumes a run at the fight of a saves row: `resume_fight`
     with the save, the encounter, the floor and the map point (`CliEngine.resume_fight`)."""
@@ -157,14 +102,3 @@ def fight_resume_command(row):
     return dict(cmd="resume_fight", save=row["save"], encounter=row["encounter"], act_floor=row["floor"],
                 map_point_type=row["map_point_type"], second_boss=bool(row.get("second_boss")))
 
-
-def anchor_commands(row):
-    """The two engine commands that enter the fight of a saves row again: `enter_anchor`
-    at the fight's floor and map point, then `anchor_room` with its encounter."""
-    if row.get("save") is None:
-        raise ProtocolError("The fight has no entry save")
-    return (
-        dict(cmd="enter_anchor", save=row["save"], act_floor=row["floor"],
-             map_point_type=row["map_point_type"], second_boss=row["second_boss"]),
-        dict(cmd="anchor_room", room=dict(type="combat", encounter=row["encounter"].removeprefix("ENCOUNTER."))),
-    )
