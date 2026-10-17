@@ -147,10 +147,10 @@ def group_update(learner, waves, reference, *, clip=CLIP, kl=KL, updates=None, w
     shares, counts, total = batches.streams_of(data, shares, config)
     primary = max(waves, key=lambda name: data[name][0].macros)
     window = max(1, window_shards // len(waves))
-    feeders = batches.stream_feeders(config, len(waves))
+    feeders = batches.stream_feeders(config, shares)
     streams = {name: (batches.batches(learner, shards,
                                       batches.buffer_weights(shards.source_counts, weight_cap, phase_weights),
-                                      counts[name], window, feeders),
+                                      counts[name], window, feeders[name]),
                       _priced(table, name, shards.macros / total))
                for name, (shards, table) in data.items()}
     joint = batches.Joint(streams, primary, updates)

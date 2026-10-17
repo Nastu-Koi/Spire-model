@@ -115,10 +115,13 @@ def sizes(batch, shares):
     return counts
 
 
-def stream_feeders(config, streams):
-    """How many feeder processes each of `streams` streams of an update reads with:
-    the configuration's feeders divided among them, at least `STREAM_FEEDERS` each."""
-    return max(STREAM_FEEDERS, config.loader_feeders // streams)
+def stream_feeders(config, shares):
+    """How many feeder processes each stream of an update reads with, by its share of
+    the batch: the configuration's feeders in that proportion, at least
+    `STREAM_FEEDERS` each. `shares` maps a stream to its share; returns the same map
+    to feeder counts. A stream that fills most of every batch is the one whose
+    feeders must keep up."""
+    return {name: max(STREAM_FEEDERS, math.ceil(share * config.loader_feeders)) for name, share in shares.items()}
 
 
 def _again(factory):

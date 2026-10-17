@@ -89,15 +89,17 @@ def test_a_batch_is_shared_out_in_proportion_and_adds_up():
         awr.sizes(2, {"a": 1, "b": 1, "c": 1})
 
 
-def test_every_stream_of_an_update_reads_with_at_least_two_feeders():
+def test_every_stream_of_an_update_reads_with_feeders_for_its_share_and_at_least_two():
     from main.network.config import TrainConfig
 
     # The profile's four feeders among three waves would leave one each: a feeder
-    # decoding its next shards stalls its stream, and the joint batch with it.
-    assert awr.stream_feeders(TrainConfig(loader_feeders=4), 3) == 2
-    assert awr.stream_feeders(TrainConfig(loader_feeders=4), 4) == 2
-    assert awr.stream_feeders(TrainConfig(loader_feeders=9), 3) == 3
-    assert awr.stream_feeders(TrainConfig(loader_feeders=1), 1) == awr.STREAM_FEEDERS == 2
+    # decoding its next shards stalls its stream, and the joint batch with it. The
+    # wave that fills three quarters of every batch gets three of the four.
+    shares = {"act1": 0.07, "act2": 0.18, "act3": 0.75}
+    assert awr.stream_feeders(TrainConfig(loader_feeders=4), shares) == {"act1": 2, "act2": 2, "act3": 3}
+    assert awr.stream_feeders(TrainConfig(loader_feeders=9), shares) == {"act1": 2, "act2": 2, "act3": 7}
+    assert awr.stream_feeders(TrainConfig(loader_feeders=4), {"only": 1.0}) == {"only": 4}
+    assert awr.stream_feeders(TrainConfig(loader_feeders=1), {"only": 1.0}) == {"only": awr.STREAM_FEEDERS} and awr.STREAM_FEEDERS == 2
 
 
 def test_the_waves_share_a_batch_by_their_decisions_unless_told_otherwise():
