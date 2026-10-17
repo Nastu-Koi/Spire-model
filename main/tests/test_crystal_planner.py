@@ -53,7 +53,7 @@ def test_payment_and_reward_choices_are_not_planner_actions():
 
 
 def test_hidden_content_seed_and_packing_order_do_not_change_decision():
-    frame = board_frame(revealed=corners(), remaining=6)
+    frame = board_frame(revealed=corners() | opened_by(dict(candidate_ref="Big:5:5")), remaining=5)
     first = plan(frame, samples=4, beam_width=3)
     other = deepcopy(frame)
     other["seed"] = "a different game seed"
@@ -94,4 +94,31 @@ def test_bounded_constraint_failure_has_a_reported_public_fallback():
     frame = board_frame(items, revealed=corners() | {(3, 3), (7, 7)}, remaining=2)
     result = plan(frame, samples=1, search_budget=1, beam_width=2)
     assert result.fallback and result.hypotheses == 0
+    assert result.candidate in frame["legal"]["candidates"]
+
+
+def test_first_click_is_big_at_the_board_center():
+    for remaining in (6, 3, 1):
+        frame = board_frame(revealed=corners(), remaining=remaining)
+        result = plan(frame, samples=2, beam_width=2)
+        assert result.candidate["candidate_ref"] == "Big:5:5"
+        assert result.diagnostics()["opening"] is True
+        assert not result.fallback
+    # Boards that reveal nothing at all are also an opening.
+    assert plan(board_frame(remaining=2), samples=2).candidate["candidate_ref"] == "Big:5:5"
+
+
+def test_opening_rule_stops_after_the_first_click():
+    frame = board_frame(revealed=corners() | opened_by(dict(candidate_ref="Big:5:5")), remaining=5)
+    result = plan(frame, samples=4, beam_width=3)
+    assert result.diagnostics()["opening"] is False
+    assert result.candidate in frame["legal"]["candidates"]
+    assert "Big:5:5" not in {c["candidate_ref"] for c in frame["legal"]["candidates"]}
+
+
+def test_opening_without_a_big_center_candidate_falls_back_to_search():
+    frame = board_frame(revealed=corners(), remaining=3)
+    frame["legal"]["candidates"] = [c for c in frame["legal"]["candidates"] if c["candidate_ref"] != "Big:5:5"]
+    result = plan(frame, samples=2, beam_width=2)
+    assert result.diagnostics()["opening"] is False
     assert result.candidate in frame["legal"]["candidates"]

@@ -79,7 +79,8 @@ def test_payment_and_leaving_rewards_are_policy_choices_across_grid_environment_
     assert trace["macros"][-1]["steps"][0]["candidate_ref"] == "2:1"
     assert trace["automatic_steps"] == 1
     assert trace["environment_actions"][0]["actor"] == "crystal_sphere_planner"
-    assert trace["environment_actions"][0]["planner"]["hypotheses"] > 0
+    assert trace["environment_actions"][0]["candidate_ref"] == "Big:5:5"
+    assert trace["environment_actions"][0]["planner"]["opening"] is True
     validate_run(trace, on_policy=True)
 
 

@@ -14,8 +14,9 @@ from functools import lru_cache
 
 from main.env.protocol import ProtocolError
 
-RULE_VERSION = "crystal-public-geometry-v2"
+RULE_VERSION = "crystal-public-geometry-v3"
 SIZE = 11
+CENTER = (SIZE // 2, SIZE // 2)
 
 # Public v0.111.0 item shapes, nominal multiplicities and search utilities.
 # Different rarities with the same public fragment type share a shape group.
@@ -34,6 +35,13 @@ def _bit(x, y):
     return 1 << (y * SIZE + x)
 
 
+# The native board starts with these corner cells already uncovered. A click
+# centres on a hidden cell, so once any click happened some revealed cell lies
+# outside this region.
+CORNERS = sum(_bit(x, y) for x in range(SIZE) for y in range(SIZE)
+              if min(x, SIZE - 1 - x) + min(y, SIZE - 1 - y) <= 2)
+
+
 @lru_cache(maxsize=None)
 def _rectangles(width, height):
     return tuple(sum(_bit(x + dx, y + dy) for dx in range(width) for dy in range(height))
@@ -50,10 +58,11 @@ class Plan:
     hypotheses: int
     fallback: bool
     expanded: int
+    opening: bool = False
 
     def diagnostics(self):
         return dict(version=RULE_VERSION, hypotheses=self.hypotheses,
-                    geometry_fallback=self.fallback, expanded=self.expanded)
+                    geometry_fallback=self.fallback, expanded=self.expanded, opening=self.opening)
 
 
 def _public_board(frame):
@@ -180,6 +189,12 @@ def plan(frame, *, samples=12, beam_width=8, search_budget=512):
     if any(type(value) is not int or value < 1 for value in (samples, beam_width, search_budget)):
         raise ValueError("Crystal planning budgets must be positive integers")
     remaining, observed, revealed, actions = _public_board(frame)
+    if not revealed & ~CORNERS:
+        # First click: no fragment can be known yet, so open the board with the
+        # Big tool at the centre instead of searching over the bare prior.
+        center = next((c for (x, y, tool), _, _, c in actions if (x, y) == CENTER and tool == "Big"), None)
+        if center is not None:
+            return Plan(center, 0, False, 0, opening=True)
     # Reproducible across Steam/headless and independent of the game seed,
     # routing IDs, hidden values, and entity/candidate packing order.
     key = json.dumps([RULE_VERSION, remaining, sorted(observed.items())]).encode()
