@@ -19,8 +19,10 @@ from pathlib import Path
 import torch
 
 from main.env.processes import end, end_with
+from main.env.runtime import configure_gpu
 from main.iterate import play_evaluation, play_round, round_result, samplers_for
 from main.network.checkpoint import load_weights
+from main.network.config import LearningRates
 from main.play.rollout import RolloutRunner
 from main.play.sampling import Samplers
 
@@ -87,6 +89,7 @@ def _serve(connection, driver, engine_factory, settings, device):
         # with it waits forever. The side's network runs on the GPU; the host needs
         # one thread.
         torch.set_num_threads(1)
+        configure_gpu(device)
         while True:
             try:
                 job = connection.recv()
@@ -96,7 +99,11 @@ def _serve(connection, driver, engine_factory, settings, device):
                 break
             policy = Path(job["policy"])
             if model is None:
-                learner, manifest = _learner(policy, device, inference=True, training=_profile(settings.config))
+                # Loaded as the driver loads (`Driver.load`): the profile's sampling settings,
+                # the rates file's rates, so that the strict resume accepts the profile.
+                rates = settings.learning_rates
+                learner, manifest = _learner(policy, device, inference=True, training=_profile(settings.config),
+                                             rates=LearningRates.load(rates) if rates else None)
                 model, vocabulary, config = learner.model, learner.vocabulary, learner.config
                 # Forked around the model just loaded, before anything else is allocated.
                 pool = Samplers(engine_factory, model, vocabulary, engines=settings.workers,

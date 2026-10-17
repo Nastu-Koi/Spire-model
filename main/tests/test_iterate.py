@@ -420,7 +420,14 @@ def test_an_overlapped_run_samples_the_next_round_a_version_behind_on_a_sampling
             stream.write(f"{os.getpid()} {os.getppid()}\n")
         return chain()
 
-    state = Driver(world.output, settings(world, overlap=True), engine=counted, say=lambda _: None).run(3)
+    # Loaded as a real run loads: a profile whose rates differ from the checkpoint's,
+    # and a rates file; the side has to load the way the driver does for this to pass.
+    saved = _learner(world.checkpoint, "cpu")[0]
+    profile, rates = world.root / "profile.json", world.root / "rates.json"
+    profile.write_text(json.dumps({"training": {**asdict(saved.config), "muon_lr": saved.config.muon_lr * 3}}))
+    rates.write_text(json.dumps(asdict(LearningRates.of(saved.config))))
+    chosen = settings(world, overlap=True, config=str(profile), learning_rates=str(rates))
+    state = Driver(world.output, chosen, engine=counted, say=lambda _: None).run(3)
     iterations = state["iterations"]
     assert all(iterations[str(number)]["complete"] for number in range(3))
     start = read(world.checkpoint / "manifest.json")["progress"]["policy_version"]
@@ -464,3 +471,25 @@ def test_an_overlapped_run_cut_off_in_its_update_goes_on_with_the_round_the_side
     assert read(world.output / "status.json")["state"] == "failed"
     state = Driver(world.output, settings(world, overlap=True), engine=chain, say=lambda _: None).run(3)
     assert all(state["iterations"][str(number)]["complete"] for number in range(3))
+
+
+@pytest.mark.cuda
+def test_the_runtime_can_be_configured_without_touching_the_gpu_until_told_to():
+    """`iterate --overlap` forks its sampling side before CUDA is initialized: the
+    CLI's runtime configuration leaves the GPU alone, the driver reserves it after."""
+    import subprocess
+    import sys
+
+    code = """
+import torch
+from main.env.runtime import configure_gpu, configure_runtime
+manifest = configure_runtime("cuda", gpu=False)
+assert not torch.cuda.is_initialized(), "configure_runtime(gpu=False) initialized CUDA"
+assert "gpu" not in manifest
+later = configure_gpu("cuda")
+assert torch.cuda.is_initialized() and later["gpu"] and later["gpu_budget_bytes"] > 0
+print("ok")
+"""
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "ok"

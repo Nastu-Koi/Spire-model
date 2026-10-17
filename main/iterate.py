@@ -43,6 +43,7 @@ from pathlib import Path
 import torch
 
 from main.env.seeds import split_group
+from main.env.runtime import configure_gpu
 
 from main.learn import batches, grpo
 from main.learn.advantage import FILE as ADVANTAGES
@@ -691,6 +692,8 @@ class Driver:
             from main.overlap import SamplingSide
 
             self.side = SamplingSide(self.engine, self.settings, self.device)
+        if "gpu" not in self.runtime:
+            self.runtime.update(configure_gpu(self.device))
         self.history = TrainingHistory(self.output, "iterate", asdict(self.settings))
         # A request to stop ends the step under way as an interruption does: the
         # engines and the loaders go with it.

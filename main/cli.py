@@ -452,7 +452,9 @@ def main(argv=None):
     torch.manual_seed(args.seed)
     history = samplers = None
     try:
-        runtime = configure_runtime(args.device, threads=args.threads)
+        # The iterate driver reserves the GPU itself: in overlap mode it forks the
+        # sampling side first, which needs a CUDA context of its own.
+        runtime = configure_runtime(args.device, threads=args.threads, gpu=args.command != "iterate")
         if args.command == "play-steam":
             from main.steam import play
 
