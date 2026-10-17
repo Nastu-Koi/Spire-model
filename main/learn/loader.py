@@ -156,6 +156,10 @@ def _send(connection, message):
         pass
 
 
+# Niceness the feeders (and the workers they fork) add to the trainer's.
+FEEDER_NICE = 5
+
+
 def _feed(connection, shards, windows, weights, vocabulary, config, shuffle, seed):
     """Feeder process: the packed logical batches of its windows, then its number,
     written to its own pipe. It holds no thread when it forks its workers; what it
@@ -170,6 +174,9 @@ def _feed(connection, shards, windows, weights, vocabulary, config, shuffle, see
         end_with(trainer)
         # The parent's intra-op pool does not survive the fork; packing needs none.
         torch.set_num_threads(1)
+        # The trainer's thread launches the kernels of every step; the feeders and their
+        # workers yield to it (issue 26: with 47 of them the step's tail doubled).
+        os.nice(FEEDER_NICE)
         random.seed(seed)
         carry = []
         for names in windows:

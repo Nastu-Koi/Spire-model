@@ -188,3 +188,32 @@ def test_the_time_an_update_waits_for_its_batch_is_told_apart_from_its_duration(
     assert metrics["wait_seconds"] == pytest.approx(sum(row["wait_seconds"] for row in records))
     assert metrics["duration_seconds"] == pytest.approx(sum(row["duration_seconds"] for row in records))
     assert metrics["wait_seconds"] <= metrics["duration_seconds"]
+
+
+def test_the_loaders_feeders_yield_the_processor_to_the_trainer():
+    """A feeder (and so the workers it forks) runs at a higher niceness than the
+    trainer, whose thread launching the step's kernels competes with dozens of them."""
+    import multiprocessing
+    import os
+
+    from main.learn import loader
+    from main.network.config import TrainConfig
+
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    told, telling = context.Pipe(duplex=False)
+
+    def report(connection, back):
+        # No windows: the feeder sets itself up, says it is done and returns.
+        loader._feed(connection, None, (0, []), None, None, TrainConfig(), False, 0)
+        back.send(os.getpriority(os.PRIO_PROCESS, 0))
+
+    process = context.Process(target=report, args=(sender, telling))
+    process.start()
+    sender.close()
+    telling.close()
+    assert receiver.recv() == ("done", 0)
+    niceness = told.recv()
+    process.join(timeout=30)
+    assert process.exitcode == 0
+    assert niceness == os.getpriority(os.PRIO_PROCESS, 0) + loader.FEEDER_NICE
