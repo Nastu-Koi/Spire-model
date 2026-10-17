@@ -6,8 +6,8 @@ import os
 import sys
 from pathlib import Path
 
-from model.engine import CliEngine
-from model.protocol import ProtocolError
+from main.env.engine import CliEngine
+from main.env.protocol import ProtocolError
 
 ROOT = Path(__file__).resolve().parents[1]
 # Pinned solver copy and the machine-local configuration; never committed.

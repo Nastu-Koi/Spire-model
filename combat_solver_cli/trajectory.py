@@ -7,16 +7,11 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from model.data import validate_run
-from model.control import controller_for
-from model.protocol import (
-    SCHEMA,
-    clean_frame,
-    execution_command,
-    segment_key,
-    validate_frame,
-)
-from model.rewards import MilestoneLedger
+from main.data.shards import validate_run
+from main.env.control import controller_for
+from main.env.protocol import SCHEMA, execution_command, segment_key, validate_frame
+from main.encoding.representation import clean_frame
+from main.env.rewards import MilestoneLedger
 
 from .client import SolverEngine, configuration
 from .search_support import ReplayMismatch, resolve, state_key

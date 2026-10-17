@@ -9,7 +9,7 @@ def test_gardener_enlarge_reaches_next_turn():
     if os.environ.get('SPIRE_CODEX_DATA_NATIVE_TESTS')!='1':
         pytest.skip('Set SPIRE_CODEX_DATA_NATIVE_TESTS=1 with the local solver configured')
     from combat_solver_cli.client import SolverEngine
-    from model.protocol import execution_command
+    from main.env.protocol import execution_command
     from combat_solver_cli.trajectory import native_replay_error
     with SolverEngine() as engine:
         engine.send(dict(cmd='start_run',character='IRONCLAD',seed='gardener-abi-check',ascension=0))

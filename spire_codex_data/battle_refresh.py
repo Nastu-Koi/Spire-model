@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from model.public_history import HISTORY_KINDS
+from main.env.public_history import HISTORY_KINDS
 
 
 def without_history(public):

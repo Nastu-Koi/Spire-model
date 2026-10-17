@@ -39,7 +39,7 @@ def configure(solver, lib, dependency_dir, config):
     if any(not p.is_dir() for p in dependencies):
         raise FileNotFoundError("Dependency directory missing")
     solver = pin(solver)
-    from model.dotnet_runtime import find_sdk
+    from main.env.dotnet_runtime import find_sdk
 
     sdk = find_sdk()
     if sdk is None:

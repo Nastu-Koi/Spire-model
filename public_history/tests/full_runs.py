@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "sts2-cli/python")]
 import play_full_run
-from model.dotnet_runtime import runtime_command
+from main.env.dotnet_runtime import runtime_command
 
 
 def main():

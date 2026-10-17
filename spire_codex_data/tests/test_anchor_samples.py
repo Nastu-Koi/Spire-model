@@ -342,7 +342,7 @@ def test_native_enchantment_amount_and_ascension_reach_the_model_input():
     if os.environ.get('SPIRE_CODEX_DATA_NATIVE_TESTS') != '1':
         pytest.skip('Set SPIRE_CODEX_DATA_NATIVE_TESTS=1 with the local solver configured')
     from combat_solver_cli.client import SolverEngine
-    from model.representation import observation
+    from main.encoding.representation import observation
     from spire_codex_data.anchor import settle
     digests = {}
     for ascension, amount in ((3, 3), (3, 7), (8, 3)):

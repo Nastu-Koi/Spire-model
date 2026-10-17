@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from model.dotnet_runtime import find_runtime, find_sdk, runtime_command
+from main.env.dotnet_runtime import find_runtime, find_sdk, runtime_command
 
 
 class DotnetRuntimeTests(unittest.TestCase):
@@ -17,8 +17,8 @@ class DotnetRuntimeTests(unittest.TestCase):
         self.home = Path(self.temp.name).resolve()
         self.preferred = self._host(self.home / ".dotnet-spire/dotnet")
         self.system = self._host(self.home / "system/dotnet")
-        self.home_patch = patch("model.dotnet_runtime.Path.home", return_value=self.home)
-        self.which_patch = patch("model.dotnet_runtime.shutil.which", return_value=self.system)
+        self.home_patch = patch("main.env.dotnet_runtime.Path.home", return_value=self.home)
+        self.which_patch = patch("main.env.dotnet_runtime.shutil.which", return_value=self.system)
         self.environ_patch = patch.dict(os.environ, {}, clear=True)
         for item in (self.home_patch, self.which_patch, self.environ_patch):
             item.start()
@@ -41,7 +41,7 @@ class DotnetRuntimeTests(unittest.TestCase):
                 raise value
             return subprocess.CompletedProcess(command, 0, value, "")
 
-        return patch("model.dotnet_runtime.subprocess.run", side_effect=run)
+        return patch("main.env.dotnet_runtime.subprocess.run", side_effect=run)
 
     def test_only_net10_runtime_is_rejected_even_with_net10_sdk(self):
         with self._probe(

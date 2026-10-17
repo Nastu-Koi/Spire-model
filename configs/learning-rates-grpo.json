@@ -1,0 +1,6 @@
+{
+    "muon": 0.0001,
+    "backbone": 1e-06,
+    "embedding": 0.0001,
+    "head": 3e-06
+}

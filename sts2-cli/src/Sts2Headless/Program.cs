@@ -111,7 +111,7 @@ class Program
     static Dictionary<string, object?>? HandleCommand(ref RunSimulator sim, JsonElement cmd)
     {
         var cmdType = cmd.GetProperty("cmd").GetString() ?? "";
-        if (cmdType is "start_run" or "load_save" or "enter_anchor" && sim.HasBegun)
+        if (cmdType is "start_run" or "load_save" or "enter_anchor" or "resume_save" or "resume_fight" && sim.HasBegun)
         {
             // One simulator drives one run. The next run of this process gets a new
             // simulator once the old run has ended.
@@ -121,7 +121,7 @@ class Program
             sim = new RunSimulator();
         }
         if (cmdType is "start_run" or "load_save" or "action" or "set_player" or "enter_room"
-            or "set_draw_order" or "quit" or "enter_anchor")
+            or "set_draw_order" or "quit" or "enter_anchor" or "resume_save" or "resume_fight")
             sim.InvalidateDecisionProtocol();
         switch (cmdType)
         {
@@ -193,6 +193,10 @@ class Program
             }
             case "enter_anchor":
                 return sim.EnterAnchor(cmd);
+            case "resume_save":
+                return sim.ResumeSave(cmd);
+            case "resume_fight":
+                return sim.ResumeFight(cmd);
             case "anchor_room":
                 return sim.AnchorRoom(cmd);
             case "anchor_state":

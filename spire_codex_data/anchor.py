@@ -26,8 +26,8 @@ import time
 from combat_solver_cli.client import DEFAULT_CONFIG, SolverEngine
 from combat_solver_cli.search_support import player, preference, resolve, state_key
 from combat_solver_cli.trajectory import native_replay_error
-from model.control import controller_for
-from model.protocol import CHARACTERS, action_semantics, execution_command, validate_frame
+from main.env.control import controller_for
+from main.env.protocol import CHARACTERS, action_semantics, execution_command, validate_frame
 from . import recorded, rewards, shop_sequence
 from .fetch import save_json
 from .ledger import all_nodes, apply_node, find_card, signature

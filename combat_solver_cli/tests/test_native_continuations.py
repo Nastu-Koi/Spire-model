@@ -18,7 +18,7 @@ import pytest
 
 from combat_solver_cli.client import SolverEngine
 from combat_solver_cli.search_support import resolve
-from model.protocol import execution_command, validate_frame
+from main.env.protocol import execution_command, validate_frame
 
 FIXTURES = Path('combat_solver_cli/tests/native/fixtures')
 

@@ -2,37 +2,37 @@
 
 基于玩家公开信息，为《杀戮尖塔 2》训练覆盖整局的策略，目标是提高**五角色 A0 平均整局通关率**并接管 Steam 游戏。当前适配游戏 **0.111.0**。
 
-主策略先用摘要锚点及求解器示范做行为克隆，再自主采样。当前已有 BC、多进程采样与评估、学生状态的求解器战斗标签、胜率模型、优势加权回归和把它们串起来的迭代驱动，以及公开历史和 Steam 桥接；迭代路线的效果尚待正式训练验证。设计见 [ARCHITECTURE](ARCHITECTURE.md)，术语见 [CONTEXT](CONTEXT.md)。
+策略先用摘要锚点重建的示范做行为克隆起步，之后只从自己的对局学：按幕把对局切成几段，每幕从幕开头的存档续打几条，组内平均作基线，回报沿链回传，用裁剪目标小步更新。
 
-## 从这里开始
-
-| 要做的事 | 说明 |
+| 文档 | 内容 |
 | --- | --- |
-| 开始／继续训练，复用现有数据 | [主策略训练与运行](model/README.md) |
-| 按迭代改进策略：采样、求解器标签、胜率模型、优势加权回归 | [迭代](model/README.md#迭代采样标签胜率模型与优势加权回归) |
-| 判断数据要不要重新生成 | [数据复用与索引](model/README.md#数据复用与索引) |
-| 下载公开对局、恢复锚点和导入示范 | [摘要数据](spire_codex_data/README.md) |
-| 配置求解器或验证原生轨迹 | [CombatSolver worker](combat_solver_cli/README.md) |
-| 安装录制 Mod、接管 Steam 游戏 | [Steam 录制与桥接](steam_recorder/README.md) |
-| 检查公开观察与合法动作协议 | [决策协议](sts2-cli/docs/decision-protocol.md) |
+| [docs/architecture.md](docs/architecture.md) | 系统设计：模块与边界、数据流、输入、网络、训练路线、评估 |
+| [docs/implementation/](docs/implementation/) | 各模块怎么实现、为什么、已知的坑 |
+| [CONTEXT.md](CONTEXT.md) | 术语 |
+| 本文 | 安装与命令 |
+
+任务、验收和实验记录在本地 `.scratch/`（不入库），当前入口是 `.scratch/joint-training/spec.md`。
 
 ## 仓库结构
 
 | 目录 | 内容 |
 | --- | --- |
-| [model/](model/README.md) | 公开输入、主策略、控制器、BC、采样与评估、优势加权回归与迭代驱动、检查点、Steam 控制端和训练监测 |
-| [critic/](critic/README.md) | 胜率模型：局外决策的通关与过本幕概率、交给策略前的门槛、给缓冲打分算优势 |
-| [spire_codex_data/](spire_codex_data/README.md) | 公开对局下载、来源审计、摘要账本、锚点生成、刷新和导出 |
-| [combat_solver_cli/](combat_solver_cli/README.md) | 第三方求解器 worker、引擎客户端和独立轨迹复验 |
-| [sts2-cli/](sts2-cli/README.md) | 基于 [wuhao21/sts2-cli](https://github.com/wuhao21/sts2-cli) 的无头引擎 |
-| [public_history/](public_history/README.md) | 无头与 Steam 共用的公开历史状态机和原生钩子 |
-| [steam_recorder/](steam_recorder/README.md) | Steam Mod：实玩录制与控制桥接 |
-| `configs/` | 主策略配置：[20M](configs/rtxpro6000.json) 与 [200M](configs/rtxpro6000-200m.json) |
-| `docs/agents/` | 仓库内的领域文档和本地工单约定 |
+| `main/env/` | 引擎协议、控制分工、奖励、入场存档、种子与划分、公开历史契约（[env](docs/implementation/env.md)） |
+| `main/encoding/` | 公开观察、规则文本、冻结词表、批打包（[encoding](docs/implementation/encoding.md)） |
+| `main/data/` | 分片与索引、样本权重、留出（[data](docs/implementation/data.md)） |
+| `main/network/` | 网络、优化器、检查点、选择与重放（[network](docs/implementation/network.md)） |
+| `main/play/` | 对局循环、多进程采样、幕组、评估报告（[play](docs/implementation/play.md)） |
+| `main/learn/`、`main/iterate.py` | 数据供给、加权 NLL 训练器、幕组优势、幕组批、裁剪目标、迭代驱动（[learn](docs/implementation/learn.md)） |
+| `main/demos/` | 示范导入（[demos](docs/implementation/demos.md)） |
+| `main/steam.py` | 实机接管（[steam](docs/implementation/steam.md)） |
+| `spire_codex_data/` | 公开对局下载、来源审计、摘要账本、锚点生成（[demos](docs/implementation/demos.md)） |
+| `combat_solver_cli/` | CombatSolver worker 与客户端（[solver](docs/implementation/solver.md)） |
+| `public_history/` | 无头与 Steam 共用的公开历史状态机（[env](docs/implementation/env.md#公开历史c)） |
+| `steam_recorder/` | Steam Mod：录制与控制桥接（[steam](docs/implementation/steam.md)） |
+| `sts2-cli/` | 基于 [wuhao21/sts2-cli](https://github.com/wuhao21/sts2-cli) 的无头引擎 |
+| `configs/` | 主策略配置：20M（`rtxpro6000.json`）与 200M（`rtxpro6000-200m.json`） |
 
-源码、测试夹具、配置及使用文档入库。`data/` 保存本地数据，`runs/`、`checkpoints/` 保存实验与检查点，`build/` 保存构建辅助产物和 Mod 备份；这些目录与第三方 DLL 均不入库。整理仓库时保留原始数据、旧对照检查点和回放证据。
-
-文档各有一个维护位置：模块 README 说明当前用法，`ARCHITECTURE.md` 解释设计，`CONTEXT.md` 定义术语。当前工作区的任务、验收和历史实验记录在本地 `.scratch/`，不随 Git 分发；入口为 [A0 训练基线](.scratch/a0-training-baseline/spec.md)和[实施报告](.scratch/a0-training-baseline/implementation-report.md)。
+源码、测试夹具、配置与文档入库；`data/`、`runs/`、`build/` 和第三方 DLL 不入库。以下命令都在仓库根目录运行。
 
 ## 安装
 
@@ -41,34 +41,17 @@
 ```bash
 conda env create -f environment.yml
 conda activate sts2
+pip install -e '.[test]'
 ```
 
-已有 Python 环境时使用 `pip install -e '.[test]'`。构建无头引擎会将游戏程序集复制到 `sts2-cli/lib` 并修改该副本：
+构建无头引擎（把游戏程序集复制到 `sts2-cli/lib` 并修改该副本）：
 
 ```bash
 export GAME_DIR="$HOME/.local/share/Steam/steamapps/common/Slay the Spire 2"
 bash sts2-cli/setup.sh "$GAME_DIR"
 ```
 
-随后按 [worker 配置](combat_solver_cli/README.md#配置)安装固定版本的求解器依赖。Steam Mod 需要从游戏原始程序集单独构建，见 [安装说明](steam_recorder/README.md)。
-
-## 大模型
-
-当前数据与 BC 训练都在本地 `runs/bootstrap-20261008/`。BC 不自动验证或按表现停止，由使用者自行判断。
-
-新训练、严格续训、当前数据数量、版本迁移及可直接执行的命令统一维护在 [model/README.md](model/README.md)。战后及事件领奖由模型选择，普通宝箱、水晶球格子和指定单选事件按[共用控制规则](model/README.md#策略与控制器)执行。
-
-## 训练监测网页
-
-```bash
-python3 -m model.monitor --runs runs --port 8765
-```
-
-打开 [本地训练监测](http://127.0.0.1:8765)。服务只读日志，配置、指标含义和远程访问见 [监测说明](model/README.md#训练监测网页)。
-
-## 接管 Steam 游戏
-
-[steam_recorder](steam_recorder/README.md) 说明 Mod 安装、录制导入和 `play-steam` 用法。Python 控制端与无头共享动作分工；当前已通过桥接接口测试，最新控制改动尚未进行 Steam 实机接管验证。
+求解器依赖按 [solver](docs/implementation/solver.md#配置) 配置；Steam Mod 按 [steam](docs/implementation/steam.md) 从游戏原始程序集单独构建。
 
 ## 测试
 
@@ -76,11 +59,65 @@ python3 -m model.monitor --runs runs --port 8765
 python -m pytest -q -m 'not engine and not cuda'
 COMBAT_SOLVER_CONFIG=combat_solver_cli/lib/config.json python -m pytest -q -m engine
 python -m pytest sts2-cli/tests -q
-python -m model --device cpu smoke --output /tmp/spire-smoke
+python -m main --device cpu smoke --output /tmp/spire-smoke
 ```
 
-`-m engine` 和 `sts2-cli/tests` 须先完成原生依赖配置；`smoke` 是合成端到端检查。修改 `sts2-cli` 时另须遵守其 `CLAUDE.md` 的完整对局回归要求。模块专用检查见各自 README；测试通过不代表训练效果已验证。
+`-m engine` 与 `sts2-cli/tests` 需要已配置的原生依赖；`test_native_potion_costs.py` 需要支持药水价格的求解器构建（见 [solver](docs/implementation/solver.md#已知的坑)）。`smoke` 是合成引擎上的端到端检查。修改 `sts2-cli` 时另须遵守其 `CLAUDE.md` 的完整对局回归。测试通过不代表训练效果已验证。
 
-## 公开对局数据
+## BC 起步
 
-[spire_codex_data](spire_codex_data/README.md) 使用 `.run` 摘要生成独立监督样本；操作回放只用于来源审计和核对。这些示范用于 BC，不是策略自行采集的对局，也不构成连续通关证明。
+```bash
+python -m main import-independent data/anchors/independent-training.jsonl.gz --output data/bootstrap
+python -m main --device cuda init --config configs/rtxpro6000.json --output runs/init
+# 第一段：全部难度
+python -m main --device cuda bootstrap --data data/bootstrap --checkpoint runs/init --weights-only \
+  --config configs/rtxpro6000.json --output runs/bc --epochs 10
+# 第二段：只拟合 A10，战斗换成按更大预算另求的 A10 战斗
+python -m main --device cuda bootstrap --data data/bootstrap data/a10-battles \
+  --ascension 10 --combat-from data/a10-battles \
+  --checkpoint runs/bc/current --output runs/bc-a10 --epochs 10
+```
+
+- `init` 从引擎公开内容目录建立冻结词表并随机初始化；分片数据不会自行重建词表，必须给检查点。
+- 续训：`--checkpoint <目录>/current`；从任意轮次检查点续训到新目录；收尾衰减 `--decay-updates N`；探针 `--max-updates N`。各启动方式见 [network](docs/implementation/network.md#检查点)。
+- 控制规则变了只需重建索引：`python -m main reindex --data <目录> [--listed-only] --workers 6`（[data](docs/implementation/data.md#数据复用)）。
+- 留出 NLL：`python -m main --device cuda heldout-nll --data <目录…> --checkpoint <检查点> [--ascension 10] [--combat-from …]`。
+
+示范的生成（下载、来源筛选、锚点、导出）见 [demos](docs/implementation/demos.md)。
+
+## 采样与评估
+
+```bash
+# seeds.json 按五个角色各列等量种子；评估种子须与训练隔离
+python -m main --device cuda evaluate --checkpoint <检查点> --seeds seeds.json --output runs/eval-x \
+  --workers 32 --processes 32
+python -m main compare runs/eval-x runs/eval-y --head 60      # 配对符号检验
+python -m main --device cuda collect --checkpoint <检查点> --seeds seeds.json --output runs/collect \
+  --workers 44 --iteration 0      # 按检查点的两个温度采样一轮，写到 round-N
+```
+
+评估默认按检查点训练时的难度对局，`--ascension 10` 改在 A10 评估。`--workers` 是同时运行的引擎数，每对“引擎 + 采样进程”占 250–300 MB 内存。报告与采样轮的格式见 [play](docs/implementation/play.md)。
+
+## 迭代
+
+```bash
+python -m main --device cuda iterate --kl 0.1 --learning-rates configs/learning-rates-grpo.json \
+  --checkpoint <起点检查点> --config configs/rtxpro6000.json \
+  --output runs/iterate-v1 --iterations 6 --runs-per-character 25 \
+  --boundary-acts 2 3 --boundary-bosses 3 --group-n 4 --group-m 4 6 4 --min-entropy 0.45 \
+  --workers 32 --engine-root <引擎目录> \
+  --exclude-seeds <开发集与测试集种子文件…> \
+  --eval-seeds <开发集种子文件> --eval-runs-per-character 100 --evaluate-every 2
+```
+
+重跑同一条命令即断点续跑。每次迭代：按切点分波采样幕组（`--boundary-acts` 幕开头、`--boundary-bosses` Boss 入场；`--runs-per-character` 是每角色的种子数，`--group-n`、`--group-m` 是每个起点的段数）、算各波的优势、一遍更新、按间隔评估、清理。一遍默认把每一波各看一次；`--wave-shares 1 1 1` 这类相对数改各波在批里的份额，份额就是该波在梯度里的占比。更新是裁剪目标，KL 对 `--checkpoint`（`--clip`、`--kl`），`--reference-every k` 让参考每 k 次迭代换成当时的策略。`--learning-rates <json>`（`bootstrap` 也收）给这次运行自己的四组学习率，不给时沿用检查点的。步骤、参数、存储与资源见 [learn](docs/implementation/learn.md#迭代驱动)。
+
+## Steam
+
+```bash
+python steam_recorder/install.py --game-dir "$GAME_DIR" --install
+python -m main import-recorder "$RECORDING_DIR" --bootstrap-only --output data/steam-001
+python -m main --device cuda play-steam --checkpoint <检查点> --bridge-dir "$RECORDING_DIR/bridge"
+```
+
+见 [steam](docs/implementation/steam.md)。

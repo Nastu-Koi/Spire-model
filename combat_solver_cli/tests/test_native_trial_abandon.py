@@ -8,7 +8,7 @@ import pytest
 from combat_solver_cli.client import SolverEngine
 from combat_solver_cli.search_support import resolve
 from combat_solver_cli.trajectory import native_replay_error
-from model.protocol import execution_command, validate_frame
+from main.env.protocol import execution_command, validate_frame
 
 
 @pytest.mark.engine

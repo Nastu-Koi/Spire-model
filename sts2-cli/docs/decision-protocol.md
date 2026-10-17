@@ -1,6 +1,6 @@
 # 引擎决策协议与完整对局
 
-`engine-candidates-v1` 为模型提供同一公开快照上的完整合法候选，并由真实游戏引擎执行。正常训练不调用上游 `DetectDecisionPoint` 的自动领奖／默认选择分支。Python 训练入口与模块说明见[根目录 README](../../README.md)与 [ARCHITECTURE](../../ARCHITECTURE.md)。
+`engine-candidates-v1` 为模型提供同一公开快照上的完整合法候选，并由真实游戏引擎执行。正常训练不调用上游 `DetectDecisionPoint` 的自动领奖／默认选择分支。Python 训练入口与模块说明见[根目录 README](../../README.md)与 [architecture](../../docs/architecture.md)。
 
 ## JSON Lines 入口
 
@@ -12,7 +12,7 @@
 
 返回 `decision_frame`，含 `contract`、`boundary`、`routing`、`public`、`legal.candidates` 和 `events`。
 
-当前观察版本为 `public-state-v6`，`contract.public_history_version` 为 `public-history-v1`。`public.memory` 包含系统由公开事件维护的历史事实；牌位的 owner 引用对应当前抽牌堆卡牌，只有已知位置生成 `known_draw_before` 关系。概率字段包含 value／known／applicable，读档缺前缀不是初始概率。问号房的两种商店条件分布须结合上一地图点商店事实和所选节点的后继使用。机制与重置规则见 [输入设计](../../ARCHITECTURE.md#输入与公开信息)。旧帧仍可作 BC，但不能继续用于新输入版本的 PPO；历史公开状态哈希须按原观察版本核对。
+当前观察版本为 `public-state-v6`，`contract.public_history_version` 为 `public-history-v1`。`public.memory` 包含系统由公开事件维护的历史事实；牌位的 owner 引用对应当前抽牌堆卡牌，只有已知位置生成 `known_draw_before` 关系。概率字段包含 value／known／applicable，读档缺前缀不是初始概率。问号房的两种商店条件分布须结合上一地图点商店事实和所选节点的后继使用。机制与重置规则见 [输入设计](../../docs/architecture.md#输入与公开信息)。旧帧仍可作 BC，但不能用于新输入版本的采样训练；历史公开状态哈希须按原观察版本核对。
 
 从候选中选择引用，原样带回版本：
 
@@ -28,7 +28,7 @@
 
 ### 同一进程里的下一局
 
-一个进程同一时刻只有一局。已有对局时再发 `start_run`、`load_save` 或 `enter_anchor`，引擎先按游戏返回主菜单的方式结束这一局（`RunManager.CleanUp`），再用一个新的模拟器开始下一局：决策序号、状态版本和全部协议状态从头开始，得到的帧与新进程的第一局相同，只有 `episode_id` 不同。
+一个进程同一时刻只有一局。已有对局时再发 `start_run`、`load_save`、`enter_anchor`、`resume_save` 或 `resume_fight`，引擎先按游戏返回主菜单的方式结束这一局（`RunManager.CleanUp`），再用一个新的模拟器开始下一局：决策序号、状态版本和全部协议状态从头开始，得到的帧与新进程的第一局相同，只有 `episode_id` 不同。
 
 只有游戏在战斗之外等待玩家输入时才能结束一局：停在地图、房间里，或开着奖励菜单、选牌界面都可以，停在这些界面上的游戏代码不再继续。以下情况拒绝，返回 `{"type":"error","code":"run_not_ended"}`，原对局和已发布的决策不受影响：战斗进行中；仍有游戏代码在执行或占着线程（未完成的操作、原生续延、动作队列、水晶球、卡包选择）；这一局在引擎内部出过错（命令抛出异常或协议已报告失败）。被拒绝后要开始新的一局只能换一个进程。
 
@@ -42,6 +42,8 @@
 - `content_info`：只读，参数 `ids`。返回商店规则读取的静态属性：卡牌的类型、稀有度、是否无色，遗物的稀有度和能否进商店，药水的稀有度。不需要对局。
 - `anchor_room`：安装后只能调用一次，进入节点的房间并停在第一个决策。`room.type` 为 `combat`（`encounter`）、`rest_site`、`card_reward`（`cards`，按序列化卡牌给出）、`map`（节点之后的路线选择）、`ancient`（`event` 和 `options`：进入该远古之民事件，把它自己抽出的选项换成记录的选项，顺序不变）、`shop`（`cards`：五个角色卡牌格位各自记录的牌，只取它们的稀有度；`relics`：三个遗物格位记录的遗物）、`event`（`event`：按游戏对这一局的生成进入该事件，不改动任何选项）或 `rewards`（`gold`、`potions`、`relics`、`cards`：一个只含这些奖励的奖励界面，按游戏列出奖励的顺序，不生成任何内容；`gold` 是界面上显示的金币数）。商店的其余库存和全部价格由游戏用存档里的商店随机流照常抽出，引擎不核对也不修正，结果是否等于记录由调用方从帧里判断。`card_reward` 按给定的卡牌原样发放：记录里的候选已经包含玩家当时看到的全部改动，不再让遗物改一遍。
 - 之后任何 `enter_room`、`set_player`、`load_save` 等调试命令照常使 `training_ready` 失效。
+- `resume_save`：参数 `save`（在地图上写下的续局存档，如 `write_continue_save` 在一幕第一个选图决策处写的）。加载存档、静默重装玩家状态，不加节点、不进房间，运行标为训练可用，契约的 `initialization` 为 `act-resume-v1`；返回 `resume_installed`（`act`、`act_floor`、`visited`），之后 `advance_to_boundary` 发布选图决策。存档不在地图上（序列化的房间不是 `MapRoom`）时报错。
+- `resume_fight`：参数 `save`（在一场战斗第一个决策处由 `write_continue_save` 写下的存档，引擎已回滚到进房之前）、`encounter`（`ENCOUNTER.X` 或 `X`）、`act_floor`、`map_point_type`（`boss`／`monster`／`elite`），可选 `second_boss`。加载存档、静默重装玩家状态，把该类型的节点记为已访问（Boss 取本幕 Boss 节点，其它取同类型里最接近该楼层的节点）、设楼层，运行标为训练可用，契约的 `initialization` 为 `fight-resume-v1`，然后进入该遭遇；回复就是战斗的第一个决策帧。存档不在地图上时报错。
 
 `anchor_room` 还支持 `treasure`：`relic` 是记录的单件遗物，`gold_roll` 是待核对的开箱原始金币结果（42～52）。入场钩子和宝箱抑制照常执行，未开箱不公开遗物；开箱只条件化该宝箱的一次原始金币抽取，仍推进随机流，再执行原生难度折算、金币修饰和取得效果。调用方须枚举并核对末状态与公开序列，不能把任意指定结果当成历史证据。此约束绑定当前锚点宝箱，不影响普通对局或其它房间。
 
@@ -62,7 +64,7 @@
 | 选牌／卡包 | 原生已过滤卡池和数量约束，逐项 buffered 前缀／完整卡包；取消只在战斗中或无法完成选择时提供 |
 | 水晶球 | 全部隐藏中心格 × 两种占卜工具；原生次数、揭示、诅咒和最终奖励结算 |
 
-纯地图显示、免费打开已公开卡牌奖励、装饰音效及布局不制造额外策略步骤。Steam 的桥接按同样的方式发布奖励界面：已生成的卡牌奖励连同它的牌一起给出，`take_card_reward` 由 Mod 点开面板、核对牌未变后提交（`steam-live-v2`，归类规则见 [ARCHITECTURE](../../ARCHITECTURE.md) 的“候选是有结果的动作”）。跳过奖励、结束回合、离开商店保留其原生机会语义；非战斗阶段已打开的选择不提供取消，`selection_cancel = "combat-or-dead-end-v1"`（依据见 [ARCHITECTURE](../../ARCHITECTURE.md)）。未知稳定边界、无合法候选矛盾、引擎错误和真正死亡分别处理，不以强制 proceed 或重新补能量掩盖问题。
+纯地图显示、免费打开已公开卡牌奖励、装饰音效及布局不制造额外策略步骤。Steam 的桥接按同样的方式发布奖励界面：已生成的卡牌奖励连同它的牌一起给出，`take_card_reward` 由 Mod 点开面板、核对牌未变后提交（`steam-live-v2`，归类规则见 [architecture](../../docs/architecture.md) 的“候选是有结果的动作”）。跳过奖励、结束回合、离开商店保留其原生机会语义；非战斗阶段已打开的选择不提供取消，`selection_cancel = "combat-or-dead-end-v1"`（依据见 [architecture](../../docs/architecture.md)）。未知稳定边界、无合法候选矛盾、引擎错误和真正死亡分别处理，不以强制 proceed 或重新补能量掩盖问题。
 
 ## buffered 选择与模型缓存
 
@@ -82,7 +84,7 @@
 
 未打开宝箱不公开潜在遗物。水晶球 11×11 格子的未揭示实体只有坐标、公开形状和 unknown，不能带隐藏物品类别或覆盖范围。小工具揭示一个格，大工具揭示板内裁剪的 3×3，两者均消耗一次；每次实际揭示产生新决策和新编码，无法沿用此前静态缓存。
 
-真实卡牌／物品／事件效果当前明确为 `OPAQUE_RULE`，辅以类型化公开数值和引用（卡牌的附魔与负面修改各带一个显示数值 `enchantment_amount`、`affliction_amount`，规则文本靠它渲染）；这不是完整规则 AST 内容库。模型对 opaque 规则使用游戏描述文本作为程序（见 [ARCHITECTURE](../../ARCHITECTURE.md) 的"规则文本"），因此描述里显示的数值必须公开：遗物和能力导出 `stats`（各自的动态变量基础值），遗物在游戏显示图标计数时另带 `counter`。玩家实体带 `free_travel`，取自地图通行使用的同一个钩子 `Hook.ShouldAllowFreeTravel`。地图的 Boss 节点带 `encounter`，即本幕 Boss 的遭遇 ID（有第二个 Boss 节点时各带各的），游戏从一幕开始就在地图上显示它。静态目录（`public_catalog`）除内容模型和选项外，还列出没有自身模型的奖励与商店条目类型名，以及全部卡牌关键词，供词表冻结时登记。模型的组合 AST 编码已经实现，完整内容注册仍需逐项核对。公开信息清洗也不是任意游戏版本的不可泄漏证明，升级游戏或适配器后需重新验收。
+真实卡牌／物品／事件效果当前明确为 `OPAQUE_RULE`，辅以类型化公开数值和引用（卡牌的附魔与负面修改各带一个显示数值 `enchantment_amount`、`affliction_amount`，规则文本靠它渲染）；这不是完整规则 AST 内容库。模型对 opaque 规则使用游戏描述文本作为程序（见 [architecture](../../docs/architecture.md) 的"规则文本"），因此描述里显示的数值必须公开：遗物和能力导出 `stats`（各自的动态变量基础值），遗物在游戏显示图标计数时另带 `counter`。玩家实体带 `free_travel`，取自地图通行使用的同一个钩子 `Hook.ShouldAllowFreeTravel`。地图的 Boss 节点带 `encounter`，即本幕 Boss 的遭遇 ID（有第二个 Boss 节点时各带各的），游戏从一幕开始就在地图上显示它。静态目录（`public_catalog`）除内容模型和选项外，还列出没有自身模型的奖励与商店条目类型名，以及全部卡牌关键词，供词表冻结时登记。模型的组合 AST 编码已经实现，完整内容注册仍需逐项核对。公开信息清洗也不是任意游戏版本的不可泄漏证明，升级游戏或适配器后需重新验收。
 
 ## 结算、里程碑与 headless 桥接
 

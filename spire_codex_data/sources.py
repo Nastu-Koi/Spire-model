@@ -14,6 +14,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from main.env.seeds import split_group
+
 from .fetch import CHARACTERS, FAILURES, FILTERS, Client, fetch_asset, ident, list_page, save_json
 from .integrity import inspect_journal
 
@@ -25,12 +27,6 @@ ALLOWED_HARMONY_OWNERS = {'BaseLib', 'PostModInit', 'SpireCodex'}
 UNKNOWN = {'no_action_journal', 'mod_manifest_missing_or_invalid', 'patch_manifest_missing_or_invalid',
            'resume_requires_native_reconciliation'}
 TYPES = {'ACT', 'CARD', 'RELIC', 'POTION', 'CHARACTER', 'ENCOUNTER', 'MONSTER', 'EVENT', 'ENCHANTMENT'}
-
-
-def split_group(seed):
-    """Runs of one seed share their map and offers: they must stay on one side of a split."""
-    value = str(seed).upper().replace('O', '0').replace('I', '1').strip()
-    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def run_reasons(run, header=None):

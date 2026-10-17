@@ -9,7 +9,7 @@ def test_blood_potion_usable_from_rewards():
     if os.environ.get('SPIRE_CODEX_DATA_NATIVE_TESTS')!='1':
         pytest.skip('Set SPIRE_CODEX_DATA_NATIVE_TESTS=1 with the local solver configured')
     from combat_solver_cli.client import SolverEngine
-    from model.protocol import execution_command
+    from main.env.protocol import execution_command
     from combat_solver_cli.trajectory import native_replay_error
     with SolverEngine() as e:
         e.send(dict(cmd='start_run',character='IRONCLAD',seed='reward-potion-check',ascension=0))

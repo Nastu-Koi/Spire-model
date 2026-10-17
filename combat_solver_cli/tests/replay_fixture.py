@@ -3,7 +3,7 @@
 import tempfile
 from typing import ClassVar
 
-from model.protocol import execution_command
+from main.env.protocol import execution_command
 
 
 class FakeEngine:

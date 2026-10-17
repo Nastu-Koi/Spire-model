@@ -7,8 +7,8 @@ import pytest
 from combat_solver_cli import trajectory
 from combat_solver_cli.search_support import ReplayMismatch, state_key
 from combat_solver_cli.tests.replay_fixture import FakeEngine
-from model.data import validate_run
-from model.protocol import ProtocolError, action_semantics
+from main.data.shards import validate_run
+from main.env.protocol import ProtocolError, action_semantics
 
 
 def replay_inputs(tmp_path):

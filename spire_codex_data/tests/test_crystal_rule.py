@@ -1,7 +1,7 @@
 import pytest
-from model.crystal_rule import collection_candidate
-from model.protocol import ProtocolError
-from model.tests.test_crystal_planner import board_frame, corners
+from main.env.crystal_rule import collection_candidate
+from main.env.protocol import ProtocolError
+from main.tests.test_crystal_planner import board_frame, corners
 
 
 def frame(phase, entities, choices):

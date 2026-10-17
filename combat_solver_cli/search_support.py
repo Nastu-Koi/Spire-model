@@ -3,7 +3,7 @@
 from copy import deepcopy
 from dataclasses import dataclass
 
-from model.protocol import action_semantics, fingerprint
+from main.env.protocol import action_semantics, fingerprint
 
 
 class ReplayMismatch(RuntimeError):

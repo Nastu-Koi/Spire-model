@@ -24,7 +24,7 @@ from combat_solver_cli.search_support import (  # noqa: E402
     resolve,
     state_key,
 )
-from model.protocol import execution_command  # noqa: E402
+from main.env.protocol import execution_command  # noqa: E402
 
 
 def settle(engine, frame):

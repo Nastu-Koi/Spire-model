@@ -10,7 +10,7 @@ import pytest
 from combat_solver_cli.client import SolverEngine
 from combat_solver_cli.search_support import collapse_noncombat_cancels, resolve
 from combat_solver_cli.trajectory import native_replay_error
-from model.protocol import execution_command, validate_frame
+from main.env.protocol import execution_command, validate_frame
 
 PREFIX = Path('combat_solver_cli/tests/native/fixtures/reward-cancel-prefix.json')
 

@@ -94,6 +94,110 @@ public partial class RunSimulator
         }
     }
 
+    // A run resumed from a continue save written at a map decision: the same state,
+    // played on by the policy from the map (the first decision of an act, for act
+    // groups). The contract names the initialization as with an anchor: the frames of
+    // a resumed run are not a continuous native run from its start.
+    public const string ResumeInitialization = "act-resume-v1";
+
+    /// Resume a serialized run where its save stands: at the map, with the visited
+    /// nodes and the floor the save records, no node added. No anchor_room follows;
+    /// advance_to_boundary publishes the map decision.
+    public Dictionary<string, object?> ResumeSave(JsonElement cmd)
+    {
+        if (!cmd.TryGetProperty("save", out var saveElement) || saveElement.ValueKind != JsonValueKind.Object)
+            return Error("resume_save requires save");
+        var saveJson = saveElement.GetRawText();
+        var loaded = LoadSave(saveJson, "en", diagnosticProtocol: true);
+        if (loaded.GetValueOrDefault("type") as string == "error") return loaded;
+        try
+        {
+            var save = SaveManager.FromJson<SerializableRun>(saveJson).SaveData!;
+            if (save.Ascension is < 0 or > 10) return Error("Resumed ascension must be 0-10");
+            var runState = _runState!;
+            if (runState.CurrentRoom is not (null or MapRoom))
+                return Error("resume_save needs a save written at the map");
+            // Loading enters the act and runs its hooks. Reinstall the supplied
+            // state silently so owned relics do not grant their pickup effects again.
+            runState.Players[0].SyncWithSerializedPlayer(save.Players[0]);
+            _protocolInitialization = ResumeInitialization;
+            _protocolTrainingRun = true;
+            _anchorRoomEntered = true;
+            _protocolMapVisible = true;
+            EnsureDecisionProtocol();
+            return new()
+            {
+                ["type"] = "resume_installed", ["initialization"] = ResumeInitialization,
+                ["act"] = runState.CurrentActIndex, ["act_floor"] = runState.ActFloor,
+                ["visited"] = runState.VisitedMapCoords?.Count() ?? 0,
+            };
+        }
+        catch (Exception ex)
+        {
+            InvalidateDecisionProtocol();
+            return ErrorWithTrace("ResumeSave failed", ex);
+        }
+    }
+
+    // A run resumed at the entry of one of its fights: the save written at the fight's
+    // first decision holds the run as it stood before the room, and the fight is
+    // entered again (its enemies' HP and the opening hand drawn anew). For act groups
+    // cut at a boss fight. The contract names the initialization as with the others.
+    public const string FightResumeInitialization = "fight-resume-v1";
+
+    /// Resume a serialized run at a fight: install the save at the fight's map point
+    /// (the boss point, or the native point of the recorded type nearest the recorded
+    /// floor), mark the run training-ready, and enter the encounter; the reply is the
+    /// fight's first decision frame.
+    public Dictionary<string, object?> ResumeFight(JsonElement cmd)
+    {
+        if (!cmd.TryGetProperty("save", out var saveElement) || saveElement.ValueKind != JsonValueKind.Object
+            || !cmd.TryGetProperty("encounter", out var encounterElement) || encounterElement.ValueKind != JsonValueKind.String
+            || !cmd.TryGetProperty("act_floor", out var floorElement) || !floorElement.TryGetInt32(out var actFloor)
+            || !cmd.TryGetProperty("map_point_type", out var typeElement) || typeElement.ValueKind != JsonValueKind.String)
+            return Error("resume_fight requires save, encounter, act_floor and map_point_type");
+        var saveJson = saveElement.GetRawText();
+        var loaded = LoadSave(saveJson, "en", diagnosticProtocol: true);
+        if (loaded.GetValueOrDefault("type") as string == "error") return loaded;
+        try
+        {
+            var save = SaveManager.FromJson<SerializableRun>(saveJson).SaveData!;
+            if (save.Ascension is < 0 or > 10) return Error("Resumed ascension must be 0-10");
+            var runState = _runState!;
+            if (runState.CurrentRoom is not (null or MapRoom))
+                return Error("resume_fight needs a save written before a room");
+            // Loading enters the act and runs its hooks. Reinstall the supplied
+            // state silently so owned relics do not grant their pickup effects again.
+            runState.Players[0].SyncWithSerializedPlayer(save.Players[0]);
+            var wanted = typeElement.GetString()!.Replace("_", "");
+            MapPoint? point;
+            if (wanted.Equals("boss", StringComparison.OrdinalIgnoreCase))
+                point = cmd.TryGetProperty("second_boss", out var second) && second.ValueKind == JsonValueKind.True
+                    ? runState.Map.SecondBossMapPoint : runState.Map.BossMapPoint;
+            else
+                point = runState.Map.GetAllMapPoints()
+                    .Where(p => p.PointType.ToString().Equals(wanted, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(p => Math.Abs(p.coord.row - (actFloor - 1))).ThenBy(p => p.coord.col).FirstOrDefault();
+            if (point == null) return Error("No native map point of the fight's type");
+            runState.AddVisitedMapCoord(point.coord);
+            runState.ActFloor = actFloor;
+            _protocolInitialization = FightResumeInitialization;
+            _protocolTrainingRun = true;
+            _anchorRoomEntered = true;
+            EnsureDecisionProtocol();
+            var encounter = encounterElement.GetString()!;
+            if (encounter.StartsWith("ENCOUNTER.", StringComparison.Ordinal)) encounter = encounter["ENCOUNTER.".Length..];
+            var frame = EnterRoom("combat", encounter, null, decisionProtocol: true);
+            if (frame.GetValueOrDefault("type") as string == "error") InvalidateDecisionProtocol();
+            return frame;
+        }
+        catch (Exception ex)
+        {
+            InvalidateDecisionProtocol();
+            return ErrorWithTrace("ResumeFight failed", ex);
+        }
+    }
+
     /// The act's route when exactly one path from the start spells the recorded
     /// node types; otherwise null.
     // The drawn rows end at the boss; a second boss follows the first.
