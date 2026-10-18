@@ -42,17 +42,18 @@ def completed(index):
 def test_fights_are_told_apart_by_the_engine_events():
     tracker = FightTracker()
     assert tracker.decision() == (None, None)
+    assert tracker.kind is None
     tracker.events([started(1)])
     fight, entry = tracker.decision()
     assert fight == 1 and entry == dict(fight=1, encounter_id="e1", encounter="ENCOUNTER.X", kind="normal", act=1,
                                         from_event=False, map_point_type="monster", second_boss=False)
-    # Later decisions of the fight belong to it without being its entry.
-    assert tracker.decision() == (1, None)
+    # Later decisions of the fight belong to it without being its entry; the kind is the fight's.
+    assert tracker.decision() == (1, None) and tracker.kind == "normal"
     # The first decision after the win is outside: the fight ended with the win.
     tracker.events([completed(1)])
-    assert tracker.decision() == (None, None)
+    assert tracker.decision() == (None, None) and tracker.kind is None
     tracker.events([started(2, "boss"), ])
-    assert tracker.decision()[1]["second_boss"] is False
+    assert tracker.decision()[1]["second_boss"] is False and tracker.kind == "boss"
     tracker.events([completed(2), started(3, "boss")])
     fight, entry = tracker.decision()
     assert (fight, entry["second_boss"], entry["map_point_type"]) == (3, True, "boss")

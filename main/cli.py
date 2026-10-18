@@ -210,9 +210,10 @@ def parser():
                         "the checkpoint's without it")
     x.add_argument("--min-entropy", type=float,
                    help="Stop after an iteration whose update leaves the policy's mean entropy below this")
-    x.add_argument("--explore-potions", type=float, default=0.0,
+    x.add_argument("--explore-potions", type=float, nargs="+", default=[0.0],
                    help="Probability that a sampled fight decision which could use a potion draws one of its "
-                        "USE_POTION candidates instead of a sample from the policy; 0 explores nothing")
+                        "USE_POTION candidates instead of a sample from the policy: one value for every fight, "
+                        "two for normal fights and for elite and boss fights, three for each kind; 0 explores nothing")
     x.add_argument("--updates", default="round",
                    help="Updates per iteration: `round` (a pass over the round) or a number")
     x.add_argument("--weight-cap", type=float, default=10.0,

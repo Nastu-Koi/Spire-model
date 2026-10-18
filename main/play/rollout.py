@@ -165,8 +165,7 @@ class RolloutRunner:
     ):
         if max_steps < 1 or timeout <= 0:
             raise ValueError("Rollout limits must be positive")
-        if not isinstance(explore_potions, (int, float)) or not 0 <= explore_potions <= 1:
-            raise ValueError("The potion exploration rate is a probability")
+        explore_potions = exploration_rates(explore_potions)
         temperatures = {"combat": 1.0, "other": 1.0} if temperatures is None else dict(temperatures)
         if set(temperatures) != {"combat", "other"} or not all(t > 0 for t in temperatures.values()):
             raise ValueError("The sampling temperatures must be positive, one for fights and one for the rest")
@@ -185,14 +184,15 @@ class RolloutRunner:
         # which are the same at every temperature. The temperatures are part of the
         # policy's definition: a run records them.
         self.temperatures = temperatures
-        # Exploration of potion use: with this probability a sampled fight decision
-        # that could use a potion draws one of its USE_POTION candidates instead of a
-        # sample from the tempered policy. The policy puts too little on using potions
-        # for the sampling temperature ever to draw one, so without it no group ever
-        # holds a segment that used one to compare against. An explored decision is
-        # recorded with the policy's own log-probability of the action, as if the
-        # policy had drawn it: the update then weighs it by its advantage in full.
-        self.explore_potions = float(explore_potions)
+        # Exploration of potion use, a probability per kind of fight (normal, elite,
+        # boss): with it a sampled decision of such a fight that could use a potion draws
+        # one of its USE_POTION candidates instead of a sample from the tempered policy.
+        # The policy puts too little on using potions for the sampling temperature ever
+        # to draw one, so without it no group ever holds a segment that used one to
+        # compare against. An explored decision is recorded with the policy's own
+        # log-probability of the action, as if the policy had drawn it; the update tells
+        # it apart (`explored`) and holds it in a symmetric trust region.
+        self.explore_potions = explore_potions
         self._random = random.Random()
         # The sampling iteration the runs belong to.
         self.iteration = iteration
@@ -215,14 +215,15 @@ class RolloutRunner:
         inside = fight is not None or frame["public"]["phase"] == "combat"
         return self.temperatures["combat" if inside else "other"]
 
-    def exploration_for(self, frame, fight, sample=True):
+    def exploration_for(self, frame, fight, sample=True, kind=None):
         """The candidates a decision of `frame` is drawn among when it explores potion
         use (`explore_potions`), or None for a decision drawn from the policy: a sampled
-        decision inside a fight that could use a potion, with the exploration rate."""
-        if not sample or fight is None or not self.explore_potions:
+        decision inside a fight of `kind` that could use a potion, with that kind's rate."""
+        rate = self.explore_potions.get(kind, 0.0) if sample and fight is not None else 0.0
+        if not rate:
             return None
         potions = [c["candidate_ref"] for c in frame["legal"]["candidates"] if c["verb"] == "USE_POTION"]
-        if not potions or len(frame["legal"]["candidates"]) < 2 or self._random.random() >= self.explore_potions:
+        if not potions or len(frame["legal"]["candidates"]) < 2 or self._random.random() >= rate:
             return None
         return potions
 
@@ -262,7 +263,7 @@ class RolloutRunner:
             "source": "rollout" if sample else "evaluation",
             "sampling": "full_distribution" if sample else "argmax",
             "temperature": dict(self.temperatures) if sample else None,
-            "explore_potions": self.explore_potions if sample else None,
+            "explore_potions": dict(self.explore_potions) if sample else None,
             "iteration": self.iteration,
             "status": "unresolved",
             "macros": [],
@@ -287,8 +288,8 @@ class RolloutRunner:
 
         # A policy handed in draws its choices where the network runs; either is told
         # the temperature of each decision here, where the fight it belongs to is known.
-        def choose(frame, fight, *, sample):
-            restrict = self.exploration_for(frame, fight, sample)
+        def choose(frame, fight, kind, *, sample):
+            restrict = self.exploration_for(frame, fight, sample, kind)
             # A policy that does not explore (a test double) is asked nothing it does not know.
             among = {} if restrict is None else {"restrict": restrict}
             return policy.choose(frame, sample=sample, temperature=self.temperature_for(frame, sample, fight), **among)
@@ -389,7 +390,7 @@ class RolloutRunner:
                     if key != current_segment:
                         current_segment, pending_steps, active_macro = key, [], None
                     branching = len(frame["legal"]["candidates"]) > 1
-                    choice = choose(frame, fight, sample=sample)
+                    choice = choose(frame, fight, fights.kind, sample=sample)
                     # A frame played inside a fight is kept only where every frame is.
                     step = {
                         "frame": _pack(frame) if combat_frames or fight is None else None,
@@ -440,6 +441,33 @@ class RolloutRunner:
             for action in trace["environment_actions"]:
                 action["frame"] = _unpack(action["frame"])
         return trace
+
+
+FIGHT_KINDS = ("normal", "elite", "boss")
+
+
+def exploration_rates(rates):
+    """The potion exploration rate of each kind of fight, from one probability for all,
+    a mapping by kind (a kind left out explores nothing), or a sequence: one value for
+    all kinds, two for normal fights and for elite and boss fights, three for each."""
+    if isinstance(rates, dict):
+        if not set(rates) <= set(FIGHT_KINDS):
+            raise ValueError(f"Potion exploration rates are given by fight kind {FIGHT_KINDS}")
+        rates = {kind: rates.get(kind, 0.0) for kind in FIGHT_KINDS}
+    else:
+        values = [rates] if isinstance(rates, (int, float)) else list(rates)
+        if len(values) == 1:
+            values = values * 3
+        elif len(values) == 2:
+            values = [values[0], values[1], values[1]]
+        if len(values) != 3:
+            raise ValueError("Potion exploration takes one rate, one for normal and one for elite and boss "
+                             "fights, or one per kind")
+        rates = dict(zip(FIGHT_KINDS, values))
+    for value in rates.values():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            raise ValueError("The potion exploration rate is a probability")
+    return {kind: float(value) for kind, value in rates.items()}
 
 
 def _resumed(engine, resume):

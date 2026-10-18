@@ -561,7 +561,7 @@ def test_a_run_explores_potion_use_at_the_rate_asked_and_records_the_policys_log
     exploring = RolloutRunner(learner.model, learner.vocabulary, precision="no", ascension=0,
                               temperatures={"combat": 0.5, "other": 0.8}, explore_potions=1.0)
     run = exploring.run(drinking(), "Ironclad", "drink")
-    assert run["status"] == "complete" and run["explore_potions"] == 1.0
+    assert run["status"] == "complete" and run["explore_potions"] == {"normal": 1.0, "elite": 1.0, "boss": 1.0}
     # The fight's first decision could use the potion; exploring at rate 1 it does, once,
     # and the step says so. The decision is still the policy's as the record has it: its
     # log-probability is what the tempered policy gives the action, so the trainer's
@@ -573,17 +573,51 @@ def test_a_run_explores_potion_use_at_the_rate_asked_and_records_the_policys_log
     assert replayed_gap(learner.model, learner.vocabulary, [run]) < 1e-4
     assert _without_frames(run)["explored"] == 1
     validate_run(run, on_policy=True)
+    # The training sample of the macro-action says it was explored.
+    from main.data.shards import samples as training_samples
+    flagged = [item.explored for item in training_samples([run])]
+    assert flagged[0] and not any(flagged[1:])
     # Outside sampling, or at rate 0, nothing is explored and nothing is marked.
     greedy = exploring.run(drinking(), "Ironclad", "greedy", sample=False)
     assert greedy["explore_potions"] is None and not explored_steps(greedy)
     plain = RolloutRunner(learner.model, learner.vocabulary, precision="no", ascension=0,
                           temperatures={"combat": 0.5, "other": 0.8})
     run = plain.run(drinking(), "Ironclad", "plain")
-    assert run["explore_potions"] == 0.0 and not explored_steps(run) and _without_frames(run)["explored"] == 0
+    assert run["explore_potions"] == {"normal": 0.0, "elite": 0.0, "boss": 0.0}
+    assert not explored_steps(run) and _without_frames(run)["explored"] == 0
     assert all("explored" not in step for macro in run["macros"] for step in macro["steps"])
-    for wrong in (-0.1, 1.5):
+    for wrong in (-0.1, 1.5, [0.1, 0.2, 0.3, 0.4], {"event": 0.1}):
         with pytest.raises(ValueError, match="exploration"):
             RolloutRunner(learner.model, learner.vocabulary, explore_potions=wrong)
+
+
+class EliteDrinking(Drinking):
+    """The same fight, an elite's."""
+
+    def enter(self, encounter, act=1, kind="normal"):
+        super().enter(encounter, act, "elite")
+
+
+def test_the_exploration_rate_is_the_fights_kinds(tmp_path):
+    learner, _, seeds = setup_round({"combat": 0.5, "other": 0.8})
+    # Two rates: normal fights, then elite and boss fights.
+    runner = RolloutRunner(learner.model, learner.vocabulary, version=learner.policy_version, precision="no",
+                           ascension=0, temperatures={"combat": 0.5, "other": 0.8}, explore_potions=[0.0, 1.0])
+    assert runner.explore_potions == {"normal": 0.0, "elite": 1.0, "boss": 1.0}
+    assert not explored_steps(runner.run(drinking(), "Ironclad", "normal-fight"))
+    elite = runner.run(EliteDrinking(4, 2), "Ironclad", "elite-fight")
+    assert len(explored_steps(elite)) == 1 and verb_of(explored_steps(elite)[0]) == "USE_POTION"
+    assert elite["explore_potions"] == {"normal": 0.0, "elite": 1.0, "boss": 1.0}
+    # By kind, with a kind left out exploring nothing; and in the sampling processes alike.
+    by_kind = RolloutRunner(learner.model, learner.vocabulary, version=learner.policy_version, precision="no",
+                            ascension=0, temperatures={"combat": 0.5, "other": 0.8}, explore_potions={"elite": 1.0})
+    assert by_kind.explore_potions == {"normal": 0.0, "elite": 1.0, "boss": 0.0}
+    with samplers(by_kind, lambda: EliteDrinking(4, 2), engines=5, processes=3) as pool:
+        runs = read(collect_round(pool, by_kind, seeds, tmp_path / "round"))
+    assert all(len(explored_steps(run)) == 1 for run in runs)
+    with samplers(by_kind, drinking, engines=5, processes=3) as pool:
+        runs = read(collect_round(pool, by_kind, seeds, tmp_path / "normal"))
+    assert not any(explored_steps(run) for run in runs)
 
 
 def test_sampling_processes_explore_potion_use_as_the_runner_alone_does(tmp_path):
@@ -592,6 +626,6 @@ def test_sampling_processes_explore_potion_use_as_the_runner_alone_does(tmp_path
                            ascension=0, temperatures={"combat": 0.5, "other": 0.8}, explore_potions=1.0)
     with samplers(runner, drinking, engines=5, processes=3) as pool:
         runs = read(collect_round(pool, runner, seeds, tmp_path / "round"))
-    assert all(run["explore_potions"] == 1.0 for run in runs)
+    assert all(run["explore_potions"] == {"normal": 1.0, "elite": 1.0, "boss": 1.0} for run in runs)
     assert all(len(explored_steps(run)) == 1 and verb_of(explored_steps(run)[0]) == "USE_POTION" for run in runs)
     assert replayed_gap(learner.model, learner.vocabulary, runs) < 1e-4

@@ -56,7 +56,7 @@ from main.play.evaluation import evaluate_runs
 from main.learn.history import TrainingHistory
 from main.learn.trainer import Learner
 from main.env.protocol import CHARACTERS, ProtocolError
-from main.play.rollout import SUMMARY_RUNS, RolloutRunner, collect_round
+from main.play.rollout import SUMMARY_RUNS, RolloutRunner, collect_round, exploration_rates
 from main.play.sampling import Samplers
 from main.env.seeds import validate_evaluation_seeds
 
@@ -102,15 +102,15 @@ class Settings:
     learning_rates: str | None = None
     clip: float = grpo.CLIP
     kl: float = grpo.KL
-    # The probability that a sampled fight decision which could use a potion draws one
-    # of its USE_POTION candidates instead of a sample from the policy (`RolloutRunner`).
-    explore_potions: float = 0.0
+    # The probability, by kind of fight, that a sampled decision which could use a potion
+    # draws one of its USE_POTION candidates instead of a sample from the policy
+    # (`RolloutRunner`, `rollout.exploration_rates`): a number, a list or a mapping.
+    explore_potions: object = 0.0
 
     def __post_init__(self):
         if self.runs_per_character < 1 or self.evaluate_every < 1:
             raise ValueError("Runs per character and the evaluation interval are positive")
-        if not 0 <= self.explore_potions <= 1:
-            raise ValueError("The potion exploration rate is a probability")
+        self.explore_potions = exploration_rates(self.explore_potions)
         if self.learning_rates is not None:
             LearningRates.load(self.learning_rates)
         if not 0 < self.clip < 1 or self.kl < 0:

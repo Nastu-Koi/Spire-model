@@ -414,9 +414,13 @@ def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
 def test_the_potion_exploration_rate_is_a_setting_of_the_run(world):
     arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
                                      "--explore-potions", "0.25"])
-    assert arguments.explore_potions == 0.25
-    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).explore_potions == 0.0
-    assert settings(world, eval_seeds=None, explore_potions=0.25).explore_potions == 0.25
-    for wrong in (1.5, -0.1):
+    assert arguments.explore_potions == [0.25]
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
+                                "--explore-potions", "0.01", "0.03"]).explore_potions == [0.01, 0.03]
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).explore_potions == [0.0]
+    assert settings(world, eval_seeds=None, explore_potions=0.25).explore_potions == {"normal": 0.25, "elite": 0.25, "boss": 0.25}
+    assert settings(world, eval_seeds=None, explore_potions=[0.01, 0.03]).explore_potions == {"normal": 0.01, "elite": 0.03, "boss": 0.03}
+    assert settings(world, eval_seeds=None).explore_potions == {"normal": 0.0, "elite": 0.0, "boss": 0.0}
+    for wrong in (1.5, -0.1, [0.1, 0.2, 0.3, 0.4]):
         with pytest.raises(ValueError, match="exploration"):
             settings(world, eval_seeds=None, explore_potions=wrong)

@@ -462,6 +462,7 @@ class Sample:
     old_log_prob: float | None = None
     temperature: float | None = None
     advantage: float | None = None
+    explored: bool = False  # a decision of it was explored, not drawn from the policy (`RolloutRunner`)
     _lengths: tuple[tuple[int, int], ...] | None = field(
         default=None, repr=False, compare=False
     )
@@ -470,7 +471,8 @@ class Sample:
 def _sample(run, macro, weight, source, index):
     branches = sum(is_policy_frame(step["frame"]) for step in macro["steps"])
     return Sample(macro, run["character"], run["run_id"], weight, macro["phase"], branches,
-                  run.get("ascension"), source, index, macro.get("old_log_prob"), macro.get("temperature"))
+                  run.get("ascension"), source, index, macro.get("old_log_prob"), macro.get("temperature"),
+                  explored=any(step.get("explored", False) for step in macro["steps"]))
 
 
 def samples(runs, *, weights=None):

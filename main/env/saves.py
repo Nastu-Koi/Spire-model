@@ -46,6 +46,7 @@ class FightTracker:
         self.current = None
         self.won = False
         self.bosses = Counter()  # boss fights begun, by act
+        self.kinds = {}  # each fight's kind: normal, elite or boss
         self.entry = None  # the fight whose first decision is the next one
         # How each fight ended for the policy: "win", "loss", or None while it goes on
         # and for a fight the run was cut off in.
@@ -60,6 +61,7 @@ class FightTracker:
                 self.count += 1
                 self.current, self.won = self.count, False
                 self.results[self.count] = None
+                self.kinds[self.count] = event["kind"]
                 act = event.get("act")
                 boss = event["kind"] == "boss"
                 self.entry = dict(
@@ -92,6 +94,11 @@ class FightTracker:
             self.current = None
         entry, self.entry = self.entry, None
         return self.current, entry
+
+    @property
+    def kind(self):
+        """The kind of the fight the last decision belongs to; None outside a fight."""
+        return self.kinds.get(self.current)
 
 
 def fight_resume_command(row):

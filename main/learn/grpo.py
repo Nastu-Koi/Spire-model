@@ -15,6 +15,12 @@ A sampled macro-action i is learned with
 - **No signal, no step.** A macro-action with A_i = 0 has no policy gradient, whatever
   it was: a group whose segments all ended alike does not pull the policy toward what
   it already does, as weighted behavior cloning would.
+- **Explored steps are held on both sides.** A decision drawn by exploration
+  (`Sample.explored`) was recorded with the policy's own log-probability, so its ratio
+  starts at 1 like any other; but the action is rare, its log-probability moves fast
+  within a pass, and the one-sided clip would let the samples that disagree with its
+  motion pull with the full ratio while those that agree are silenced. Such a
+  macro-action pushes only while its ratio is within [1 − ε, 1 + ε], whatever the sign.
 - **A trust region.** Once a macro-action's ratio is outside [1 − ε, 1 + ε] in the
   direction its advantage pushes, it stops pushing.
 - **An anchor.** KL_i is the sum over the macro-action's decisions of
@@ -81,13 +87,19 @@ class Clipped:
                 prepared, with_accuracy=True, temperatures=temperatures, reference=reference)
         old = given([item.old_log_prob for item in micro], model.device)
         advantage = given([item.advantage for item in micro], model.device)
+        explored = given([float(item.explored) for item in micro], model.device) > 0
         ratio = (log_prob.float() - old).clamp(-LOG_RATIO_BOUND, LOG_RATIO_BOUND).exp()
         bounded = ratio.clamp(1 - self.clip, 1 + self.clip)
-        surrogate = torch.minimum(ratio * advantage, bounded * advantage)
+        pushed = ratio * advantage
+        inside = (ratio >= 1 - self.clip) & (ratio <= 1 + self.clip)
+        # Explored: no push from outside the region on either side.
+        surrogate = torch.where(explored, torch.where(inside, pushed, pushed.detach()),
+                                torch.minimum(pushed, bounded * advantage))
         loss = -surrogate + self.kl * kl.float()
         with torch.no_grad():
-            # Clipped: the bound is the smaller term, so the ratio no longer moves it.
-            clipped = ((bounded * advantage < ratio * advantage) & (advantage != 0)).sum()
+            # Clipped: the bound is the smaller term, so the ratio no longer moves it; an
+            # explored one, outside the region.
+            clipped = (torch.where(explored, ~inside, bounded * advantage < pushed) & (advantage != 0)).sum()
             tally = torch.stack([ratio.sum(), clipped.to(ratio.dtype), kl.float().sum(),
                                  (advantage == 0).sum().to(ratio.dtype)]).double()
         self._seen = tally if self._seen is None else self._seen + tally

@@ -72,6 +72,35 @@ def test_a_ratio_beyond_the_clip_in_the_advantages_direction_stops_pushing():
     assert gradient(learner, objective, prepared, [replace(item, advantage=1.0) for item in items]) > 1e-4
 
 
+def test_an_explored_decision_pushes_only_while_its_ratio_is_within_the_clip_on_either_side():
+    learner, reference, prepared, items = setup()
+    objective = Clipped(reference, clip=0.2, kl=0.0)
+    explored = [replace(item, explored=True) for item in items]
+    # Inside the region an explored decision pushes like any other, both ways.
+    for sign in (1.0, -1.0):
+        assert gradient(learner, objective, prepared, [replace(item, advantage=sign) for item in explored]) > 1e-4
+        assert objective.take()["clip_fraction"] == 0.0
+    # At r = 2 a plain decision with a negative advantage is pulled back with the whole ratio;
+    # an explored one is held: outside the region nothing moves it, whatever the sign.
+    doubled = [replace(item, old_log_prob=item.old_log_prob - 0.6931471805599453, advantage=-1.0) for item in items]
+    assert gradient(learner, objective, prepared, doubled) > 1e-4
+    assert objective.take()["clip_fraction"] == 0.0
+    held = [replace(item, explored=True) for item in doubled]
+    assert gradient(learner, objective, prepared, held) < 1e-6
+    assert objective.take()["clip_fraction"] == 1.0
+    assert gradient(learner, objective, prepared, [replace(item, advantage=1.0) for item in held]) < 1e-6
+    assert objective.take()["clip_fraction"] == 1.0
+    # At r = 1/2 likewise: a plain positive decision pushes on (weakly), an explored one waits.
+    halved = [replace(item, old_log_prob=item.old_log_prob + 0.6931471805599453, advantage=1.0) for item in items]
+    assert gradient(learner, objective, prepared, halved) > 1e-4
+    assert objective.take()["clip_fraction"] == 0.0
+    assert gradient(learner, objective, prepared, [replace(item, explored=True) for item in halved]) < 1e-6
+    assert objective.take()["clip_fraction"] == 1.0
+    # The loss of a held decision is still the surrogate's value: it is detached, not dropped.
+    loss, _, _ = objective(learner, prepared, held)
+    assert torch.allclose(loss.detach(), torch.full_like(loss, 2.0), atol=1e-3)
+
+
 def test_the_kl_pulls_back_toward_the_reference_and_is_what_is_reported():
     learner, reference, prepared, items = setup()
     with torch.no_grad():

@@ -28,7 +28,7 @@
 
 一场战斗从引擎的 `encounter_started` 到它打赢后的第一个决策之前；其中的出牌和战斗中的选牌（`card_select`：弃牌、消耗）按 `combat_temperature`，其余决策按 `other_temperature`（默认 0.3／0.5，记在检查点和对局里；BC 检查点记的是训练时 profile 的值，采样时用 `--config` 换成当前 profile 的）。greedy 的 `evaluate` 记 `temperature: null`，概率按温度 1 记。
 
-用药探索（`RolloutRunner.explore_potions`，设计见 [architecture 用药探索](../architecture.md#用药探索)）：采样进程在战斗里（`FightTracker` 判定）遇到带 USE_POTION 候选的决策时，以探索率抽签决定是否探索；探索的决策把 USE_POTION 候选的槽位作为 `Decisions.explore` 掩码随决策打包过去（`wire` 的 `explore` 字段，与 `legal` 同形），采集进程的 `PolicyNetwork.choose` 只在这些槽位里按 π_T 的相对概率抽，返回的对数概率仍是整个合法分布下该动作的 π_T。对局里探索步带 `explored: true`，交给采集进程的摘要与分片索引行带 `explored` 计数，每波 `summary.json` 汇总为 `explored`。greedy 不探索；探索率 0 时打包多一个全零字段，其余逐位不变。
+用药探索（`RolloutRunner.explore_potions`，每种战斗一个率，`rollout.exploration_rates` 把一个数、两个数或按种类的映射整理成 normal／elite／boss 三个；设计见 [architecture 用药探索](../architecture.md#用药探索)）：采样进程在战斗里（`FightTracker` 判定，`FightTracker.kind` 给出这场战斗的种类）遇到带 USE_POTION 候选的决策时，按该种类的率抽签决定是否探索；探索的决策把 USE_POTION 候选的槽位作为 `Decisions.explore` 掩码随决策打包过去（`wire` 的 `explore` 字段，与 `legal` 同形），采集进程的 `PolicyNetwork.choose` 只在这些槽位里按 π_T 的相对概率抽，返回的对数概率仍是整个合法分布下该动作的 π_T。对局里探索步带 `explored: true`，交给采集进程的摘要与分片索引行带 `explored` 计数，每波 `summary.json` 汇总为 `explored`。greedy 不探索；探索率 0 时打包多一个全零字段，其余逐位不变。
 
 ## 采样对局的格式
 
