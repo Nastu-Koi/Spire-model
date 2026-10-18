@@ -68,18 +68,19 @@ python -m main --device cpu smoke --output /tmp/spire-smoke
 
 ```bash
 python -m main import-independent data/anchors/independent-training.jsonl.gz --output data/bootstrap
-python -m main --device cuda init --config configs/rtxpro6000.json --output runs/init
+python -m main --device cuda init --config configs/rtxpro6000.json --output checkpoints/init
 # 第一段：全部难度
-python -m main --device cuda bootstrap --data data/bootstrap --checkpoint runs/init --weights-only \
+python -m main --device cuda bootstrap --data data/bootstrap --checkpoint checkpoints/init --weights-only \
   --config configs/rtxpro6000.json --output runs/bc --epochs 10
 # 第二段：只拟合 A10，战斗换成按更大预算另求的 A10 战斗
 python -m main --device cuda bootstrap --data data/bootstrap data/a10-battles \
   --ascension 10 --combat-from data/a10-battles \
-  --checkpoint runs/bc/current --output runs/bc-a10 --epochs 10
+  --checkpoint checkpoints/bc/current --output runs/bc-a10 --epochs 10
 ```
 
 - `init` 从引擎公开内容目录建立冻结词表并随机初始化；分片数据不会自行重建词表，必须给检查点。
-- 续训：`--checkpoint <目录>/current`；从任意轮次检查点续训到新目录；收尾衰减 `--decay-updates N`；探针 `--max-updates N`。各启动方式见 [network](docs/implementation/network.md#检查点)。
+- 训练命令（`bootstrap`、`iterate`）的检查点写进 `--checkpoints` 目录，默认是 `checkpoints/` 加 `--output` 在 `runs/` 下的相对路径（`--output runs/bc` 的检查点在 `checkpoints/bc/current`、`checkpoints/bc/epoch-NNNNNN/`）；`--output` 不在 `runs/` 下时必须给出。`runs/<运行>/` 只留运行记录。
+- 续训：`--checkpoint checkpoints/<运行>/current`；从任意轮次检查点续训到新目录；收尾衰减 `--decay-updates N`；探针 `--max-updates N`。各启动方式见 [network](docs/implementation/network.md#检查点)。
 - 控制规则变了只需重建索引：`python -m main reindex --data <目录> [--listed-only] --workers 6`（[data](docs/implementation/data.md#数据复用)）。
 - 留出 NLL：`python -m main --device cuda heldout-nll --data <目录…> --checkpoint <检查点> [--ascension 10] [--combat-from …]`。
 

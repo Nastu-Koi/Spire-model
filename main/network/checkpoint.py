@@ -22,6 +22,25 @@ from main.env.rewards import REWARD_VERSION
 from main.env.public_history import HISTORY_VERSION, require_history_version
 
 
+# Training runs keep their records under `runs/` and their checkpoints under
+# `checkpoints/`, both relative to the working directory (the repository root).
+RUNS, CHECKPOINTS = Path("runs"), Path("checkpoints")
+
+
+def checkpoints_for(output, checkpoints=None):
+    """The directory a training run with output `output` saves its checkpoints in:
+    `checkpoints` when given, else `checkpoints/` followed by the output's path under
+    `runs/`. An output outside `runs/` names its own; none may lie under `runs/`."""
+    if checkpoints is None:
+        resolved, runs = Path(output).resolve(), RUNS.resolve()
+        if resolved == runs or not resolved.is_relative_to(runs):
+            raise ValueError(f"{output} is not under {RUNS}/: pass --checkpoints")
+        return CHECKPOINTS / resolved.relative_to(runs)
+    if Path(checkpoints).resolve().is_relative_to(RUNS.resolve()):
+        raise ValueError(f"Checkpoints are not kept under {RUNS}/: {checkpoints}")
+    return Path(checkpoints)
+
+
 def archive_checkpoint(source, destination):
     """Publish an immutable epoch snapshot without duplicating its tensor files."""
     destination = Path(destination)

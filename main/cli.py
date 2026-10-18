@@ -120,7 +120,10 @@ def parser():
                    help="Take fights from these of the --data directories only; the others give "
                         "their decisions outside combat. The second stage of BC takes its fights "
                         "from the battles the solver fought on the larger budgets")
-    x.add_argument("--output", required=True)
+    x.add_argument("--output", required=True, help="The run's records: status, history, updates")
+    x.add_argument("--checkpoints",
+                   help="Directory of this run's checkpoints (current/ and the archives); by default "
+                        "checkpoints/ followed by the output's path under runs/")
     x = sub.add_parser("heldout-nll",
                        help="Score a checkpoint on the held-out seed groups of a data set: "
                             "NLL per macro-action and per decision by character and phase")
@@ -182,7 +185,12 @@ def parser():
                    help="The waves' relative shares of a batch, one per wave in the order of the acts; "
                         "a wave's share is its share of the gradient. By the waves' decisions when not "
                         "given, so that a pass sees every wave once")
-    x.add_argument("--output", required=True, help="Everything the iterations write; an existing one is continued")
+    x.add_argument("--output", required=True,
+                   help="The records of the iterations (state, rounds' summaries, evaluations); "
+                        "an existing one is continued")
+    x.add_argument("--checkpoints",
+                   help="Directory of this run's checkpoints (current/ and the archives); by default "
+                        "checkpoints/ followed by the output's path under runs/")
     x.add_argument("--iterations", type=int, required=True, help="Iterations the output is brought to")
     x.add_argument("--runs-per-character", type=int, default=200, help="Seeds of each character a round starts from")
     x.add_argument("--seed-root", default="iterate", help="What every round's seeds are derived from")

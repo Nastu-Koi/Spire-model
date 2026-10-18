@@ -125,14 +125,15 @@ def test_bootstrap_takes_several_data_directories(tmp_path, capsys):
     capsys.readouterr()
     assert main(["bootstrap", "--data", str(tmp_path / "demo"), str(tmp_path / "other"),
                  "--checkpoint", str(tmp_path / "smoke/checkpoint"), "--weights-only", "--precision", "no",
-                 "--epochs", "1", "--include-heldout", "--output", str(tmp_path / "bc")]) == 0
+                 "--epochs", "1", "--include-heldout", "--output", str(tmp_path / "bc"),
+                 "--checkpoints", str(tmp_path / "checkpoints/bc")]) == 0
     record = json.loads((tmp_path / "bc/history.jsonl").read_text())
     assert record["training_runs"] == 7 and record["metrics"]["training"]["macros"] == 14
     assert record["metrics"]["weight"] == pytest.approx(1.0)
     # A path that is not sharded cannot be read together with sharded ones.
     assert main(["bootstrap", "--data", str(tmp_path / "demo"), str(tmp_path / "smoke"),
                  "--checkpoint", str(tmp_path / "smoke/checkpoint"), "--weights-only",
-                 "--output", str(tmp_path / "bc2")]) == 1
+                 "--output", str(tmp_path / "bc2"), "--checkpoints", str(tmp_path / "checkpoints/bc2")]) == 1
     assert "sharded" in capsys.readouterr().err
 
 

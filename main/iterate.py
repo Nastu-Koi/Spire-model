@@ -17,17 +17,22 @@ One iteration, repeated (`python -m main iterate`):
    advantages, policy archives that were not evaluated and no later update refers to,
    what interrupted steps left behind.
 
-Everything is written under one output directory, and every step is skipped when its
-result is already there: an interrupted run goes on from the step it was in. What
-an interrupted step left is moved under `interrupted/`, out of the way of its second
-attempt, and removed at the iteration's cleanup.
+The records are written under one output directory, the policies under a checkpoints
+directory of the run's own (`checkpoints_for`: by default `checkpoints/` followed by
+the output's path under `runs/`), and every step is skipped when its result is already
+there: an interrupted run goes on from the step it was in. What an interrupted step
+left is moved under `interrupted/`, out of the way of its second attempt, and removed
+at the iteration's cleanup.
 
     groups/round-N/            the rounds: a directory per wave; after the update only the summaries
-    policy/current, policy/iteration-NNNN/   the policy after its update of iteration N
     evaluation/iteration-NNNN/ the evaluation after iteration N, with report.json
     seeds/, logs/              the seeds of each round; the output of the commands run
     state.json                 what every iteration's steps came to
     status.json, history.jsonl, updates.jsonl   the status, one line per iteration, one per update
+
+and in the checkpoints directory
+
+    current/, iteration-NNNN/  the policy after its update of iteration N
 """
 
 import gc
@@ -306,10 +311,11 @@ class _Resting:
 
 
 class Driver:
-    """The iterations of one output directory. `engine` makes an engine for a sampling
-    process: the real one unless a test hands in another."""
+    """The iterations of one output directory, their policies in `checkpoints`.
+    `engine` makes an engine for a sampling process: the real one unless a test hands
+    in another."""
 
-    def __init__(self, output, settings, device="cpu", *, engine=None, runtime=None, say=None):
+    def __init__(self, output, settings, device="cpu", *, checkpoints, engine=None, runtime=None, say=None):
         self.output, self.settings, self.device = Path(output), settings, device
         self.runtime = runtime or {}
         self.say = say or (lambda value: print(json.dumps(value, ensure_ascii=False, allow_nan=False), flush=True))
@@ -318,7 +324,7 @@ class Driver:
 
             engine = lambda: CliEngine(root=settings.engine_root)  # noqa: E731
         self.engine = engine
-        self.policy, self.groups = self.output / "policy", self.output / "groups"
+        self.policy, self.groups = Path(checkpoints), self.output / "groups"
         self.learner = self.history = None
         # The sampling processes of every round, forked before anything is trained.
         self.pool = None
@@ -337,6 +343,13 @@ class Driver:
         self.state = json.loads(path.read_text()) if path.exists() else dict(format=FORMAT, iterations={})
         if self.state.get("format") != FORMAT:
             raise ValueError("Unsupported iteration state")
+        if (self.output / "policy").exists():
+            raise ValueError(f"{self.output / 'policy'} holds this run's policies; they are kept in "
+                             f"{self.policy}: move them there")
+        kept = self.state.setdefault("checkpoints", str(self.policy))
+        if Path(kept).resolve() != self.policy.resolve():
+            raise ValueError(f"The policies of {self.output} are in {kept}, not {self.policy}")
+        write_json(path, self.state)
 
     # ---- State ----
 
@@ -381,6 +394,8 @@ class Driver:
         iteration that was cut off after it was saved (`update`)."""
         current = self.policy / "current"
         self.resumed = current.exists()
+        if not self.resumed and any(entry.get("update") for entry in self.state["iterations"].values()):
+            raise ValueError(f"{self.output} has updated its policy, but {current} is missing")
         rates = self.settings.learning_rates
         learner, _ = Learner.load(current if self.resumed else self.settings.checkpoint, self.device,
                                   training=TrainConfig.from_profile(self.settings.config)
@@ -533,7 +548,7 @@ class Driver:
         self.release()
         done = metrics["groups"]
         result = dict(
-            policy=str(archived.relative_to(self.output)), policy_version=learner.policy_version,
+            policy=str(archived), policy_version=learner.policy_version,
             updates=learner.updates, pass_updates=max(wave["batches"] for wave in done["waves"].values()),
             round=directory.name, advantages=self.entry(iteration)["advantages"],
             loss=metrics["loss"], accuracy=metrics["accuracy"], entropy=metrics.get("entropy"),
@@ -542,7 +557,7 @@ class Driver:
             wait_seconds=round(metrics["wait_seconds"], 1),
             wait_share=round(metrics["wait_seconds"] / max(metrics["duration_seconds"], 1e-9), 4),
             clip=done["clip"], kl=done["kl"], phase_weights=done["phase_weights"], seen=done["seen"],
-            reference=str(anchored.relative_to(self.output) if anchored.is_relative_to(self.output) else anchored))
+            reference=str(anchored))
         seeds = set().union(*(RunShards(path).seeds for path in waves.values()))
         learner.save(current, dict(
             runtime=self.runtime, iteration=iteration, update=result, advantage=GROUPS,

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 
-from main.network.checkpoint import archive_checkpoint, load_model, save_checkpoint
+from main.network.checkpoint import archive_checkpoint, checkpoints_for, load_model, save_checkpoint
 from main.network.config import LearningRates, ModelConfig, TrainConfig
 from main.env.control import environment_action
 from main.data.shards import HELDOUT_FRACTION, RunShards, at_ascension, audit_files, combat_from, extent, load_runs, policy_macros, split_held_out
@@ -223,11 +223,14 @@ def run_bootstrap(args, runtime):
         raise ValueError("--decay-updates continues a checkpoint's optimizer: "
                          "pass its current checkpoint without --weights-only")
     output = Path(args.output)
-    if ((output / "current").exists() or (output / "history.jsonl").exists()
+    checkpoints = checkpoints_for(output, args.checkpoints)
+    if (output / "current").exists() or any(output.glob("epoch-*")):
+        raise ValueError(f"{output} holds checkpoints; they are kept in {checkpoints}: move them there")
+    if ((checkpoints / "current").exists() or (output / "history.jsonl").exists()
             or (output / "updates.jsonl").exists()
-            or any(output.glob("epoch-*"))):
+            or any(checkpoints.glob("epoch-*"))):
         if (args.weights_only or not args.checkpoint
-                or Path(args.checkpoint).resolve() != (output / "current").resolve()):
+                or Path(args.checkpoint).resolve() != (checkpoints / "current").resolve()):
             raise ValueError("Existing BC output requires resume from its current checkpoint; use a new output directory")
     runs, streamed = _dataset(args.data)
     if args.ascension is not None:
@@ -290,7 +293,7 @@ def run_bootstrap(args, runtime):
         def epoch_done(index, metrics):
             nonlocal epoch_started, completed
             epoch = start_epoch + index
-            archived = output / f"epoch-{epoch:06d}"
+            archived = checkpoints / f"epoch-{epoch:06d}"
             if archived.exists():
                 raise FileExistsError("Epoch checkpoint already exists; use a new output directory")
             record = history.append(
@@ -301,7 +304,7 @@ def run_bootstrap(args, runtime):
                 policy_version=learner.policy_version,
             )
             learner.save(
-                output / "current",
+                checkpoints / "current",
                 {
                     **metadata,
                     "completed_bootstrap_epochs": epoch,
@@ -311,7 +314,7 @@ def run_bootstrap(args, runtime):
             )
             # Retain completed epochs for manual comparison. Hard links survive
             # the next atomic replacement of current without copying tensors.
-            archive_checkpoint(output / "current", archived)
+            archive_checkpoint(checkpoints / "current", archived)
             emit(record)
             completed = index
             epoch_started = time.monotonic()
@@ -374,7 +377,8 @@ def run_iterate(args, runtime):
         evaluate_every=args.evaluate_every,
         eval_seeds=args.eval_seeds, eval_runs_per_character=args.eval_runs_per_character,
         eval_workers=args.eval_workers)
-    state = Driver(args.output, settings, args.device, runtime=runtime).run(args.iterations)
+    state = Driver(args.output, settings, args.device, runtime=runtime,
+                   checkpoints=checkpoints_for(args.output, args.checkpoints)).run(args.iterations)
     emit({"output": str(args.output), "iterations": sum(
         bool(entry.get("complete")) for entry in state["iterations"].values())})
 

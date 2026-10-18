@@ -43,6 +43,8 @@ Spire Codex 摘要 ─ spire_codex_data（锚点 + 求解器）─ demos 导入 
 新检查点 ─ 每几次迭代 500 局 greedy 评估 ─ 配对比较
 ```
 
+训练命令（`bootstrap`、`iterate`）把检查点写进 `checkpoints/` 下这次运行自己的目录（默认是 `checkpoints/` 加输出目录在 `runs/` 下的相对路径），输出目录只有运行记录：状态、历史与每步记录、种子、幕组摘要、评估报告。检查点大、要长期保留和被别的运行引用；运行记录小、随运行清理。
+
 ## 输入与公开信息
 
 `decision_frame` 由 `contract`、`routing`、`public`、`legal.candidates` 组成。模型只用行动前公开信息；seed、内部随机数、隐藏牌序、候选编号和对象地址不作特征，引用只用来建立实体关系、把动作映射回游戏操作。

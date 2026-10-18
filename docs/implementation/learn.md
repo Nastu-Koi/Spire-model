@@ -77,19 +77,20 @@ L = −min(r·A, clip(r, 1 − ε, 1 + ε)·A) + κ·KL
 | --- | --- | --- |
 | `sample` | 一轮幕组（[play](play.md#幕组)），各波依次；被打断的轮（种子相同）从所在的波续跑，不整轮重采；没完成的段按 `Settings.quarantine` 的比例容忍（2%，不是命令行参数），超出或最后一波没写出任何段则这一步失败 | `groups/round-N/<波>/`，种子在 `seeds/iteration-NNNN.json` |
 | `advantages` | 每波的回报与优势（[幕组的优势](#幕组的优势)），记各波的组数、组间方差占比、树覆盖、组内 R² | `groups/round-N/<波>/advantages.json.gz` |
-| `update` | 一遍[裁剪目标](#幕组的裁剪目标)的更新（批见[幕组批](#幕组批)） | `policy/current`、`policy/iteration-NNNN/` |
+| `update` | 一遍[裁剪目标](#幕组的裁剪目标)的更新（批见[幕组批](#幕组批)） | 检查点目录的 `current/`、`iteration-NNNN/` |
 | `evaluation` | 每 `--evaluate-every`（默认 5）次迭代，用 `--eval-seeds` 每角色前 `--eval-runs-per-character` 个种子 greedy 评估，只写去掉帧的对局文件 | `evaluation/iteration-NNNN/report.json` |
 | `cleanup` | 删这次更新之后没有人再读的东西：到这次为止各轮每波的 `accepted/` 分片、`saves/`、`index.jsonl.gz`、`advantages.json.gz`（留 `summary.json`、`quarantine/`）；策略归档只留评估过的（关键存档点）、到期待评估的、下一次更新的 KL 参考和这次的；`interrupted/` 整个删 | 记下释放的空间 |
 
 - 一轮的形状：`--runs-per-character` 是每角色的种子数，`--boundary-acts`（默认 `2 3`）、`--boundary-bosses`（默认无；如 `3` 在第三幕 Boss 入场再切一级，波 `boss3`）、`--group-n`（8）、`--group-m`（8，或每个后续波一个数，波数 = 切点数）。每轮的组不复用。
-- `--clip`、`--kl`：[裁剪目标](#幕组的裁剪目标)的 ε 与 κ。`--reference-every k`：KL 的参考每 k 次迭代换成当时的策略（第 N 次迭代用 `policy/iteration-{k·⌊N/k⌋ − 1}`，N < k 用起点检查点），这些归档不被清理，更新记录的 `reference` 记下用的是哪份；默认 0，参考始终是 `--checkpoint`。`--learning-rates <json>` 给这次运行各组的学习率（不给时沿用检查点的），写进这次运行保存的检查点。
+- `--clip`、`--kl`：[裁剪目标](#幕组的裁剪目标)的 ε 与 κ。`--reference-every k`：KL 的参考每 k 次迭代换成当时的策略（第 N 次迭代用检查点目录的 `iteration-{k·⌊N/k⌋ − 1}`，N < k 用起点检查点），这些归档不被清理，更新记录的 `reference` 记下用的是哪份；默认 0，参考始终是 `--checkpoint`。`--learning-rates <json>` 给这次运行各组的学习率（不给时沿用检查点的），写进这次运行保存的检查点。
 - `--config <profile>`：采样温度换成 profile 里的（严格续训时其余设置仍须与检查点一致；给了 `--learning-rates` 时学习率不在比较之列）。
 - `--wave-shares`：各波在批里的相对份额，按波的顺序每波一个数；不给时按各波的决策数（见[幕组批](#幕组批)）。`--updates`：`round`（ΣN / B 次，默认）或一个数。
 - 采样种子由 `--seed-root` 与迭代号派生（十六位十六进制，每角色等量）；避开 `--exclude-seeds`、`--eval-seeds` 和检查点记下的训练种子，按原样、按游戏读法（O 作 0、I 作 1）和按 `split_group` 三种写法核对。
+- 检查点目录：`--checkpoints`，默认 `checkpoints/` 加 `--output` 在 `runs/` 下的相对路径（`runs/grpo/train/v1` → `checkpoints/grpo/train/v1`）；输出不在 `runs/` 下时必须给出，也不能放进 `runs/`。`state.json` 记下它（`checkpoints`），续跑给了别的目录就报错；记有更新而检查点目录里没有 `current/` 时报错（否则会从起点检查点载入，丢掉已做的更新）；输出目录里还有旧布局的 `policy/` 时报错并提示搬到哪里。更新记录的 `policy`、`reference` 记检查点的实际路径。
 - 记录：检查点的 `progress` 记迭代号、优势来源（`act-groups`）和这次更新的摘要，`training_seeds` 累积各波的种子；`state.json` 记每次迭代各步的结果与当时的设置；标准输出每完成一步打印一行 JSON。
-- 断点续跑：重跑同一条命令（`--iterations` 可加大）。每一步落盘后才记入 `state.json`；被打断的步骤留下的目录移到 `interrupted/` 后重做（这次迭代的清理把它删掉）；策略更新已保存而未记入时不会再更新一次（只认这次运行自己的 `policy/current`，从另一次运行的检查点起步时，那份检查点元数据里的更新不算）。SIGTERM 与 Ctrl+C 一样结束正在进行的步骤，`status.json` 记下停在哪一步。除 `--checkpoint` 与 `--seed-root` 外的设置都可以在两次运行之间改。同一输出目录不能同时被两个进程写。
+- 断点续跑：重跑同一条命令（`--iterations` 可加大）。每一步落盘后才记入 `state.json`；被打断的步骤留下的目录移到 `interrupted/` 后重做（这次迭代的清理把它删掉）；策略更新已保存而未记入时不会再更新一次（只认这次运行自己的 `current/`，从另一次运行的检查点起步时，那份检查点元数据里的更新不算）。SIGTERM 与 Ctrl+C 一样结束正在进行的步骤，`status.json` 记下停在哪一步。除 `--checkpoint` 与 `--seed-root` 外的设置都可以在两次运行之间改。同一输出目录不能同时被两个进程写。
 - 采样、策略更新与裁剪目标的参考前向在同一个进程里轮流用 GPU，每步结束归还显存缓存；全局层是同一个被编译的函数，各步的梯度模式、精度和模块不同，所以驱动放宽编译器对同一函数变体数的上限（`COMPILED_VARIANTS`），否则后出现的运行方式一直不被编译。
-- 存储：每次迭代的帧、索引与优势在清理时删除，留下的是各波的摘要；评估几 MB（逐局结果留给配对比较）；策略归档每份约 170 MB，评估过的留下，其余用完即删。
+- 存储：每次迭代的帧、索引与优势在清理时删除，留下的是各波的摘要；评估几 MB（逐局结果留给配对比较）；策略归档（在检查点目录里）每份约 170 MB，评估过的留下，其余用完即删。
 
 - 采样进程：驱动加载策略后、第一次更新之前 fork 一组（`--workers` 个引擎，`--processes` 个进程），整个运行的各轮采样和评估都用它（`--eval-workers` 不同时，评估另起一组）。每轮结束后它们的引擎退出、进程留下（`Samplers.rest`），训练期只占进程本身（每个约 16 MB）。原因见 [play](play.md#采样进程分工)。
 

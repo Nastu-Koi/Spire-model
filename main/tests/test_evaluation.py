@@ -141,26 +141,38 @@ def test_bc_records_all_training_seeds_for_manual_evaluation(tmp_path, capsys):
     for c in CHARACTERS:
         write_run(first / f"{c}.json", demonstration(c, "seen-seed", 4, 2))
     common = ["--tiny", "--precision", "no", "--epochs", "1"]
-    assert main(["bootstrap", "--data", str(first), "--output", str(tmp_path / "a"),
+    kept = tmp_path / "checkpoints" / "a"
+    assert main(["bootstrap", "--data", str(first), "--output", str(tmp_path / "a"), "--checkpoints", str(kept),
                  *common]) == 0
-    assert "seen-seed" in json.loads((tmp_path / "a" / "current" / "manifest.json").read_text())["progress"]["training_seeds"]
+    # The checkpoints are in their own directory; the output holds the records.
+    assert not (tmp_path / "a" / "current").exists() and not any((tmp_path / "a").glob("epoch-*"))
+    assert "seen-seed" in json.loads((kept / "current" / "manifest.json").read_text())["progress"]["training_seeds"]
     capsys.readouterr()
     record = json.loads((tmp_path / "a" / "history.jsonl").read_text())
     assert "validation" not in record and "validation_runs" not in record
-    assert (tmp_path / "a" / "epoch-000001" / "weights.pt").exists()
-    progress = json.loads((tmp_path / "a" / "current" / "manifest.json").read_text())["progress"]
+    assert (kept / "epoch-000001" / "weights.pt").exists()
+    progress = json.loads((kept / "current" / "manifest.json").read_text())["progress"]
     with pytest.raises(ValueError, match="overlaps"):
         validate_evaluation_seeds({c: ["seen-seed" if i == 0 else f"unseen-{i}"]
                                    for i, c in enumerate(CHARACTERS)}, progress)
-    archived = (tmp_path / "a" / "epoch-000001" / "weights.pt").read_bytes()
-    assert main(["bootstrap", "--data", str(first), "--checkpoint", str(tmp_path / "a" / "current"),
-                 "--output", str(tmp_path / "a"), "--epochs", "1"]) == 0
-    assert (tmp_path / "a" / "epoch-000002" / "weights.pt").exists()
-    assert (tmp_path / "a" / "epoch-000001" / "weights.pt").read_bytes() == archived
+    archived = (kept / "epoch-000001" / "weights.pt").read_bytes()
+    assert main(["bootstrap", "--data", str(first), "--checkpoint", str(kept / "current"),
+                 "--output", str(tmp_path / "a"), "--checkpoints", str(kept), "--epochs", "1"]) == 0
+    assert (kept / "epoch-000002" / "weights.pt").exists()
+    assert (kept / "epoch-000001" / "weights.pt").read_bytes() == archived
     capsys.readouterr()
     # A new initialization cannot replace the user's earlier comparison run.
-    assert main(["bootstrap", "--data", str(first), "--output", str(tmp_path / "a"), *common]) == 1
+    assert main(["bootstrap", "--data", str(first), "--output", str(tmp_path / "a"), "--checkpoints", str(kept),
+                 *common]) == 1
     assert "new output directory" in capsys.readouterr().err
+    # An output outside runs/ names its checkpoints directory; one of the old layout,
+    # its checkpoints among its records, is told where they go.
+    assert main(["bootstrap", "--data", str(first), "--output", str(tmp_path / "b"), *common]) == 1
+    assert "--checkpoints" in capsys.readouterr().err
+    (kept / "current").rename(tmp_path / "a" / "current")
+    assert main(["bootstrap", "--data", str(first), "--checkpoint", str(tmp_path / "a" / "current"),
+                 "--output", str(tmp_path / "a"), "--checkpoints", str(kept), "--epochs", "1"]) == 1
+    assert "move them there" in capsys.readouterr().err
 
 
 
@@ -288,14 +300,14 @@ def test_held_out_nll_is_reported_by_character_and_phase(tmp_path, capsys):
         write_run(data / f"{c}-kept.json", demonstration(c, "kept", 4, 2))
         write_run(data / f"{c}-held.json", demonstration(c, held_out_seed("held"), 4, 2))
     assert main(["bootstrap", "--data", str(data), "--output", str(tmp_path / "bc"),
-                 "--tiny", "--precision", "no", "--epochs", "1"]) == 0
+                 "--checkpoints", str(tmp_path / "checkpoints/bc"), "--tiny", "--precision", "no", "--epochs", "1"]) == 0
     capsys.readouterr()
     record = json.loads((tmp_path / "bc" / "history.jsonl").read_text())
     assert record["training_runs"] == 5 and record["metrics"]["held_out"]["groups"] == 5
     assert record["metrics"]["samples"] == record["metrics"]["training"]["macros"]
-    progress = json.loads((tmp_path / "bc" / "current" / "manifest.json").read_text())["progress"]
+    progress = json.loads((tmp_path / "checkpoints/bc" / "current" / "manifest.json").read_text())["progress"]
     assert progress["held_out"] == record["metrics"]["held_out"]
-    assert main(["heldout-nll", "--data", str(data), "--checkpoint", str(tmp_path / "bc" / "current")]) == 0
+    assert main(["heldout-nll", "--data", str(data), "--checkpoint", str(tmp_path / "checkpoints/bc" / "current")]) == 0
     report = json.loads(capsys.readouterr().out)
     held = [demonstration(c, held_out_seed("held"), 4, 2) for c in CHARACTERS]
     assert report["held_out"] == {"fraction": HELDOUT_FRACTION, **extent(held), "of": {

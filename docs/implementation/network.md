@@ -48,13 +48,13 @@
 
 ## 检查点
 
-每轮保存 `epoch-NNNNNN/` 并更新 `current/`：`weights.pt`、`optimizer.pt`、`runtime.pt`（随机状态）、`manifest.json`（结构与训练配置、词表、规则文本摘要、编码／历史版本、`progress`：轮次、更新数、训练过的种子 `training_seeds`、留出计数、BC 的难度与 `--combat-from` 记录、迭代记录）。只存 `state_dict`，包结构变化不影响载入。
+每轮在检查点目录里保存 `epoch-NNNNNN/` 并更新 `current/`（`--checkpoints`，默认 `checkpoints/` 加 `--output` 在 `runs/` 下的相对路径，输出不在 `runs/` 下时必须给出，也不能放进 `runs/`；`--output` 只有 `history.jsonl`、`updates.jsonl`、`status.json`）：`weights.pt`、`optimizer.pt`、`runtime.pt`（随机状态）、`manifest.json`（结构与训练配置、词表、规则文本摘要、编码／历史版本、`progress`：轮次、更新数、训练过的种子 `training_seeds`、留出计数、BC 的难度与 `--combat-from` 记录、迭代记录）。只存 `state_dict`，包结构变化不影响载入。
 
 | 启动方式 | 行为 |
 | --- | --- |
 | `--checkpoint <检查点> --weights-only` | 只取兼容权重，用当前配置与全新优化器、随机状态和预热计数；新输出目录 |
-| `--checkpoint <目录>/current` | 严格续训：恢复优化器、随机状态和调度进度，配置与训练版本必须一致 |
-| `--checkpoint <任意轮次检查点> --output <新目录>` | 从该轮严格续训到新目录（已有输出目录才要求从它自己的 `current` 续） |
+| `--checkpoint <检查点目录>/current` | 严格续训：恢复优化器、随机状态和调度进度，配置与训练版本必须一致 |
+| `--checkpoint <任意轮次检查点> --output <新目录>` | 从该轮严格续训到新目录（已有输出目录才要求从它自己检查点目录的 `current` 续；输出目录里还有旧布局的 `current/`、`epoch-*` 时报错，提示搬到哪里） |
 | `--checkpoint … --config <profile>` | 严格续训，只把采样温度换成 profile 里的；同时给 `--learning-rates` 时 profile 的学习率不比较 |
 | `--checkpoint …/current --decay-updates N --output <新目录>` | 收尾衰减 |
 | 任一方式加 `--max-updates N` | 做满 N 次更新就保存并停止（可停在一轮中途），用于按固定更新数比较设置的探针 |

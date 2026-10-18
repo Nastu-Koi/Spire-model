@@ -59,7 +59,7 @@ def world(tmp_path):
     listed["Ironclad"][0] = round_seeds("test", 0, 1)["Ironclad"][0]
     seeds = tmp_path / "evaluation-seeds.json"
     seeds.write_text(json.dumps(listed))
-    return SimpleNamespace(root=tmp_path, output=tmp_path / "iterate",
+    return SimpleNamespace(root=tmp_path, output=tmp_path / "iterate", checkpoints=tmp_path / "checkpoints/iterate",
                            checkpoint=journeys.checkpoint(tmp_path / "policy"), seeds=seeds)
 
 
@@ -75,7 +75,8 @@ def settings(world, **changes):
 
 
 def driver(world, **changes):
-    return Driver(world.output, settings(world, **changes), engine=chain, say=lambda _: None)
+    return Driver(world.output, settings(world, **changes), checkpoints=world.checkpoints, engine=chain,
+                  say=lambda _: None)
 
 
 def read(path):
@@ -133,7 +134,7 @@ def test_a_run_goes_on_from_the_step_it_was_cut_off_in(world):
     state = driver(world, eval_seeds=None).run(3)
     assert state["iterations"]["2"]["update"] == recorded and state["iterations"]["2"]["complete"]
     assert len(lines(world.output / "updates.jsonl")) == written
-    assert Learner.load(world.output / "policy/current", "cpu")[0].updates == recorded["updates"]
+    assert Learner.load(world.checkpoints / "current", "cpu")[0].updates == recorded["updates"]
     # Finished iterations are left alone; another checkpoint's or seed root's output is
     # not continued, nor one that another process is writing.
     assert driver(world, eval_seeds=None).run(3) == state
@@ -174,7 +175,8 @@ def test_the_command_line_runs_the_iterations(world, monkeypatch, capsys):
     assert (arguments.clip, arguments.kl) == (0.2, 0.01) and arguments.wave_shares is None
     assert arguments.weight_cap == batches.WEIGHT_CAP == Settings(checkpoint="c").weight_cap
     monkeypatch.setattr(engine_module, "CliEngine", lambda root=None: chain())
-    common = ["iterate", "--checkpoint", str(world.checkpoint), "--output", str(world.output), "--iterations", "1",
+    common = ["iterate", "--checkpoint", str(world.checkpoint), "--output", str(world.output),
+              "--checkpoints", str(world.checkpoints), "--iterations", "1",
               "--boundary-acts", "2", "3", "--group-n", "2", "--group-m", "2", "2"]
     assert main([*common, "--runs-per-character", "1", "--workers", "2", "--seed-root", "cli",
                  "--kl", "0.05", "--updates", "2", "--exclude-seeds", str(world.seeds)]) == 0
@@ -190,6 +192,42 @@ def test_the_command_line_runs_the_iterations(world, monkeypatch, capsys):
     # An invocation with nothing left to do, and one of another seed root: their statuses say so.
     assert main([*common, "--seed-root", "cli"]) == 0
     assert main([*common, "--seed-root", "another"]) == 1
+    # The policies are in the checkpoints directory; the output holds only the records.
+    assert (world.checkpoints / "current/manifest.json").exists() and not (world.output / "policy").exists()
+    assert state["checkpoints"] == str(world.checkpoints)
+
+
+def test_a_runs_checkpoints_go_under_checkpoints_and_stay_where_the_run_first_put_them(world, tmp_path, monkeypatch):
+    from main.network.checkpoint import checkpoints_for
+
+    # By default the output's path under runs/ is repeated under checkpoints/; an output
+    # elsewhere names its own, and none is kept under runs/.
+    monkeypatch.chdir(tmp_path)
+    assert checkpoints_for("runs/grpo/train/v1") == Path("checkpoints/grpo/train/v1")
+    assert checkpoints_for(tmp_path / "runs/grpo/v1") == Path("checkpoints/grpo/v1")
+    assert checkpoints_for("elsewhere/v1", "mine") == Path("mine")
+    for output, given in (("elsewhere/v1", None), ("runs", None), ("runs/v1", "runs/v1/policy")):
+        with pytest.raises(ValueError):
+            checkpoints_for(output, given)
+    arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"])
+    assert arguments.checkpoints is None
+
+    state = driver(world, eval_seeds=None).run(1)
+    assert state["checkpoints"] == str(world.checkpoints) and (world.checkpoints / "iteration-0000").exists()
+    assert state["iterations"]["0"]["update"]["policy"] == str(world.checkpoints / "iteration-0000")
+    # Continued with another checkpoints directory: refused, not started over.
+    with pytest.raises(ValueError, match="are in"):
+        Driver(world.output, settings(world, eval_seeds=None), checkpoints=world.root / "moved", engine=chain,
+               say=lambda _: None)
+    # Its policies gone after an update: refused, where loading the starting checkpoint
+    # would silently undo the updates made.
+    (world.checkpoints / "current").rename(world.root / "aside")
+    with pytest.raises(ValueError, match="is missing"):
+        driver(world, eval_seeds=None).run(2)
+    # A run of the old layout, its policies in the output: told where they go.
+    (world.root / "aside").rename(world.output / "policy")
+    with pytest.raises(ValueError, match="move them there"):
+        driver(world, eval_seeds=None)
 
 
 def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world):
@@ -237,7 +275,7 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
         assert abs(update["waves"][wave]["samples"] - count) <= update["pass_updates"] + 8
     assert all(0 <= update["waves"][wave]["zero_share"] <= 1 for wave in priced)
     assert second["update"]["updates"] == first["update"]["updates"] + second["update"]["pass_updates"]
-    progress = read(world.output / "policy/current/manifest.json")["progress"]
+    progress = read(world.checkpoints / "current/manifest.json")["progress"]
     assert (progress["iteration"], progress["advantage"]) == (1, "act-groups")
     assert set(read(world.output / "seeds/iteration-0001.json")["Ironclad"]) <= set(progress["training_seeds"])
 
@@ -249,7 +287,7 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
             assert not (directory / name).exists()
         assert (directory / "summary.json").exists()
     assert groups_summary(world.output / "groups/round-0")["waves"] == ["act1", "act2", "act3"]
-    assert not (world.output / "policy/iteration-0000").exists() and (world.output / "policy/iteration-0001").exists()
+    assert not (world.checkpoints / "iteration-0000").exists() and (world.checkpoints / "iteration-0001").exists()
 
     # Evaluated after the second iteration, on the evaluation's seeds.
     assert second["evaluation"]["runs"] == 10
@@ -330,7 +368,7 @@ def test_act_group_iterations_with_the_clipped_objective_anchor_to_the_checkpoin
     assert first_update["learning_rates"] == {
         group["name"]: pytest.approx(group["lr"] / 2) for group in saved.optimizer.param_groups}
     assert first["settings"]["learning_rates"] == str(rates)
-    progress = read(world.output / "policy/current/manifest.json")["training"]
+    progress = read(world.checkpoints / "current/manifest.json")["training"]
     assert progress["muon_lr"] == pytest.approx(saved.config.muon_lr / 2)
     assert first_update["ratio_mean"] == pytest.approx(1.0, abs=1e-3) and first_update["kl"] == pytest.approx(0.0, abs=1e-5)
     decisions = sum(head["decisions"] for head in first["advantages"].values())
@@ -357,12 +395,12 @@ def test_a_checkpoint_out_of_another_runs_iteration_starts_this_runs_first_updat
     first = driver(world, **acts).run(1)
     # The policy that iteration 0 of one run left says so in its metadata: another run
     # starting from it has still made no update of its own iteration 0.
-    started = world.output / "policy/current"
+    started = world.checkpoints / "current"
     state = Driver(world.root / "other", settings(world, **acts, checkpoint=str(started), seed_root="other"),
-                   engine=chain, say=lambda _: None).run(1)
+                   checkpoints=world.root / "checkpoints/other", engine=chain, say=lambda _: None).run(1)
     update = state["iterations"]["0"]["update"]
     assert update["updates"] == first["iterations"]["0"]["update"]["updates"] + update["pass_updates"]
-    assert (world.root / "other/policy/current").exists()
+    assert (world.root / "checkpoints/other/current").exists()
 
 
 def test_every_round_and_evaluation_of_a_run_is_played_by_the_processes_forked_before_its_first_update(world):
@@ -374,7 +412,8 @@ def test_every_round_and_evaluation_of_a_run_is_played_by_the_processes_forked_b
             stream.write(f"{os.getpid()}\n")
         return chain()
 
-    state = Driver(world.output, settings(world), engine=counted, say=lambda _: None).run(2)
+    state = Driver(world.output, settings(world), checkpoints=world.checkpoints, engine=counted,
+                   say=lambda _: None).run(2)
     assert state["iterations"]["1"]["evaluation"]
     pids = starts.read_text().split()
     # Two engines for each round (its waves share them) and for the evaluation, all in
@@ -387,7 +426,7 @@ def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
     state = driver(world, **acts).run(3)
     # The reference archive survives the cleanups that remove the others not evaluated,
     # for as long as the next update refers to it.
-    archives = lambda: sorted(path.name for path in (world.output / "policy").glob("iteration-*"))  # noqa: E731
+    archives = lambda: sorted(path.name for path in world.checkpoints.glob("iteration-*"))  # noqa: E731
     assert archives() == ["iteration-0001", "iteration-0002"]
     state = driver(world, **acts).run(4)
     assert archives() == ["iteration-0003"]
@@ -395,14 +434,14 @@ def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
     # Iterations 0 and 1 anchor to the starting checkpoint; 2 and 3 to the policy after
     # iteration 1, as it stood when their stretch began.
     assert updates["0"]["reference"] == updates["1"]["reference"] == str(world.checkpoint)
-    assert updates["2"]["reference"] == updates["3"]["reference"] == "policy/iteration-0001"
+    assert updates["2"]["reference"] == updates["3"]["reference"] == str(world.checkpoints / "iteration-0001")
     # The first update of a stretch is on-policy with its reference: the KL starts at zero.
     first_of_stretch = [record["metrics"] for record in lines(world.output / "updates.jsonl") if record["round"] == 2][0]
     assert first_of_stretch["kl"] == pytest.approx(0.0, abs=1e-5)
     plain = driver(world, eval_seeds=None)
     assert plain.reference(7) == Path(world.checkpoint) and not plain.is_reference(1)
     renewed = driver(world, **acts)
-    assert renewed.reference(5) == world.output / "policy/iteration-0003" and renewed.is_reference(3)
+    assert renewed.reference(5) == world.checkpoints / "iteration-0003" and renewed.is_reference(3)
     with pytest.raises(ValueError):
         settings(world, reference_every=-1)
     arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
