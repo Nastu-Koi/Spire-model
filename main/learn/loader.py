@@ -16,6 +16,14 @@ shared-memory files (torch's `file_system` strategy): the default descriptor
 passing serves every descriptor from a background thread of the sending process.
 Each feeder writes its messages to a pipe of its own, read by the trainer; a
 `multiprocessing.Queue` would write them from a thread too.
+
+A named shared file is unlinked when every process that holds its tensor has let go.
+A producer that is ended (a pass that stops by its count of updates, as a round's does,
+ends the feeders with one or two prefetched results per packer) never lets go: the
+files of what it still held stay until this process exits, some gigabytes over a run,
+whether nobody received them or the trainer did and has since let go. The consumer
+that ended the producers removes their files once it holds none of them itself
+(`_release_shared`): at the end of the stream, and again when the next one starts.
 """
 
 import gc
@@ -86,19 +94,87 @@ def _same(value):
     return value
 
 
+SHARED = "/dev/shm"
+# Producers this process ended, whose files it may still hold tensors of.
+_ENDED = set()
+
+
+def _processes(members):
+    """The pids of the processes `members` keeps: those whose process group a pid of
+    `leaders` leads (a feeder's packers are in its group), or this process's children."""
+    found = set()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as stream:
+                stat = stream.read()
+        except OSError:
+            continue
+        # After the command name in parentheses: state, parent, process group, session.
+        fields = stat[stat.rindex(")") + 2:].split()
+        if members(int(fields[1]), int(fields[2])):
+            found.add(int(entry))
+    return found
+
+
+def _group_members(leaders):
+    leaders = set(leaders)
+    return leaders | _processes(lambda parent, group: group in leaders)
+
+
+def _children():
+    me = os.getpid()
+    return _processes(lambda parent, group: parent == me)
+
+
+def _release_shared(pids=()):
+    """Unlink the shared-memory files of tensors created by `pids` and by every producer
+    ended before, except those this process has mapped. An ended producer never lets go
+    of what it held, so the sharing will not unlink these files on its own
+    (`file_system` sharing names a file after the process that created it); a file this
+    process still holds a tensor of must wait, as the sharing aborts when it finds the
+    name gone at the tensor's release. Returns how many files were removed."""
+    _ENDED.update(str(pid) for pid in pids)
+    try:
+        names = os.listdir(SHARED)
+        with open("/proc/self/maps") as stream:
+            mapped = {line.split()[-1] for line in stream if SHARED in line}
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        parts = name.split("_")
+        path = os.path.join(SHARED, name)
+        if len(parts) >= 3 and parts[0] == "torch" and parts[1] in _ENDED and path not in mapped:
+            try:
+                os.unlink(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 # A logical batch packs in seconds. The workers of a window have been seen to sit idle
 # with a result still owed and nothing left in any pipe: waiting longer than this for
 # the next batch means it will not come.
 STALL_SECONDS = 180
 
 
-def _stream(dataset, workers):
+def _stream(dataset, workers, release=False, report=None):
+    """The dataset's items in order, packed by `workers` processes. With `release` the
+    consumer is this process: the shared files of results left unread when the
+    workers end are removed. A feeder streams to the trainer and must not: a result
+    it has sent on may still be in the pipe; it tells the trainer its packers' pids
+    through `report` instead, for the trainer to release what they left."""
     workers = min(workers, len(dataset))
     if not workers:
         for index in range(len(dataset)):
             yield dataset[index]
         return
     _share_by_name()
+    if release:
+        _release_shared()
     # A worker shares the samples only while it writes to none of them, and a garbage
     # collection writes to every object it visits: what exists now is set aside from
     # the collector, here and in the workers forked next. Nothing is collected first:
@@ -119,6 +195,8 @@ def _stream(dataset, workers):
                 timeout=STALL_SECONDS,
             ))
             try:
+                if report is not None:
+                    report(sorted(_children()))
                 for value in iterator:
                     done += 1
                     yield value
@@ -129,7 +207,9 @@ def _stream(dataset, workers):
                       file=sys.stderr, flush=True)
             finally:
                 # Stop the workers as soon as the consumer leaves, including an early stop.
+                packers = _children() if release else ()
                 del iterator
+                _release_shared(packers)
     finally:
         gc.unfreeze()
 
@@ -137,7 +217,7 @@ def _stream(dataset, workers):
 def batches(items, vocabulary, config):
     """The logical batches of `items`, in order: each a list of (samples, Replay), one
     entry per part the budgets split it into."""
-    for parts in _stream(_Logicals(items, vocabulary, config), config.loader_workers):
+    for parts in _stream(_Logicals(items, vocabulary, config), config.loader_workers, release=True):
         for _, prepared in parts:
             vocabulary.report(prepared.batch.unregistered)
         yield [([items[index] for index in positions], prepared) for positions, prepared in parts]
@@ -185,7 +265,8 @@ def _feed(connection, shards, windows, weights, vocabulary, config, shuffle, see
                 random.shuffle(items)
             boundary = len(items) // config.logical_batch_size * config.logical_batch_size
             carry, items = items[boundary:], items[:boundary]
-            for parts in _stream(_Logicals(items, vocabulary, config), config.loader_workers):
+            for parts in _stream(_Logicals(items, vocabulary, config), config.loader_workers,
+                                 report=lambda pids: connection.send(("packers", pids))):
                 # What the trainer reads of a sample fits in a few fields; its frames stay here.
                 connection.send(("batch", [
                     ([replace(items[index], macro=None, _lengths=None) for index in positions], prepared)
@@ -224,11 +305,15 @@ def stream(shards, vocabulary, config, *, window_shards, shuffle, weights=None):
         yield from batches(carry, vocabulary, config)
         return
     _share_by_name()
+    _release_shared()
     context = multiprocessing.get_context("fork")
     windows = shards.window_names(max(1, window_shards // config.loader_feeders), shuffle)
     count = min(config.loader_feeders, len(windows))
     feeders, receivers = [], []
     tails = {}
+    # Every process that packed for this stream: a packer that has exited may still have
+    # a result in flight, and only its pid names the result's files.
+    producers = set()
     try:
         for index in range(count):
             # One pipe per feeder: a write blocks until the trainer reads, which bounds
@@ -266,6 +351,9 @@ def stream(shards, vocabulary, config, *, window_shards, shuffle, weights=None):
                     feeder, items = value
                     tails[feeder] = items
                     continue
+                if kind == "packers":
+                    producers.update(value)
+                    continue
                 for _, prepared in value:
                     vocabulary.report(prepared.batch.unregistered)
                 yield value
@@ -278,4 +366,8 @@ def stream(shards, vocabulary, config, *, window_shards, shuffle, weights=None):
     finally:
         for receiver in receivers:
             receiver.close()
+        # The feeders and their packers go together; what they still had in flight is
+        # released with them.
+        producers |= _group_members(process.pid for process in feeders)
         end(feeders)
+        _release_shared(producers)

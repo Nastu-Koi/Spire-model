@@ -451,9 +451,9 @@ def test_feeders_and_their_workers_end_when_the_trainer_is_killed(tmp_path, monk
                            microbatch_size=2)
     packing = loader._stream
 
-    def busy(dataset, workers):
+    def busy(dataset, workers, release=False, report=None):
         # A feeder in the middle of a window, its workers alive.
-        for value in packing(dataset, workers):
+        for value in packing(dataset, workers, release, report):
             yield value
             time.sleep(60)
 
@@ -480,6 +480,7 @@ def test_feeders_and_their_workers_end_when_the_trainer_is_killed(tmp_path, monk
         return True
 
     assert all(group_alive(pid) for pid in feeders)
+    producers = loader._group_members(feeders)
     # No cleanup runs in a killed trainer: the feeders must notice by themselves.
     os.kill(process.pid, signal.SIGKILL)
     process.join()
@@ -487,6 +488,9 @@ def test_feeders_and_their_workers_end_when_the_trainer_is_killed(tmp_path, monk
     while time.monotonic() < deadline and any(group_alive(pid) for pid in feeders):
         time.sleep(0.2)
     assert not any(group_alive(pid) for pid in feeders)
+    # What they held in flight is this test's to remove: nobody survives to do it.
+    loader._release_shared(producers)
+    loader._ENDED.clear()
 
 
 def test_a_profile_sets_the_sampling_temperatures_anew_and_nothing_else(tmp_path):
@@ -539,3 +543,96 @@ def test_batched_muon_steps_as_torch_muon_does_matrix_by_matrix():
     again = BatchedMuon([torch.nn.Parameter(p.detach().clone()) for p in theirs], lr=0.02)
     again.load_state_dict(reference.state_dict())
     assert set(again.state_dict()["state"][0]) == {"momentum_buffer"}
+
+
+def shared_files(pids):
+    import os
+    from main.learn import loader
+
+    pids = {str(pid) for pid in pids}
+    return sorted(name for name in os.listdir(loader.SHARED)
+                  if name.startswith("torch_") and name.split("_")[1] in pids)
+
+
+def test_the_shared_files_of_ended_producers_are_released(tmp_path):
+    import os
+    import torch.multiprocessing as multiprocessing
+    from main.learn import loader
+
+    multiprocessing.set_sharing_strategy("file_system")
+    # A consumer holds shared tensors of its own, so the sharing's manager stays up as
+    # it does for a trainer.
+    held = torch.zeros(8)
+    held.share_memory_()
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+
+    def packer(connection):
+        os.setsid()
+        tensor = torch.zeros(1000)
+        tensor.share_memory_()
+        connection.send(os.getpid())
+        connection.close()
+        os._exit(0)  # ended with a result nobody received
+
+    process = context.Process(target=packer, args=(sender,))
+    process.start()
+    sender.close()
+    pid = receiver.recv()
+    process.join()
+    assert shared_files([pid]), "the unreceived result's file stays"
+    assert pid in loader._group_members([pid])
+    loader._release_shared([pid])
+    assert shared_files([pid]) == []
+    # What this process still holds is not touched: the tensor's own release unlinks it.
+    assert shared_files([os.getpid()])
+    loader._release_shared([os.getpid()])
+    assert shared_files([os.getpid()])
+    held += 1
+    assert float(held.sum()) == 8
+    del held
+    assert shared_files([os.getpid()]) == []
+
+
+def test_a_stream_stopped_early_leaves_no_shared_files_of_its_feeders_and_packers(tmp_path, monkeypatch):
+    import os
+    import time
+    import torch.multiprocessing as multiprocessing
+    from main.learn import loader
+
+    shards, runs = sharded(tmp_path)
+    vocabulary = vocabulary_for(runs, ModelConfig.tiny())
+    training = TrainConfig(precision="no", loader_workers=1, loader_feeders=2, logical_batch_size=3,
+                           microbatch_size=2)
+    packing = loader._stream
+
+    def slow(dataset, workers, release=False, report=None):
+        # Every batch after the first waits in the feeder: the pipe and the packers'
+        # prefetch hold results the trainer will never read.
+        for value in packing(dataset, workers, release, report):
+            yield value
+            time.sleep(60)
+
+    monkeypatch.setattr(loader, "_stream", slow)
+    batches = stream(shards, vocabulary, training, window_shards=2, shuffle=False)
+    first = next(batches)
+    assert first
+    time.sleep(1.0)
+    feeders = [child.pid for child in multiprocessing.active_children()]
+    producers = loader._group_members(feeders)
+    assert len(feeders) == 2 and len(producers) >= 2
+    assert shared_files(producers), "results are in flight"
+    batches.close()
+    # What the trainer holds stays until it lets go; the rest was in flight and is gone.
+    held = shared_files(producers)
+    assert held and all(name in open("/proc/self/maps").read() for name in held)
+    # The ended packer never lets go of its side: once the trainer has, the next stream
+    # removes the files.
+    del first
+    import gc
+    gc.collect()
+    assert shared_files(producers) == held
+    assert loader._release_shared() == len(held)
+    assert shared_files(producers) == []
+    assert not any(os.path.exists(f"/proc/{pid}") and open(f"/proc/{pid}/stat").read().split()[2] != "Z"
+                   for pid in producers)
