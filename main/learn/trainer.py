@@ -25,6 +25,25 @@ def _by_source(sources):
             for name, (loss, weight, count) in sorted(sources.items())}
 
 
+def _steps(logicals, accumulate):
+    """The microbatches of every optimizer step: `accumulate` logical batches at a
+    time, the last step whatever is left."""
+    iterator = iter(logicals)
+    if accumulate == 1:
+        yield from iterator
+        return
+    while True:
+        step = []
+        for _ in range(accumulate):
+            logical = next(iterator, None)
+            if logical is None:
+                break
+            step.extend(logical)
+        if not step:
+            return
+        yield step
+
+
 class _Readback:
     """A step's numbers on their way to the host: per-sample (loss, entropy) rows, the
     accuracy counts, the gradient norm and the objective's tally, copied into pinned
@@ -172,19 +191,23 @@ class Learner:
         with precision_context(self.model, self.config.precision):
             return self.model.replay(prepared.to(self.model.device), with_accuracy=with_accuracy)
 
-    def _optimize(self, logicals, *, total, on_update=None, objective=None):
+    def _optimize(self, logicals, *, total, on_update=None, objective=None, accumulate=1):
+        if type(accumulate) is not int or accumulate < 1:
+            raise ValueError("A step accumulates at least one logical batch")
         try:
-            return self._optimize_batches(logicals, total, on_update, objective)
+            return self._optimize_batches(logicals, total, on_update, objective, accumulate)
         finally:
             if hasattr(logicals, "close"):
                 logicals.close()
 
-    def _optimize_batches(self, logicals, total, on_update, objective=None):
-        """One pass over logical batches as the loader yields them: an update for each,
-        ending early once the schedule's decay is spent. `total` is the macro count of
-        the whole data set: the scale of every batch's loss. Each macro-action's loss is
-        its negative log-likelihood, or what `objective` makes of the microbatch
-        (`fit`).
+    def _optimize_batches(self, logicals, total, on_update, objective=None, accumulate=1):
+        """One pass over logical batches as the loader yields them: an update for every
+        `accumulate` of them, their gradients summed, ending early once the schedule's
+        decay is spent. `total` is the macro count of the whole data set: the scale of
+        every batch's loss is `total` over the samples of one step (`accumulate` logical
+        batches), so that a step is the mean over its samples whatever the loader's
+        batch. Each macro-action's loss is its negative log-likelihood, or what
+        `objective` makes of the microbatch (`fit`).
 
         The host never waits for a step: its numbers (per-sample rows, accuracy counts,
         gradient norm, the objective's tally) are queued to pinned memory behind its
@@ -195,8 +218,8 @@ class Learner:
         cfg = self.config
         if total is None or total < 1:
             raise ValueError("BC updates require the full training split's macro count")
-        # The same scale applies to every microbatch, window and the final short batch.
-        loss_scale = total / cfg.logical_batch_size
+        # The same scale applies to every microbatch, window and the final short step.
+        loss_scale = total / (cfg.logical_batch_size * accumulate)
         self.model.train()
         total_metrics = defaultdict(float)
         weights = 0.0
@@ -255,7 +278,7 @@ class Learner:
                     "duration_seconds": step.duration, "wait_seconds": step.waited,
                 })
 
-        logicals = iter(logicals)
+        logicals = _steps(logicals, accumulate)
         update_started = time.monotonic()
         while True:
             if self.scheduler.exhausted:
@@ -360,19 +383,21 @@ class Learner:
                                       "completed": self.scheduler.decayed_updates}
         return dict(total_metrics)
 
-    def fit(self, logicals, *, total, on_update=None, objective=None):
+    def fit(self, logicals, *, total, on_update=None, objective=None, accumulate=1):
         """One pass over logical batches the caller supplies: an update for each, as
-        `bootstrap` makes them. `total` is the macro count the samples' weights are
-        normalized over, the scale of every batch's loss. A caller that mixes sources
-        in a batch has put their weights on that one scale (`main/learn/awr.py`). The
-        policy is a new version afterwards.
+        `bootstrap` makes them, or for every `accumulate` of them, their gradients
+        summed into one step of that many times the batch. `total` is the macro count
+        the samples' weights are normalized over, the scale of every step's loss. A
+        caller that mixes sources in a batch has put their weights on that one scale
+        (`main/learn/batches.py`). The policy is a new version afterwards.
 
         `objective(learner, prepared, micro)` replaces the negative log-likelihood: it
         returns the loss, the entropy at temperature 1 and the accuracy counts of every
         macro-action of a microbatch (`main/learn/grpo.py`)."""
         if self.scheduler.exhausted:
             raise ValueError("The decay has finished; this checkpoint is final")
-        metrics = self._optimize(logicals, total=total, on_update=on_update, objective=objective)
+        metrics = self._optimize(logicals, total=total, on_update=on_update, objective=objective,
+                                 accumulate=accumulate)
         self.policy_version += 1
         return metrics
 

@@ -7,11 +7,11 @@
 | `protocol.py` | 决策帧的校验、动作语义、执行命令、`segment_key`（多选的解码段）、角色表 |
 | `control.py`、`treasure_rule.py`、`crystal_rule.py` | 策略与控制器的分工、宝箱流程、水晶球规划器 |
 | `rewards.py` | 奖励账本：只在终局支付 ±1 |
-| `saves.py` | 续局存档（`continue_save`）、战斗重进命令、战斗边界（`FightTracker`） |
+| `saves.py` | 续局存档（`continue_save`）、战斗重进命令、战斗边界与各场战斗的结局（`FightTracker`） |
 | `seeds.py` | `split_group`、`seed_group` 与留出划分的身份，评估种子的隔离检查 |
 | `public_history.py` | 公开历史契约的版本与 unknown 记忆 |
 | `engine.py`、`dotnet_runtime.py` | 无头引擎进程（`CliEngine`）与 .NET 运行时选择 |
-| `runtime.py`、`processes.py` | 资源设置与可复现性清单；随父进程结束的子进程 |
+| `runtime.py`、`processes.py` | 资源设置与可复现性清单；随父进程结束的子进程、结束进程组、归还空闲堆内存 |
 
 ## 契约版本
 
@@ -22,6 +22,8 @@
 | 模型输入编码 | `public-encoding-v3`（`main/encoding/representation.py`） |
 | 策略／控制器分工及索引 | `public-control-v1` |
 | 奖励 | `outcome-v1` |
+| 对局记录 | `spire-trajectory-v1`（`main/env/protocol.py`） |
+| 控制器规则 | 宝箱 `treasure-open-take-leave-v1`、水晶球 `crystal-public-geometry-v3`、单选事件 `single-event-without-usable-potion-v1`、领奖 `claim-free-rewards-v1` |
 
 缺失旧历史时输入为 unknown，不补初始概率。旧版本采样的对局不能只改版本号后使用。
 
@@ -33,10 +35,11 @@
 - 事件仅有一个可用 `CHOOSE_EVENT_OPTION`、其余合法动作仅为 `DISCARD_POTION`（或没有药水动作）时自动执行该选项；有可用药水、第二个事件选项或其他实质动作时交给模型，锁定选项不算可用。
 - 水晶球：主模型选支付方案，规划器（`crystal-public-geometry-v3`）接管格子。第一次点击固定用 Big 工具点正中间 (5, 5)：开局没有任何碎片信息，搜索只会在空先验上打分；“第一次”由公开状态判定，即已揭示格子全部位于原生开局就已揭示的四角区域（每角 6 格），因为每次点击的中心必是未揭示格。之后每帧按已揭示格子、剩余点击和公开几何规则生成相容的矩形布局假设，按剩余预算做束搜索选格子和 Small／Big 工具；它不读真实布局或游戏随机数，近似搜索用独立随机源。开局候选缺失或棋盘预揭示更多格子时直接走搜索。支付和领奖照常训练，不加规划器评分奖励。
 - 商店仅离开＋丢药、战斗仅结束回合＋丢药仍是策略决策。
+- 领奖控制器（`free_reward`，规则 `claim-free-rewards-v1`）不属于上面的共用分工，只在 `evaluate --claim-rewards` 时启用：奖励界面上的金币、遗物和药水栏放得下的药水按这个顺序先领，选牌、删牌、成组奖励、放不下的药水和离开仍交给策略。示范按“这些奖励已在选牌前领取”重建，打开它让策略遇到的奖励界面与示范一致。
 
 控制器步骤不产生策略损失，作为 `environment_actions` 保留原始帧、动作与 actor。采样与训练只接受 `control_version=public-control-v1` 且宏动作里没有控制器步骤的轨迹。控制规则变了，示范不必重新生成：分片保存了完整候选，对旧分片执行 `reindex`（见 [data](data.md)）。
 
-非战斗阶段的可取消选择不发布 `CANCEL`（`selection_cancel = "combat-or-dead-end-v1"`）；没有任何可选牌、无法完成时仍提供，避免死局。战斗中保持原生取消语义，因为 CombatSolver 在“计划不选任何牌”时依赖它。Steam 端与录制导入用同一规则（`main.demos.recorder.cancel_offered`）。
+非战斗阶段的可取消选择不发布 `CANCEL`（`selection_cancel = "combat-or-dead-end-v1"`）；没有任何可选牌、无法完成时仍提供，避免死局。战斗中保持原生取消语义，因为 CombatSolver 在“计划不选任何牌”时依赖它。Steam 端与录制导入用同一规则（`main.demos.recorder.macros.cancel_offered`）。
 
 ## 奖励
 
@@ -44,13 +47,23 @@
 
 ## 入场存档
 
-幕组在 Boss 入场切点（该幕第一场 Boss 战的第一个决策，`events` 带 `encounter_started`）让引擎 `write_continue_save` 到临时文件再读回（`saves.continue_save`）。在房间里时引擎存的是进房前的状态（节点从已访问坐标里退回、房间清空）；`anchor_state` 序列化的是已进房的状态，不能用。续打用一条命令 `resume_fight`（`saves.fight_resume_command(row)`：存档、遭遇、楼层、节点类型、是否第二 Boss），引擎加载后把节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入遭遇，回复就是战斗的第一个决策帧（`CliEngine.resume_fight`）。重进的战斗 HP、最大 HP、金币、幕、楼层、卡组、遗物、药水和敌人种类相同；敌人的随机 HP 与开局手牌由战斗自己的随机数重抽，所以重进是同一入场状态的另一次战斗，不是重放。在战斗开始时计数的遗物重进后可能少计一次。
+指定 `--boundary-bosses` 时，幕组在 Boss 入场切点（该幕第一场 Boss 战的第一个决策，`events` 带 `encounter_started`）让引擎 `write_continue_save` 到临时文件再读回（`saves.continue_save`）。在房间里时引擎存的是进房前的状态（节点从已访问坐标里退回、房间清空）；`anchor_state` 序列化的是已进房的状态，不能用。续打用一条命令 `resume_fight`（`saves.fight_resume_command(row)`：存档、遭遇、楼层、节点类型、是否第二 Boss），引擎加载后把节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入遭遇，回复就是战斗的第一个决策帧（`CliEngine.resume_fight`）。重进的战斗 HP、最大 HP、金币、幕、楼层、卡组、遗物、药水和敌人种类相同；敌人的随机 HP 与开局手牌由战斗自己的随机数重抽，所以重进是同一入场状态的另一次战斗，不是重放。在战斗开始时计数的遗物重进后可能少计一次。
 
 幕开头存档写在第 0 层的选图决策，用 `resume_save` 续打（`CliEngine.resume`），见 [play](play.md#幕组)。
+
+`FightTracker` 按引擎随帧发来的 `encounter_started`／`encounter_completed` 划出战斗：一场战斗从开始事件起，到胜利事件之后的第一个决策或对局结束为止。它同时记每场的种类（普通、精英、Boss）和对策略而言的结局：胜、负（对局在战斗中以失败结束），或未完（被超时、引擎错误截断或段停在切点）；`tally` 是对局记录与评估报告里的 `fights`。
 
 ## 种子与划分
 
 `split_group(seed)`：原始 seed 去首尾空格、转大写、O/I 归一为 0/1 后取 SHA-256。`seed_group(run)` 是统一分组键：索引行带 `split_group` 时直接用；独立监督样本的 `seed` 已是这个摘要，不再哈希；其余对局按原始 seed 计算。划分版本 `seed-group-v1`。
+
+`validate_evaluation_seeds` 要求五个角色各有一组不重复的评估种子，并与检查点的训练种子不相交：采样对局按原始 seed 记、独立监督样本按分组摘要记，所以训练种子按原样和取 `split_group` 之后两种形式都比对。
+
+## 资源设置
+
+`configure_runtime` 在每个命令开头执行：固定 PyTorch 线程数，关掉 TF32（矩阵乘与 cuDNN），使用 GPU 时把本进程的显存上限设为 min(80 GiB, 空闲显存 − 8 GiB)，余量不足 8 GiB 直接报错；返回 Python、PyTorch、CUDA、显卡等的可复现性清单，交给各命令。
+
+`processes.end_with` 让工作进程在父进程消失时连同自己的进程组一起结束（父进程被杀不会做清理，否则读取进程会一直占着训练的显存与输出锁、采样进程占着引擎）；`end` 先对进程组发 SIGTERM、宽限后 SIGKILL；`release_memory` 调 `malloc_trim` 把 C 堆的空闲页还给系统，采样进程每次清掉解析缓存之后调用。
 
 ## 引擎进程
 

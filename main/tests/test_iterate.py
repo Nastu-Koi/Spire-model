@@ -390,6 +390,32 @@ def test_act_group_iterations_with_the_clipped_objective_anchor_to_the_checkpoin
     assert (arguments.clip, arguments.kl, arguments.learning_rates) == (0.1, 0.02, "r.json")
 
 
+def test_an_optimizer_step_accumulates_the_logical_batches_its_batch_holds(world):
+    # The test policy's logical batch is 8: a step of 16 accumulates two of them.
+    state = driver(world, eval_seeds=None, batch=16).run(1)
+    update = state["iterations"]["0"]["update"]
+    decisions = sum(head["decisions"] for head in state["iterations"]["0"]["advantages"].values())
+    assert (update["batch"], update["accumulate"]) == (16, 2)
+    # A pass sees every decision once, in half as many steps as batches.
+    assert update["pass_updates"] == -(-(-(-decisions // 8)) // 2) == update["updates"]
+    steps = [record["metrics"] for record in lines(world.output / "updates.jsonl") if record["round"] == 0]
+    assert len(steps) == update["pass_updates"] and all(step["samples"] <= 16 for step in steps)
+    assert sum(step["samples"] for step in steps) == update["waves"]["act1"]["samples"] + sum(
+        update["waves"][wave]["samples"] for wave in ("act2", "act3"))
+    assert steps[0]["loss_scale"] == pytest.approx(decisions / 16)
+    assert state["iterations"]["0"]["settings"]["batch"] == 16
+    # A batch that is no multiple of the logical batch is refused before anything is sampled.
+    with pytest.raises(ValueError, match="multiple"):
+        Driver(world.root / "other", settings(world, eval_seeds=None, batch=12), checkpoints=world.root / "other-c",
+               engine=chain, say=lambda _: None).run(1)
+    for wrong in (0, -16):
+        with pytest.raises(ValueError, match="batch"):
+            settings(world, eval_seeds=None, batch=wrong)
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
+                                "--batch", "2048"]).batch == 2048
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).batch is None
+
+
 def test_a_checkpoint_out_of_another_runs_iteration_starts_this_runs_first_update(world):
     acts = dict(eval_seeds=None)
     first = driver(world, **acts).run(1)
@@ -438,16 +464,59 @@ def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
     # The first update of a stretch is on-policy with its reference: the KL starts at zero.
     first_of_stretch = [record["metrics"] for record in lines(world.output / "updates.jsonl") if record["round"] == 2][0]
     assert first_of_stretch["kl"] == pytest.approx(0.0, abs=1e-5)
-    plain = driver(world, eval_seeds=None)
-    assert plain.reference(7) == Path(world.checkpoint) and not plain.is_reference(1)
+    plain = driver(world, eval_seeds=None, reference_every=0)
+    assert plain.reference(7) == Path(world.checkpoint)
     renewed = driver(world, **acts)
-    assert renewed.reference(5) == world.checkpoints / "iteration-0003" and renewed.is_reference(3)
+    assert renewed.reference(5) == world.checkpoints / "iteration-0003"
     with pytest.raises(ValueError):
         settings(world, reference_every=-1)
     arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
                                      "--reference-every", "3"])
-    assert arguments.reference_every == 3 and Settings(checkpoint="c").reference_every == 0
+    assert arguments.reference_every == 3
+    # Unless given, the reference is renewed at the evaluation interval: an evaluated policy.
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).reference_every is None
+    assert Settings(checkpoint="c").reference_every == 5 and Settings(checkpoint="c", evaluate_every=3).reference_every == 3
+    assert Settings(checkpoint="c", reference_every=0).reference_every == 0
+    assert settings(world).reference_every == 2 and settings(world, reference_every=4).reference_every == 4
 
+
+
+def test_an_evaluation_plays_at_the_precision_asked_and_sampling_at_the_checkpoints(world):
+    arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
+                                     "--eval-precision", "fp32"])
+    assert arguments.eval_precision == "fp32"
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).eval_precision is None
+    assert parser().parse_args(["evaluate", "--checkpoint", "c", "--seeds", "s", "--output", "o",
+                                "--precision", "fp32"]).precision == "fp32"
+    with pytest.raises(SystemExit):
+        parser().parse_args(["evaluate", "--checkpoint", "c", "--seeds", "s", "--output", "o", "--precision", "fp16"])
+    with pytest.raises(ValueError, match="precision"):
+        settings(world, eval_seeds=None, eval_precision="fp16")
+    run = driver(world, eval_precision="fp32")
+    state = run.run(2)
+    assert run.sampler().precision == run.learner.config.precision and run.sampler(precision="fp32").precision == "fp32"
+    evaluated = world.output / state["iterations"]["1"]["evaluation"]["directory"]
+    played = [read(path) for path in evaluated.glob("*.json") if path.name != "report.json"]
+    assert played and all(run_["precision"] == "fp32" for run_ in played)
+    # Rounds keep the checkpoint's precision (the cleanup has removed their shards by now).
+    assert run.learner.config.precision != "fp32"
+
+
+def test_the_fork_depth_is_a_setting_of_the_run(world):
+    state = driver(world, eval_seeds=None, fork_depth=1).run(1)
+    entry = state["iterations"]["0"]
+    # Every segment of the round forked once, and its advantages say what forking taught.
+    assert all(entry["sample"]["forked"][wave] == count for wave, count in
+               {wave: sum(outcomes.values()) for wave, outcomes in entry["sample"]["outcomes"].items()}.items())
+    assert all(entry["advantages"][wave]["forked"]["decisions"] > 0 for wave in ("act1", "act2", "act3"))
+    assert entry["settings"]["fork_depth"] == 1
+    assert settings(world, eval_seeds=None).fork_depth == 0
+    for wrong in (-1, 1.5):
+        with pytest.raises(ValueError, match="fork"):
+            settings(world, eval_seeds=None, fork_depth=wrong)
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
+                                "--fork-depth", "2"]).fork_depth == 2
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).fork_depth == 0
 
 
 def test_the_potion_exploration_rate_is_a_setting_of_the_run(world):

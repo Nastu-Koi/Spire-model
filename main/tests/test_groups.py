@@ -129,6 +129,12 @@ def test_the_waves_and_their_jobs_are_named_by_where_they_start():
                and spec["until_act"] == 3 for _, spec, _ in jobs)
     assert all(spec["until_act"] is None for _, spec, _ in resume_jobs(rows, 1, "act3", None))
     assert all(spec["until_boss"] == 3 and "until_act" not in spec for _, spec, _ in resume_jobs(rows, 1, "act3", ("boss", 3)))
+    # Forking jobs say each segment's place in its group; without a depth they say nothing.
+    assert all("fork" not in spec for _, spec, _ in jobs)
+    forking = start_jobs({c: [f"{c}-1"] for c in CHARACTERS}, 2, "act1", ("act", 2), fork_depth=2)
+    assert [spec["fork"] for _, spec, _ in forking[:2]] == [dict(index=0, size=2, depth=2), dict(index=1, size=2, depth=2)]
+    assert [spec["fork"] for _, spec, _ in resume_jobs(rows, 3, "act2", ("act", 3), fork_depth=1)] == [
+        dict(index=k, size=3, depth=1) for k in range(3)]
 
 
 def test_act_groups_sample_the_waves_in_turn_and_keep_the_chains_they_won(tmp_path):

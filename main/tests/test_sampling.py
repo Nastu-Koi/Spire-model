@@ -474,6 +474,8 @@ def test_the_graphed_global_layers_choose_as_the_eager_ones_do():
             cuda, _ = unpack([pack(decisions)], "cuda")
             model.graphed(False)
             plain = model.choose(cuda, sample=False)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                half = model.choose(cuda, sample=False)
             model.graphed(True)
             graphed = model.choose(cuda, sample=False)
             assert len(model._graphs.graphs) == 1
@@ -481,6 +483,14 @@ def test_the_graphed_global_layers_choose_as_the_eager_ones_do():
             # A second pass of the same shape replays the one graph.
             graphed = model.choose(cuda, sample=False)
             assert len(model._graphs.graphs) == 1 and torch.equal(plain[0], graphed[0])
+            # A pass under autocast is another graph of the shape: what it captured
+            # is the autocast pass, and the plain graph stays the plain pass.
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                half_graphed = model.choose(cuda, sample=False)
+            assert len(model._graphs.graphs) == 2
+            assert torch.equal(half[0], half_graphed[0]) and torch.allclose(half[1], half_graphed[1], atol=1e-2)
+            again = model.choose(cuda, sample=False)
+            assert len(model._graphs.graphs) == 2 and torch.allclose(plain[1], again[1], atol=1e-2)
         model.graphed(False)
         assert model._graphs is None
 
@@ -556,6 +566,47 @@ def test_a_decision_marked_to_explore_is_drawn_among_its_marked_slots_with_the_p
         prepare_decisions(vocabulary, frames, restrict=[None, ["play:enemy:9"], None])
 
 
+def test_a_decision_marked_with_a_rank_takes_the_slot_of_that_rank_with_the_policys_log_probability():
+    frames = [map_frame(), duel("enemy:0"), map_frame(("map:1:2", "Elite"))]
+    model, vocabulary = build(frames)
+    _, decisions = prepare_decisions(vocabulary, frames, rank=[1, None, 0])
+    assert decisions.rank.tolist() == [1, -1, 0]
+    expected = logits(model, vocabulary, frames)
+    legal = [observation(frame).slot_refs for frame in frames]
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for _ in range(4):
+            slots, log_probs, base = model.choose(decisions, temperature=0.5)
+            for row, rank in ((0, 1), (2, 0)):
+                masked = expected[row].masked_fill(~decisions.masks[row, :len(expected[row])], float("-inf"))
+                wanted = int(masked.argsort(descending=True)[rank])
+                # The slot of the rank, whatever the draw, recorded with the whole tempered
+                # distribution's log-probability of it.
+                assert int(slots[row]) == wanted
+                assert torch.allclose(log_probs[row], (masked / 0.5).log_softmax(-1)[wanted], atol=1e-5)
+                assert torch.allclose(base[row], masked.log_softmax(-1)[wanted], atol=1e-5)
+            assert bool(decisions.masks[1, slots[1]])
+        # Greedy choices ignore the ranks.
+        assert int(model.choose(decisions, sample=False)[0][0]) == int(expected[0].argmax())
+    assert len(legal[0]) >= 2
+    # The ranks cross to the collecting process with the pack, beside other packs.
+    crossed, _ = unpack([pack(decisions), pack(prepare_decisions(vocabulary, frames[:1])[1])], "cpu")
+    assert crossed.rank.tolist() == [1, -1, 0, -1]
+    # The single-process path takes the same slot.
+    from main.network.policy import SessionPolicy
+    for row, rank in ((0, 1), (2, 0)):
+        routed = dict(frames[row], routing={"episode_id": "e", "decision_id": "d", "state_version": 1})
+        choice = SessionPolicy(model, vocabulary).choose(routed, temperature=0.5, rank=rank)
+        slot = next(c["decoder_slot_ref"] for c in frames[row]["legal"]["candidates"]
+                    if c["candidate_ref"] == choice.candidate_ref)
+        assert observation(frames[row]).slot_refs.index(slot) == int(slots[row]) and choice.forked
+        assert not choice.explored
+    with pytest.raises(ProtocolError, match="rank"):
+        prepare_decisions(vocabulary, frames, rank=[len(legal[0]), None, None])
+    with pytest.raises(ProtocolError, match="rank"):
+        prepare_decisions(vocabulary, frames, rank=[1, None, 0], restrict=[["move:map:0:1"], None, None])
+
+
 def test_a_run_explores_potion_use_at_the_rate_asked_and_records_the_policys_log_probability():
     learner, _, _ = setup_round({"combat": 0.5, "other": 0.8})
     exploring = RolloutRunner(learner.model, learner.vocabulary, precision="no", ascension=0,
@@ -589,6 +640,60 @@ def test_a_run_explores_potion_use_at_the_rate_asked_and_records_the_policys_log
     for wrong in (-0.1, 1.5, [0.1, 0.2, 0.3, 0.4], {"event": 0.1}):
         with pytest.raises(ValueError, match="exploration"):
             RolloutRunner(learner.model, learner.vocabulary, explore_potions=wrong)
+
+
+def branching_steps(run):
+    return [step for macro in run["macros"] for step in macro["steps"] if not step["forced"]]
+
+
+def rank_of(model, vocabulary, step):
+    """Where the step's candidate stands in the policy's order of the frame's legal candidates."""
+    frame = step["frame"]
+    obs = observation(frame)
+    slots = {c["candidate_ref"]: c["decoder_slot_ref"] for c in frame["legal"]["candidates"]}
+    mask = torch.tensor([slot in set(slots.values()) for slot in obs.slot_refs])
+    with torch.no_grad():
+        output = model.decode_batch(model.encode([obs], vocabulary), [mask])[0]
+    order = output.logits.argsort(descending=True).tolist()
+    return order.index(obs.slot_refs.index(slots[step["candidate_ref"]]))
+
+
+def test_a_segment_forks_its_first_decisions_by_its_place_in_the_group(tmp_path):
+    learner, runner, _ = setup_round({"combat": 0.5, "other": 0.8})
+    model, vocabulary = learner.model, learner.vocabulary
+    runs = [runner.run(engine(), "Ironclad", "fork", fork=dict(index=j, size=4, depth=1)) for j in range(4)]
+    for j, run in enumerate(runs):
+        assert run["status"] == "complete" and run["fork"] == dict(index=j, size=4, depth=1)
+        first, *rest = branching_steps(run)
+        # The first half of the group takes the policy's most likely candidate, the
+        # other half its second; the step says it was forked, the rest are drawn.
+        assert first["forked"] and rank_of(model, vocabulary, first) == (0 if j < 2 else 1)
+        assert not any(step.get("forked") for step in rest) and not first.get("explored")
+        assert _without_frames(run)["forked"] == 1
+        validate_run(run, on_policy=True)
+    # Recorded with the policy's own log-probability, as a draw would be.
+    assert replayed_gap(model, vocabulary, runs) < 1e-4
+    from main.data.shards import samples as training_samples
+    assert training_samples([runs[2]])[0].explored
+    # A depth of two parts each half again; greedy runs and runs without a fork never fork.
+    deeper = [runner.run(engine(), "Ironclad", "fork", fork=dict(index=j, size=4, depth=2)) for j in range(4)]
+    assert [[rank_of(model, vocabulary, step) for step in branching_steps(run)[:2]] for run in deeper] == [
+        [0, 0], [0, 1], [1, 0], [1, 1]]
+    greedy = runner.run(engine(), "Ironclad", "fork", sample=False, fork=dict(index=3, size=4, depth=1))
+    assert greedy["fork"] is None and not any(step.get("forked") for step in branching_steps(greedy))
+    plain = runner.run(engine(), "Ironclad", "fork")
+    assert plain["fork"] is None and not any(step.get("forked") for step in branching_steps(plain))
+    for wrong in (dict(index=4, size=4, depth=1), dict(index=0, size=4, depth=-1), dict(index=0, size=4)):
+        with pytest.raises(ValueError, match="fork"):
+            runner.run(engine(), "Ironclad", "fork", fork=wrong)
+    # The sampling processes fork as the runner alone does.
+    from main.play.rollout import SEGMENTS
+    jobs = [("Ironclad", dict(seed="fork", run_id=f"g-{j}", group="g", fork=dict(index=j, size=4, depth=1)), None)
+            for j in range(4)]
+    with samplers(runner, engine, engines=4, processes=2) as pool:
+        played = []
+        pool.collect(runner, jobs, on_run=lambda index, run: played.append((index, run)), layout=SEGMENTS)
+    assert sorted(run["forked"] for _, run in played) == [1, 1, 1, 1]
 
 
 class EliteDrinking(Drinking):

@@ -4,6 +4,28 @@
 
 流程：`fetch` 下载 → `sources` 筛选来源 → `anchor run` 生成 → `anchor export` 导出 → `python -m main import-independent` 导入（`main/demos/independent.py`）；`anchor_audit` 和 `map_ambiguity` 用回放核对。Steam 录制另由 `main/demos/recorder/` 导入（见 [steam](steam.md)）。
 
+| 模块（`spire_codex_data/`） | 内容 |
+| --- | --- |
+| `fetch.py`、`__main__.py` | 下载：限速、退避重试、原子缓存与续传 |
+| `sources.py`、`integrity.py` | 来源筛选与来源完整性：mod、控制台命令（`MUTATING_COMMANDS`）、续局快照 |
+| `ledger.py`、`state_rules.py` | 摘要账本：逐节点推算卡组、遗物、药水、HP、金币；持久状态规则（`anchor-state-v1`） |
+| `anchor.py` | 锚点规划、生成（`run`）与导出（`export`）；求解器战斗与必须用药的战斗 |
+| `battle_refresh.py` | 复用旧目录里已验证的战斗动作（`--reuse-battles`） |
+| `recorded.py` | 摘要记下的选牌目标与节点末状态，事件变量的核对 |
+| `rewards.py` | 奖励能否归到奖励界面、领取了什么，以及对应的隔离码 |
+| `shop_sequence.py` | 商店：商店随机流的位置、格位与购买顺序搜索 |
+| `anchor_audit.py`、`map_ambiguity.py` | 用回放核对样本；路线唯一性的测量 |
+
+| 版本 | 当前值 |
+| --- | --- |
+| 样本格式 | `spire-independent-decisions-v1` |
+| 锚点入口 | `summary-anchor-v1` |
+| 局外生成 | `summary-anchor-samples-v3` |
+| 战斗、领奖、拿牌、用药生成 | `summary-battle-refresh-v1`、`summary-claim-v1`、`summary-pick-v1`、`summary-potion-v1` |
+| 持久状态规则 | `anchor-state-v1` |
+| 摘要锚点导入 | `independent-import-v6` |
+| Steam 录制格式与导入 | `sts2-run-recorder/v2`、`run-recorder-import-v6` |
+
 局外规则和战斗数据分别使用缓存版本，并绑定原生程序集摘要。已有战斗可用 `anchor run --kinds battle --reuse-battles <旧锚点目录>` 刷新：先要求摘要校验和、求解预算及初始化快照一致，再执行已保存动作。除显式公开历史字段外，逐步观察和完整候选必须完全一致，胜负和结束 HP 也须匹配；当前格式的完整帧再由另一进程独立重放。不兼容或缺失的战斗重新求解，恢复方式写入 `recovery`。旧目录作为只读输入，新样本写入独立输出目录。
 
 ## 下载
@@ -15,13 +37,15 @@ python3 -m spire_codex_data fetch --source replays --output data/spire-codex
 python3 -m spire_codex_data fetch --source runs --characters IRONCLAD SILENT --resume --output data/spire-codex
 ```
 
+`--source` 默认 `both`（先回放、后摘要）；`--start-page` 指定起始页。
+
 只需 Python 标准库，不用登录。站点对每个客户端按路由分别限速：对局摘要每分钟 60 次，列表和回放各 120 次。下载器对每个路由按略低于上限的节奏发请求，429 和暂时性错误按退避重试，等待中的线程醒来后重新检查共享截止时间，晚醒时不补发积压时隙；`--parallel` 让几个角色分片同时进行，它们共用这一份请求额度，只是让慢响应互相重叠，不会突破上限；缓存原子写入并用 SHA-256 回执校验，重复运行可续传。
 
 - 对局列表不带角色筛选时最多返回 10000 行（实际数量约为两倍），所以对局来源按角色分片；某一片的 total 达到 10000 时拒绝继续，需要进一步缩小分片。
 - 写入缓存前核对：对局文档的版本、胜负、模式、单人，以及角色、难度与列表行一致；回放的首行是 header。不一致的不进入缓存，记为该局的错误。
 - `download-{source}.json` 每页写一次，记录各分片的进度、成功和失败的对局。失败记录跨多次运行保留，重新下载成功后才清除。
-- 带角色筛选的列表请求单次约 20 秒。`--resume` 让各分片从已记录的页继续；它不会发现之后新提交的对局，补漏需要不带 `--resume` 的完整扫描。`--max-runs` 只计本次实际发出请求的对局，在各分片间均分。
-- 全量对局约 2 万局，下载约 7 小时。列表行里的 `username`、`player_token` 留在本地缓存，不进入任何导出。
+- `--resume` 让各分片从已记录的页继续；它不会发现之后新提交的对局，补漏需要不带 `--resume` 的完整扫描。`--max-runs` 只计本次实际发出请求的对局，在各分片间均分。
+- 列表行里的 `username`、`player_token` 留在本地缓存，不进入任何导出。
 
 ## 筛选来源
 
@@ -67,33 +91,33 @@ python3 -m spire_codex_data.anchor export --manifest data/spire-codex/sources/ma
 python -m main import-independent data/anchors/independent-training.jsonl.gz --output data/bootstrap
 ```
 
-`run` 按对局和类型续跑：`runs/<hash>.<类型>.json` 记录锚点状态、失败原因和耗时，`samples/<hash>.<类型>.jsonl.gz` 保存样本行，`summary.json` 汇总。只有对局摘要校验和、该类型的生成版本、原生程序集摘要及战斗预算都一致时，才复用已完成报告；局外规则版本与战斗版本分开维护。重编后若程序集内容改变，旧报告不会被静默跳过。复用旧战斗动作的方式见本文开头的 `--reuse-battles`，无需删除原始证据。
+`run` 按对局和类型续跑：`runs/<hash>.<类型>.json` 记录锚点状态、失败原因和耗时，`samples/<hash>.<类型>.jsonl.gz` 保存样本行，`summary.json` 汇总，`last-run.json` 是这次命令的汇总与失败的对局（有失败时命令以 1 退出）。`--max-runs N` 只处理名单前 N 局；`--solver-config` 指定求解器配置（默认 `combat_solver_cli/lib/config.json`）。只有对局摘要校验和、该类型的生成版本、原生程序集摘要及战斗预算都一致时，才复用已完成报告；局外规则版本与战斗版本分开维护。重编后若程序集内容改变，旧报告不会被静默跳过。复用旧战斗动作的方式见本文开头的 `--reuse-battles`，无需删除原始证据。
 
 导入后的格式、索引与复用见 [data](data.md)，BC 的命令见 [README](../../README.md)。
 
 战斗默认预算为普通和精英各 5000ms、Boss 20000ms（`--budget-ms`、`--elite-budget-ms`、`--boss-budget-ms`），指每次新搜索的上限，同一回合内复用已有方案。预算直接决定标签质量，并进入续跑身份：对按别的预算求出的锚点目录用默认值重跑 `--kinds battle` 会把全部战斗重新求解，要沿用就显式给出原预算。`--potion-costs 基础 较高 最高` 让求解器自己的药水策略按这三档价格（HP）搜索，不给就是它自己的 9 14 18；价格同样进入续跑身份；求解进程须认识 `potion_costs`（不认识的旧 worker 会不声不响地按原价搜索，所以每次搜索都核对回报的价格）。求解器按毫秒预算搜索，**生成战斗时应单独运行并固定并发数**。局外类型不搜索，不受机器负载影响。
 
-默认并发：战斗和局外类型都是 16 局同时进行（`--workers` 同时覆盖两者），每局在自己的 Python 进程里处理：读、比对、写一局的样本行要几秒钟的 Python 时间，放在同一个解释器的线程里会互相等待。求解器的每次搜索是单线程的，按毫秒预算截断：在 16 核机器上，16 个并发每小时打完的战斗约为 8 个并发的 1.8 倍，被预算截断的搜索展开的节点数少约四分之一。想让每次搜索更深，就调低并发或调高预算；并发超过物理核数只会让搜索更浅。局外类型每局启动一次引擎。一次命令里两类都有时先跑局外类型，再跑战斗。
+默认并发：战斗和其余类型都是 16 局同时进行（`--workers` 同时覆盖两者），每局在自己的 Python 进程里处理：读、比对、写一局的样本行要几秒钟的 Python 时间，放在同一个解释器的线程里会互相等待。求解器的每次搜索是单线程的，按毫秒预算截断：并发越高吞吐越高，但每次搜索更浅。想让每次搜索更深，就调低并发或调高预算；并发超过物理核数只会让搜索更浅。局外类型每局启动一次引擎。一次命令分两轮：先跑除 `battle` 外的全部类型（含同样由求解器打的 `potion`，按这一轮的并发），再跑 `battle`。
 
 样本格式为 `spire-independent-decisions-v1`：`observation` 是行动前公开状态，`options` 是完整合法动作集合，`label` 是所选动作。`metadata` 不是学生输入，包含对局、角色、难度、按 seed 的 `split_group`、契约和路由，以及 `initialization`、`anchor_kind`、`label_source`（`combat_solver`、`historical_choice`、`historical_route`、`reconstructed_order`）、`state_sources`、`map_position`、`source_integrity`，供过滤和消融使用。战斗标签来自能看到隐藏状态的求解器，标为 `teacher_visibility=privileged`；所有样本 `bc_only=true`，不是策略自己的采样，也不构成连续通关证明。
 
-地图的 Boss 节点带本幕 Boss 的遭遇（字段 `encounter`；十阶第三幕两个 Boss 按出场顺序各一个）：游戏从每幕开始就在地图上显示 Boss。样本里用的是摘要记录的 Boss，不是 seed 抽出的（游戏生成一幕时先按玩家已揭示的纪元裁剪事件表再洗牌，Boss 在同一个随机流后面抽；无头引擎按全解锁生成，抽出的 Boss 与进度较少的玩家实际遇到的不一定相同）：锚点把记录的 Boss 写进存档，引擎发布的帧里就是它。后面几幕的地图和 Boss 不进观测。记录的 Boss 场数与本幕的 Boss 节点数对不上时没法装入，这样的行地图上的 Boss 与记录不一致，`export` 不导出，计入导出摘要的 `rows_without_recorded_boss`。
+地图的 Boss 节点带本幕 Boss 的遭遇（字段 `encounter`；十阶第三幕两个 Boss 按出场顺序各一个）：游戏从每幕开始就在地图上显示 Boss。样本里用的是摘要记录的 Boss，不是 seed 抽出的（游戏生成一幕时先按玩家已揭示的纪元裁剪事件表再洗牌，Boss 在同一个随机流后面抽；无头引擎按全解锁生成，抽出的 Boss 与进度较少的玩家实际遇到的不一定相同）：锚点把记录的 Boss 写进存档，引擎发布的帧里就是它。后面几幕的地图和 Boss 不进观测。记录的 Boss 场数与本幕的 Boss 节点数对不上时没法装入，这样的行地图上的 Boss 与记录不一致，`export` 不导出，计入导出摘要（`independent-export-summary.json`）的 `rows_without_recorded_boss`。
 
 `export` 用 `--workers` 个进程（默认 16）读各份报告的样本，按报告文件名的顺序写出：样本文件是各份报告的 gzip 段依次相接，读起来是一条流。求解器打输的战斗不导出。
 
-局外生成版本为 `summary-anchor-samples-v3`，战斗为 `summary-battle-refresh-v1`。从更早的摘要恢复实现迁移时，须重跑受影响的 `shop event reward unclaimed` 并添加 `treasure`；只重新导出旧文件不能补上缺失的公开内容或原生复验。商店和宝箱的 `metadata.recovery` 保存库存／金币约束、顺序依据和独立复验方式，导入后保留在 `provenance.recovery`，不进入模型观察。
+局外生成版本为 `summary-anchor-samples-v3`，战斗为 `summary-battle-refresh-v1`。只重新导出不能补上缺失的公开内容或原生复验，生成规则变了要重跑受影响的类型。商店和宝箱的 `metadata.recovery` 保存库存／金币约束、顺序依据和独立复验方式，导入后保留在 `provenance.recovery`，不进入模型观察。
 
-控制分工（宝箱固定流程、单选事件）只改变训练过滤，现有完整候选足以判定，不要求重新生成锚点。`export` 跳过完全由控制器或单一合法动作构成的样本组；组内有真正后续选择时，连同环境操作证据保留。`import-independent` v6 再将控制器步骤移入环境证据，旧导入分片用 `reindex` 更新计数（见 [env](env.md#控制分工)）。
+控制分工（宝箱固定流程、单选事件）只改变训练过滤，现有完整候选足以判定，不要求重新生成锚点。`export` 跳过完全由控制器或单一合法动作构成的样本组，计入导出摘要的 `rows_without_decision`；组内有真正后续选择时，连同环境操作证据保留。导入时控制器步骤进 `environment_actions`；控制规则变了，对已导入的分片执行 `reindex` 更新计数（见 [env](env.md#控制分工)）。
 
 ## 必须用药的战斗
 
-求解器按自己的 `Smart` 策略几乎不用药水：同样的战斗、同样的药水栏，玩家在约两成的普通战、五成的精英战、三分之二的 Boss 战里用了药水，求解器是 1%、5%、9%。照它学出来的策略带着满栏药水打到死。`potion` 锚点给出用药的示范：
+求解器按自己的 `Smart` 策略几乎不用药水，远少于玩家在同样的战斗、同样的药水栏下的用药；照它学出来的策略不会用药，带着满栏药水打到死。`potion` 锚点给出用药的示范（两者的用药统计见 [trials](../trials/route.md)）：
 
 - 每场战斗按锚点 id 抽签，一半入选；入选且开场药水栏不空的，从栏里随机取 1 到全部瓶数，指定为必须使用（`forced`）。自动触发的瓶中精灵不指定。抽签只取决于 id，重跑得到同样的指定。
 - 求解时这几瓶必须出现在整场战斗的路线里，其余药水禁用；每一步搜索都按栏里还欠的那几瓶重新下指令。何时用、对谁用由求解器决定。打完时有指定的药水没用上（离开了药水栏，或战斗先结束）的不通过。
 - 与 `battle` 一样在另一进程逐步重放。导出时，打赢的 `potion` 战斗取代同一场 `battle` 的动作（两者起点相同、标签不同）；打输的不取代。
 
-用不用药、用几瓶是随机指定的，不是玩家的记录。记录里的用药（`potion_used`）没有采用：它只说这个节点用了哪几瓶，而求解器在指定之下几乎总是开场就用，时机上并不比随机指定多出信息。生成版本为 `summary-potion-v1`，求解进程须支持 `potion_directives`。
+用不用药、用几瓶是随机指定的，不是玩家的记录。记录里的用药（`potion_used`）不采用：它只说这个节点用了哪几瓶，不提供时机信息，何时用仍由求解器决定，与随机指定没有区别。生成版本为 `summary-potion-v1`，求解进程须支持 `potion_directives`。
 
 ## 商店
 
@@ -145,7 +169,7 @@ python -m main import-independent data/anchors/independent-training.jsonl.gz --o
 
 - 金币留在界面上不会被记录：节点的金币增量为零时隔离（`gold_reward_unsettled`）。有其它金币来源也不能由正增量证明金币全领完：额外金币奖励、入场／加牌给钱的遗物、取得即给钱的遗物、战斗中给钱的牌、失窃金币返还等隔离（`gold_reward_multiple_sources`）。
 - 候选牌多于四张（多组奖励）、没拿牌而界面上有替代选项、同一个奖励被记了两次时隔离。
-- 没拿牌且还有未领药水／遗物时，只保留完整的 `unclaimed` 组；旧 `reward` 的不完整跳过帧以 `covered_by_unclaimed_reward_group` 隔离，即使本次只请求生成 `reward`。其它已有 `reward` 锚点仍假设其它奖励已在选牌之前领取；界面上还有药水或留下的遗物时的选牌由 `pick` 给出。
+- 没拿牌且还有未领药水／遗物时，只保留完整的 `unclaimed` 组；`reward` 锚点里不完整的跳过帧以 `covered_by_unclaimed_reward_group` 隔离，即使本次只请求生成 `reward`。其它已有 `reward` 锚点仍假设其它奖励已在选牌之前领取；界面上还有药水或留下的遗物时的选牌由 `pick` 给出。
 
 ## 宝箱
 
@@ -175,7 +199,7 @@ python3 -m spire_codex_data.map_ambiguity data/spire-codex --output data/anchors
 - **飞行靴**：已用次数不明时路线锚点隔离（它决定哪些移动合法），其它锚点保留并标为默认值。
 - **按奖励计数的遗物**（长效糖果、丝绸发带、银坩埚）按取得之后的战斗奖励数推导，规则在全部有这些遗物的对局上与最终值一致。
 - **地图位置**：摘要只记录每个节点的类型。原生地图由 seed 生成，本幕恰有一条路径与记录的类型序列一致时，位置和路线标签取这条路径（`map_position=recorded_route`）。地图在中途被改变（例如持有会改地图的任务牌）或用了自由通行时找不到这样的路径，位置退回到同类型的代表节点，这一幕不产生路线标签。
-- **选牌**：一个节点记录了多于四张候选时无法分清是几组奖励，整节点隔离；没有选牌而界面上有替代选项时，摘要分不清跳过和替代选项，同样隔离。候选牌按记录原样发放，不让遗物再改一遍。奖励界面只含选牌奖励：此旧锚点假设金币、遗物、药水已在选牌之前领取（这不再是运行时的强制领奖顺序），同一界面上被归还的牌也已在卡组里。拿牌会触发遗物时：复制出的第二张牌按摘要一并从选牌前的卡组里去掉；拿牌给的金币从节点末金币里扣回（引擎实际给了多少就扣多少，标为 `derived_pre_pick_gold`）；五轮书每加入五张牌回血一次，计数由摘要推出（拿到五轮书的那个节点上先后顺序不明，用最终计数定出来），选牌前的计数不含这次要拿的牌；这次拿牌正好凑满五张时，节点末 HP 里已含这次回血，选牌前的 HP 是扣回之后的值（标为 `derived_pre_pick_hp`），回血后满血、或最终计数与摘要对不上时无法确定，隔离（`unresolved_pre_pick_hp`）。其他拿牌触发的效果不推断，执行结果对不上就隔离。
+- **选牌**：一个节点记录了多于四张候选时无法分清是几组奖励，整节点隔离；没有选牌而界面上有替代选项时，摘要分不清跳过和替代选项，同样隔离。候选牌按记录原样发放，不让遗物再改一遍。奖励界面只含选牌奖励：`reward` 锚点假设金币、遗物、药水已在选牌之前领取，同一界面上被归还的牌也已在卡组里。拿牌会触发遗物时：复制出的第二张牌按摘要一并从选牌前的卡组里去掉；拿牌给的金币从节点末金币里扣回（引擎实际给了多少就扣多少，标为 `derived_pre_pick_gold`）；五轮书每加入五张牌回血一次，计数由摘要推出（拿到五轮书的那个节点上先后顺序不明，用最终计数定出来），选牌前的计数不含这次要拿的牌；这次拿牌正好凑满五张时，节点末 HP 里已含这次回血，选牌前的 HP 是扣回之后的值（标为 `derived_pre_pick_hp`），回血后满血、或最终计数与摘要对不上时无法确定，隔离（`unresolved_pre_pick_hp`）。其他拿牌触发的效果不推断，执行结果对不上就隔离。
 - **营火**：一个节点有多个选项、或选项的后续选择摘要里没有记录（如烹饪）时隔离。结果核对不比较遗物，挖掘这类给随机遗物的选项只保证标签正确。
 - **远古之民**只导出选哪个选项这一步；遗物随后要求的选牌等摘要里没有。
 - **事件选项里引用的整段描述不进观察**。选项显示的数值和内容名（代价、数量、哪张牌、哪瓶药水）随帧导出；选项文本里嵌入的另一段描述（如茶艺大师选项里遗物的效果说明）和对不上唯一内容的名字没有。
@@ -193,7 +217,7 @@ SPIRE_CODEX_DATA_NATIVE_TESTS=1 python3 -m pytest spire_codex_data/tests -q   # 
 
 ## 导入
 
-`python -m main import-independent <independent-training.jsonl.gz> --output <目录>`（`main/demos/independent.py`）把一个样本组（一局的局外决策，或一场求解器战斗）转成一条监督“对局”，写成分片加索引（[data](data.md)）。控制器步骤移入 `environment_actions`；只含环境操作的组不参与训练。`--shard-samples` 控制分片大小。导入没有任何样本时返回 2。
+`python -m main import-independent <independent-training.jsonl.gz> --output <目录>`（`main/demos/independent.py`）把一个样本组（一局的局外决策，或一场求解器战斗）转成一条监督“对局”，写成分片加索引（[data](data.md)）。控制器步骤移入 `environment_actions`；只含环境操作的组不参与训练。`--shard-samples` 控制分片大小（默认每片 2000 个决策步），`--workers` 是转换样本组的进程数（默认逻辑核数的一半）。导入没有任何样本时返回 2。
 
 导入后做 BC 起步的两段（命令见 [README](../../README.md#bc-起步)）：第一段拟合全部难度；第二段 `--ascension 10 --combat-from <按更大预算另求的 A10 战斗目录>`，局外样本仍是第一段数据里 A10 的那部分。
 

@@ -88,28 +88,37 @@ def per_wave(m, count):
     return listed
 
 
-def start_jobs(seeds, n, wave, stop):
+def forked(number, size, depth):
+    """How segment `number` of a group of `size` forks (`rollout.fork_ranks`), as a
+    job carries it; nothing at depth 0."""
+    return dict(fork=dict(index=number, size=size, depth=depth)) if depth else {}
+
+
+def start_jobs(seeds, n, wave, stop, fork_depth=0):
     """The jobs of the first wave: each seed of each character `n` times, to the cut
-    `stop` (`cuts`; None plays to the end)."""
+    `stop` (`cuts`; None plays to the end), each segment forking at its first
+    `fork_depth` decisions with a choice by its place in the group."""
     jobs = []
     for character in CHARACTERS:
         for seed in seeds.get(character, []):
             group = f"{character}:{seed}:{wave}"
             for number in range(n):
                 jobs.append((character, dict(seed=str(seed), run_id=f"{group}-{number}", group=group,
-                                             **until(stop)), None))
+                                             **until(stop), **forked(number, n, fork_depth)), None))
     return jobs
 
 
-def resume_jobs(rows, m, wave, stop):
+def resume_jobs(rows, m, wave, stop, fork_depth=0):
     """The jobs of a later wave: `m` segments from each save row (`save_rows`) of the
-    wave before, each to the cut `stop` or, with None, to the run's end."""
+    wave before, each to the cut `stop` or, with None, to the run's end, forking as
+    `start_jobs` says."""
     jobs = []
     for row in rows:
         group = f"{row['run_id']}:{wave}"
         for number in range(m):
             jobs.append((row["character"], dict(seed=row["seed"], run_id=f"{group}-{number}", group=group,
-                                                resume=row["path"], **until(stop)), None))
+                                                resume=row["path"], **until(stop),
+                                                **forked(number, m, fork_depth)), None))
     return jobs
 
 
@@ -153,7 +162,7 @@ class WaveWriter:
         self.shards = ShardWriter(self.directory, shard_samples, flush=True, resume=resume)
         self.outcomes, self.failed, self.phases = Counter(), Counter(), Counter()
         self.groups = set()
-        self.written = self.stored_steps = self.explored = 0
+        self.written = self.stored_steps = self.explored = self.forked = 0
         self.done = {row["run_id"] for row in self.shards.rows}
         self.resumed = len(self.shards.rows)
         for row in self.shards.rows:
@@ -162,6 +171,7 @@ class WaveWriter:
             self.groups.add(row["group"])
             self.written += 1
             self.explored += row.get("explored") or 0
+            self.forked += row.get("forked") or 0
         # The contracts of the rows found, from one of their runs each.
         for row in self.shards.rows:
             if row["contract"] not in self.shards.contracts:
@@ -183,6 +193,7 @@ class WaveWriter:
         self.written += 1
         self.stored_steps += run["stored_steps"]
         self.explored += run.get("explored") or 0
+        self.forked += run.get("forked") or 0
         return True
 
     def close(self, wave, stop, jobs, seconds, collector=None):
@@ -195,7 +206,7 @@ class WaveWriter:
                        until=None if stop is None else list(stop), segments=len(jobs),
                        written=self.written, resumed=self.resumed, groups=len(self.groups),
                        outcomes=dict(self.outcomes), failed=dict(self.failed), phases=dict(sorted(self.phases.items())),
-                       explored=self.explored,
+                       explored=self.explored, forked=self.forked,
                        stored_steps=self.stored_steps, shards=len(self.shards.shards), contracts=self.shards.contracts,
                        seconds=round(seconds, 1), collector=collector)
         _write_summary(self.directory, summary)
@@ -231,7 +242,7 @@ def set_aside(directory):
 
 
 def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BOUNDARIES, bosses=(),
-                  shard_samples=2000, on_run=None, resume=False):
+                  fork_depth=0, shard_samples=2000, on_run=None, resume=False):
     """Sample one round of act groups into `directory`: the first wave over `seeds`
     (per character), then a wave over the saves of each wave before; the cuts are the
     first decisions of the `boundaries` acts and of the `bosses` acts' boss fights
@@ -241,12 +252,16 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
     under its name, and the saves each wave wrote. A segment that did not finish is
     set aside, not written. With `resume`, a round cut off in `directory` goes on:
     finished waves stand, the wave under way keeps what it finished and plays the
-    rest; a wave left without an index is set aside and played again."""
+    rest; a wave left without an index is set aside and played again. With
+    `fork_depth` the segments of every group part at their first decisions with a
+    choice, half by half (`rollout.fork_ranks`)."""
     stops = [*cuts(boundaries, bosses), None]
     names = [wave_name(None), *(wave_name(cut) for cut in stops[:-1])]
     later = per_wave(m, len(names) - 1)
     if n < 1:
         raise ValueError("Act groups: at least one segment from each seed")
+    if type(fork_depth) is not int or fork_depth < 0:
+        raise ValueError("Act groups fork at a depth of no decisions or more")
     directory = Path(directory)
     if groups_summary(directory) is not None or (
             not resume and directory.exists() and any(directory.iterdir())):
@@ -257,7 +272,8 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
 
     summaries, saves, rows = {}, {}, []
     for level, (wave, stop) in enumerate(zip(names, stops)):
-        jobs = start_jobs(seeds, n, wave, stop) if level == 0 else resume_jobs(rows, later[level - 1], wave, stop)
+        jobs = (start_jobs(seeds, n, wave, stop, fork_depth) if level == 0
+                else resume_jobs(rows, later[level - 1], wave, stop, fork_depth))
         finished = wave_summary(directory / wave) if resume else None
         if finished is not None and finished["wave"] == wave and finished["segments"] == len(jobs) \
                 and finished["written"] + sum(finished["failed"].values()) == len(jobs):
@@ -304,7 +320,8 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
     summary = dict(
         kind="act_groups", format=FORMAT, iteration=runner.iteration, policy_version=runner.version,
         policy_digest=runner.digest, temperature=dict(runner.temperatures), ascension=runner.ascension,
-        n=n, m=later, boundaries=[int(act) for act in boundaries], bosses=[int(act) for act in bosses],
+        n=n, m=later, fork_depth=fork_depth,
+        boundaries=[int(act) for act in boundaries], bosses=[int(act) for act in bosses],
         cuts=[list(cut) for cut in stops[:-1]], waves=names, seeds="metadata/seeds.json",
         groups=sum(len(seeds.get(c, [])) for c in CHARACTERS), saves=saves,
         **summaries, seconds=round(time.monotonic() - started, 1))

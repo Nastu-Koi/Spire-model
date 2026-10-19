@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from model.dotnet_runtime import find_runtime, runtime_command
+from main.env.dotnet_runtime import find_runtime, runtime_command
 
 DOTNET = find_runtime()
 PROJECT = os.path.join(

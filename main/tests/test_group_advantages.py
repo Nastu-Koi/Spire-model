@@ -115,3 +115,24 @@ def test_a_sampled_round_of_groups_gets_advantages_for_every_decision(tmp_path):
     assert written["act2"]["stats"]["tree"]["nodes"] >= 10 and written["act3"]["stats"]["tree"]["nodes"] >= 20
     # Written once: asking again reads the headers back.
     assert advantages(tmp_path / "groups") == written
+    assert all(written[wave]["stats"]["forked"]["decisions"] == 0 for wave in written)
+
+
+def test_a_forked_round_compares_the_two_halves_of_every_group_at_its_first_choice(tmp_path):
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        summary = sample_groups(pool, runner(policy), seeds, tmp_path / "groups", n=2, m=2, boundaries=BOUNDARIES,
+                                fork_depth=1)
+    assert summary["fork_depth"] == 1
+    # Every segment forked once: at its first decision with a choice.
+    assert all(summary[wave]["forked"] == summary[wave]["written"] for wave in summary["waves"])
+    written = advantages(tmp_path / "groups", processes=2)
+    for wave in written:
+        stats = written[wave]["stats"]
+        assert stats["forked"]["decisions"] == stats["segments"]
+        # The two segments of every group share their first frame and part there, one
+        # each way: the tree has a node with two actions in every group.
+        assert stats["tree"]["branching_nodes"] >= stats["groups"]
+        # Each half is measured against the other: their advantages are opposite.
+        assert stats["forked"]["positive"] == stats["forked"]["negative"]

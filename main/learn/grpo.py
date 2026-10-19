@@ -24,8 +24,10 @@ A sampled macro-action i is learned with
 - **A trust region.** Once a macro-action's ratio is outside [1 − ε, 1 + ε] in the
   direction its advantage pushes, it stops pushing.
 - **An anchor.** KL_i is the sum over the macro-action's decisions of
-  KL(π_θ,T ‖ π_ref,T) over the legal actions, exact, with π_ref a fixed reference
-  (the iteration's starting checkpoint) run on the same batch without gradients. It
+  KL(π_θ,T ‖ π_ref,T) over the legal actions, exact, with π_ref the reference the
+  driver chooses (the run's starting checkpoint, or the policy as it stood when the
+  current stretch of `reference_every` iterations began) run on the same batch
+  without gradients. It
   keeps the drift of a policy learning from its own samples in check.
 - **No division by the group's spread.** Returns are ±1 and groups are small: a group
   of one win in four would be magnified.
@@ -148,16 +150,17 @@ def _priced(table, source, scale):
 
 
 def group_update(learner, waves, reference, *, clip=CLIP, kl=KL, updates=None, window_shards=8, on_update=None,
-                 weight_cap=batches.WEIGHT_CAP, shares=None, phase_weights="group"):
+                 weight_cap=batches.WEIGHT_CAP, shares=None, phase_weights="group", accumulate=1):
     """One pass over a round of act groups with the clipped objective (`Clipped`): every
     logical batch draws from each wave's segments in proportion to `shares` (each
     wave's share of the round's decisions by default, `batches.wave_shares`) at the
     wave's capped share weights (`batches.buffer_weights`, by phase group or even at
     `phase_weights`); `reference` is the frozen policy network the KL is to.
-    `waves` maps a wave's name to its directory. `updates` sets the pass
-    (`batches.pass_updates` sees every wave about once at the default shares); without
-    it the largest wave does. Returns the pass's metrics, with `groups`: what each
-    stream drew from and what the objective saw."""
+    `waves` maps a wave's name to its directory. `updates` sets the pass in logical
+    batches (`batches.pass_updates` sees every wave about once at the default shares);
+    without it the largest wave does. Every `accumulate` logical batches make one
+    optimizer step (`trainer.Learner.fit`). Returns the pass's metrics, with `groups`:
+    what each stream drew from and what the objective saw."""
     if not waves:
         raise ValueError("An update of act groups needs at least one wave")
     if reference.vocabulary_digest is not None and reference.vocabulary_digest != learner.vocabulary.digest:
@@ -185,7 +188,8 @@ def group_update(learner, waves, reference, *, clip=CLIP, kl=KL, updates=None, w
             **{f"{name}_loss": losses[name] for name in waves},
             **{f"{name}_zero_share": done[name]["zero"] / max(done[name]["samples"], 1) for name in waves}))
 
-    metrics = learner.fit(joint, total=total, on_update=told if on_update else None, objective=objective)
+    metrics = learner.fit(joint, total=total, on_update=told if on_update else None, objective=objective,
+                          accumulate=accumulate)
 
     def wave(name, shards):
         seen = joint.seen[name]
@@ -196,7 +200,8 @@ def group_update(learner, waves, reference, *, clip=CLIP, kl=KL, updates=None, w
                     data=extent(shards))
 
     metrics["groups"] = dict(
-        clip=clip, kl=kl, shares=shares, sizes=counts, decisions=total,
+        clip=clip, kl=kl, shares=shares, sizes=counts, decisions=total, accumulate=accumulate,
+        batch=config.logical_batch_size * accumulate,
         waves={name: wave(name, shards) for name, (shards, _) in data.items()},
         losses={name: metrics["sources"].get(name, {}).get("loss") for name in streams},
         weight_cap=weight_cap or None, phase_weights=phase_weights, seen=objective.summary())

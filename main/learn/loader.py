@@ -255,7 +255,7 @@ def _feed(connection, shards, windows, weights, vocabulary, config, shuffle, see
         # The parent's intra-op pool does not survive the fork; packing needs none.
         torch.set_num_threads(1)
         # The trainer's thread launches the kernels of every step; the feeders and their
-        # workers yield to it (issue 26: with 47 of them the step's tail doubled).
+        # workers yield to it, or dozens of them compete with it for the cores.
         os.nice(FEEDER_NICE)
         random.seed(seed)
         carry = []

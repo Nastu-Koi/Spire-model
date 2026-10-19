@@ -34,7 +34,7 @@
 
 ### 摘要锚点入口（`summary-anchor-v1`）
 
-对局摘要重建出的节点边界不是 `start_run` 产生的连续对局，用单独的入口进入，契约里多一个字段 `initialization = "summary-anchor-v1"`（`start_run` 的契约没有这个字段）。这样的帧 `training_ready=true`，但只能作为监督样本，不能当作连续原生对局或 PPO 采样。
+对局摘要重建出的节点边界不是 `start_run` 产生的连续对局，用单独的入口进入，契约里多一个字段 `initialization = "summary-anchor-v1"`（`start_run` 的契约没有这个字段）。这样的帧 `training_ready=true`，但只能作为监督样本，不能当作连续原生对局或采样对局。
 
 - `enter_anchor`：参数 `save`（序列化对局）、`act_floor`、`map_point_type`，可选 `route`（该幕记录的节点类型序列）和 `second_boss`。加载存档后静默重装玩家状态，已持有的遗物不会再次触发取得效果。地图位置：本幕原生地图上恰有一条路径的节点类型与 `route` 一致时，把这条路径走到 `act_floor`；否则退回到同类型、同楼层的代表节点。返回 `anchor_installed`，其中 `map_position` 为 `recorded_route` 或 `representative_point`，前者另带整条路径的坐标。
 - `anchor_state`：只读，返回游戏自己序列化的当前对局，用来核对安装结果。
@@ -42,6 +42,7 @@
 - `content_info`：只读，参数 `ids`。返回商店规则读取的静态属性：卡牌的类型、稀有度、是否无色，遗物的稀有度和能否进商店，药水的稀有度。不需要对局。
 - `anchor_room`：安装后只能调用一次，进入节点的房间并停在第一个决策。`room.type` 为 `combat`（`encounter`）、`rest_site`、`card_reward`（`cards`，按序列化卡牌给出）、`map`（节点之后的路线选择）、`ancient`（`event` 和 `options`：进入该远古之民事件，把它自己抽出的选项换成记录的选项，顺序不变）、`shop`（`cards`：五个角色卡牌格位各自记录的牌，只取它们的稀有度；`relics`：三个遗物格位记录的遗物）、`event`（`event`：按游戏对这一局的生成进入该事件，不改动任何选项）或 `rewards`（`gold`、`potions`、`relics`、`cards`：一个只含这些奖励的奖励界面，按游戏列出奖励的顺序，不生成任何内容；`gold` 是界面上显示的金币数）。商店的其余库存和全部价格由游戏用存档里的商店随机流照常抽出，引擎不核对也不修正，结果是否等于记录由调用方从帧里判断。`card_reward` 按给定的卡牌原样发放：记录里的候选已经包含玩家当时看到的全部改动，不再让遗物改一遍。
 - 之后任何 `enter_room`、`set_player`、`load_save` 等调试命令照常使 `training_ready` 失效。
+- `write_continue_save`：参数 `path`（绝对路径）。把当前对局写成游戏的续局存档，返回 `save_result`；不影响候选句柄与训练资格；在房间里时写下的是进房之前的状态。幕组的幕开头存档和 Boss 入场存档都由它写下（`main/env/saves.py`）。
 - `resume_save`：参数 `save`（在地图上写下的续局存档，如 `write_continue_save` 在一幕第一个选图决策处写的）。加载存档、静默重装玩家状态，不加节点、不进房间，运行标为训练可用，契约的 `initialization` 为 `act-resume-v1`；返回 `resume_installed`（`act`、`act_floor`、`visited`），之后 `advance_to_boundary` 发布选图决策。存档不在地图上（序列化的房间不是 `MapRoom`）时报错。
 - `resume_fight`：参数 `save`（在一场战斗第一个决策处由 `write_continue_save` 写下的存档，引擎已回滚到进房之前）、`encounter`（`ENCOUNTER.X` 或 `X`）、`act_floor`、`map_point_type`（`boss`／`monster`／`elite`），可选 `second_boss`。加载存档、静默重装玩家状态，把该类型的节点记为已访问（Boss 取本幕 Boss 节点，其它取同类型里最接近该楼层的节点）、设楼层，运行标为训练可用，契约的 `initialization` 为 `fight-resume-v1`，然后进入该遭遇；回复就是战斗的第一个决策帧。存档不在地图上时报错。
 
@@ -64,7 +65,7 @@
 | 选牌／卡包 | 原生已过滤卡池和数量约束，逐项 buffered 前缀／完整卡包；取消只在战斗中或无法完成选择时提供 |
 | 水晶球 | 全部隐藏中心格 × 两种占卜工具；原生次数、揭示、诅咒和最终奖励结算 |
 
-纯地图显示、免费打开已公开卡牌奖励、装饰音效及布局不制造额外策略步骤。Steam 的桥接按同样的方式发布奖励界面：已生成的卡牌奖励连同它的牌一起给出，`take_card_reward` 由 Mod 点开面板、核对牌未变后提交（`steam-live-v2`，归类规则见 [architecture](../../docs/architecture.md) 的“候选是有结果的动作”）。跳过奖励、结束回合、离开商店保留其原生机会语义；非战斗阶段已打开的选择不提供取消，`selection_cancel = "combat-or-dead-end-v1"`（依据见 [architecture](../../docs/architecture.md)）。未知稳定边界、无合法候选矛盾、引擎错误和真正死亡分别处理，不以强制 proceed 或重新补能量掩盖问题。
+纯地图显示、免费打开已公开卡牌奖励、装饰音效及布局不制造额外策略步骤。Steam 的桥接按同样的方式发布奖励界面：已生成的卡牌奖励连同它的牌一起给出，`take_card_reward` 由 Mod 点开面板、核对牌未变后提交（桥接协议见 [steam](../../docs/implementation/steam.md)，归类规则见 [architecture](../../docs/architecture.md) 的“候选是有结果的动作”）。跳过奖励、结束回合、离开商店保留其原生机会语义；非战斗阶段已打开的选择不提供取消，`selection_cancel = "combat-or-dead-end-v1"`（依据见 [architecture](../../docs/architecture.md)）。未知稳定边界、无合法候选矛盾、引擎错误和真正死亡分别处理，不以强制 proceed 或重新补能量掩盖问题。
 
 ## buffered 选择与模型缓存
 
@@ -90,7 +91,7 @@
 
 训练协议保留真实 pending continuation；父动作只执行一次，子交互完成后继续结算。奖励使用 `RewardsSet`／原生 synchronizer 的测试选择器入口，直接卡牌选择、领取、hook 与历史记录仍走原生方法。跨幕调用原生 `EnterNextAct`，事件内战斗完成后恢复父事件。
 
-战斗开始时（原生 `CombatBegan`）发布 `encounter_started`，带这场战斗的 `encounter_id`、遭遇内容 ID `encounter`、`act`、`kind` 和是否由事件引发 `from_event`；它随战斗的第一帧到达，只说明玩家此刻面对的是哪个遭遇，不进入 `public`。战斗胜利由真实 `CombatWon` 确认，生成同一 `encounter_id` 的 `encounter_completed`；只有实际幕末 Boss 算幕里程碑，第三幕最终 Boss 生成通关事件。死亡／放弃与失败异常分开。重复查询不会重复交付上次事件；Python 奖励账本还按 encounter 去重，并落实每幕普通战斗奖励上限及 Boss／终局互斥支付。
+战斗开始时（原生 `CombatBegan`）发布 `encounter_started`，带这场战斗的 `encounter_id`、遭遇内容 ID `encounter`、`act`、`kind` 和是否由事件引发 `from_event`；它随战斗的第一帧到达，只说明玩家此刻面对的是哪个遭遇，不进入 `public`。战斗胜利由真实 `CombatWon` 确认，生成同一 `encounter_id` 的 `encounter_completed`；只有实际幕末 Boss 算幕里程碑，第三幕最终 Boss 生成通关事件。死亡／放弃与失败异常分开。重复查询不会重复交付上次事件；Python 奖励账本按 encounter 去重，只在终局支付一次 ±1（见 [env](../../docs/implementation/env.md#奖励)）。
 
 特殊桥接复用实际规则：水晶球只替换缺失的屏幕显示，格子点击执行原生小游戏；假商人药水补足原 UI 节点触发；宝箱补足原 UI 收到奖励后的获得回调；Jungle Maze／Trial 仅拦截无头环境没有的音效和装饰布局。桥接不重写随机奖励、伤害、成本或效果顺序。原生动作执行器吞入的异常也会转为协议错误。
 
@@ -104,7 +105,7 @@ python -m pytest -q sts2-cli/tests
 python -m pytest -q -m "not engine"
 ```
 
-游戏文件、构建产物和本地依赖不纳入源码版本管理。未来内容变更可能出现新交互；协议对此显式报错，整轮 PPO 会停止并保留诊断。
+游戏文件、构建产物和本地依赖不纳入源码版本管理。未来内容变更可能出现新交互；协议对此显式报错，采样或评估中的该局记为 `error` 并保留错误信息，不进训练。
 
 ## Merchant RNG parity
 

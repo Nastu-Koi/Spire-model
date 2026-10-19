@@ -21,6 +21,11 @@ from main.env.public_history import require_history_version
 from main.env.saves import FightTracker, continue_save
 
 
+# The precisions a run may be played at: bf16 autocasts the global layers, fp32 (or
+# a profile's `no`) runs them as they are. The entity encoder and the head are FP32 either way.
+PRECISIONS = ("bf16", "fp32")
+
+
 def precision_context(model, precision):
     return (
         torch.autocast(model.device.type, dtype=torch.bfloat16)
@@ -229,7 +234,7 @@ class RolloutRunner:
 
     def run(self, engine, character, seed, *, sample=True, journal=None,
             combat_frames=True, resume=None, until_act=None, until_boss=None, run_id=None, group=None,
-            packed=False, _policy=None):
+            fork=None, packed=False, _policy=None):
         """Play one run, or a segment of one.
 
         With `resume` (a save a segment stopped at, as `save` below) the run goes on
@@ -242,7 +247,10 @@ class RolloutRunner:
         "save": …, "fight": …}` (the fight as `saves.FightTracker` describes it, with
         its floor), and the segment's `outcome` is `reached`; a run that ended first
         has `outcome` `win` or `loss`. `run_id` and `group` name the segment and the
-        group of segments it belongs to (`main.play.groups`).
+        group of segments it belongs to (`main.play.groups`). With `fork` (`fork_ranks`:
+        the segment's place in its group, the group's size, a depth) a sampled segment
+        takes its first decisions with a choice by the policy's order instead of a draw,
+        so that the group's segments part there two ways.
 
         Without `combat_frames` the macro-actions played inside fights keep their
         counts and log-probability but not their frames, which are most of a run.
@@ -250,6 +258,7 @@ class RolloutRunner:
         (`_pack`), for `packed_line` to write without building them again."""
         if character not in CHARACTERS:
             raise ValueError("Unknown character")
+        ranks = fork_ranks(fork) if sample and fork else []
         trace = {
             "schema": SCHEMA,
             "character": character,
@@ -264,6 +273,7 @@ class RolloutRunner:
             "sampling": "full_distribution" if sample else "argmax",
             "temperature": dict(self.temperatures) if sample else None,
             "explore_potions": dict(self.explore_potions) if sample else None,
+            "fork": dict(fork) if sample and fork else None,
             "iteration": self.iteration,
             "status": "unresolved",
             "macros": [],
@@ -288,13 +298,17 @@ class RolloutRunner:
 
         # A policy handed in draws its choices where the network runs; either is told
         # the temperature of each decision here, where the fight it belongs to is known.
-        def choose(frame, fight, kind, *, sample):
-            restrict = self.exploration_for(frame, fight, sample, kind)
+        def choose(frame, fight, kind, *, sample, rank=None):
+            # A forking decision takes the candidate of its rank and explores nothing.
+            restrict = None if rank is not None else self.exploration_for(frame, fight, sample, kind)
             # A policy that does not explore (a test double) is asked nothing it does not know.
             among = {} if restrict is None else {"restrict": restrict}
+            if rank is not None:
+                among["rank"] = rank
             return policy.choose(frame, sample=sample, temperature=self.temperature_for(frame, sample, fight), **among)
 
         pending_steps, current_segment, active_macro = [], None, None
+        branched = 0  # decisions with a choice so far: the first `len(ranks)` of them fork
         waiting_since = None
         fights, stands = FightTracker(), []
         sink = Path(journal).open("w") if journal else nullcontext()
@@ -390,7 +404,9 @@ class RolloutRunner:
                     if key != current_segment:
                         current_segment, pending_steps, active_macro = key, [], None
                     branching = len(frame["legal"]["candidates"]) > 1
-                    choice = choose(frame, fight, fights.kind, sample=sample)
+                    rank = ranks[branched] if branching and branched < len(ranks) else None
+                    branched += branching
+                    choice = choose(frame, fight, fights.kind, sample=sample, rank=rank)
                     # A frame played inside a fight is kept only where every frame is.
                     step = {
                         "frame": _pack(frame) if combat_frames or fight is None else None,
@@ -399,6 +415,8 @@ class RolloutRunner:
                     }
                     if getattr(choice, "explored", False):
                         step["explored"] = True
+                    if getattr(choice, "forked", False):
+                        step["forked"] = True
                     if branching:
                         if active_macro is None:
                             active_macro = {
@@ -444,6 +462,19 @@ class RolloutRunner:
 
 
 FIGHT_KINDS = ("normal", "elite", "boss")
+
+
+def fork_ranks(fork):
+    """The ranks a segment takes at its first decisions with a choice: segment j of a
+    group of `size` parts two ways at each of `depth` decisions, the first half of the
+    group (and of each half after it) taking the policy's most likely candidate (0),
+    the other half its second (1). A depth beyond log2 of the size would part branches
+    of one segment: it stops there."""
+    index, size, depth = (fork.get(name) for name in ("index", "size", "depth"))
+    if any(type(value) is not int for value in (index, size, depth)) or not 0 <= index < size or depth < 0:
+        raise ValueError("A fork names a segment's place in its group, the group's size and a depth")
+    depth = min(depth, size.bit_length() - 1)
+    return [(index << (level + 1)) // size % 2 for level in range(depth)]
 
 
 def exploration_rates(rates):
@@ -513,7 +544,7 @@ def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, jour
             engine, character, spec["seed"], sample=sample, combat_frames=combat_frames,
             resume=read_save(spec["resume"]) if spec.get("resume") else None,
             until_act=spec.get("until_act"), until_boss=spec.get("until_boss"), run_id=spec["run_id"],
-            group=spec["group"],
+            group=spec["group"], fork=spec.get("fork"),
             packed=not trajectory, _policy=policy)
     character, seed, path = job
     trace = runner.run(

@@ -141,8 +141,8 @@ class SharedEncoder(nn.Module):
 
     def programs(self, batch, base):
         """Encode each distinct local program once; one row per program. The fields
-        of a group are those of its real nodes: a third of the padded rows in a late
-        act's pass, whose padding would otherwise bound the pass on the GPU. They are
+        of a group are those of its real nodes, a small part of the padded rows in a
+        late act's pass, whose padding would otherwise bound the pass on the GPU. They are
         encoded compact and scattered into the padded layout, where the padding rows
         stay the zeros the field block would have left."""
         result = base.new_zeros((batch.program_count, base.shape[-1]))
@@ -232,7 +232,9 @@ class GraphedStack:
         self.graphs = {}
 
     def __call__(self, hidden, valid, biases):
-        key = tuple(valid.shape)
+        # A graph replays the kernels it captured, at their precision: a pass under
+        # autocast and one without are two graphs of a shape.
+        key = (tuple(valid.shape), torch.is_autocast_enabled())
         entry = self.graphs.get(key)
         if entry is None:
             entry = self.graphs[key] = self._capture(hidden, valid, biases)
@@ -333,10 +335,11 @@ class PolicyNetwork(nn.Module):
 
         Its batches are small and vary in size with what a decision is batched
         with, so FP32 kernels differ in the last bits between batches, and under
-        BF16 the backbone turns that into log-probability differences of about
-        1e-3 per decision. The log-probabilities a sampled run records carry
-        this noise; nothing is learned from them as a ratio. An FP64 encoder
-        would remove it at several times the backbone's cost.
+        BF16 the backbone turns that into small log-probability differences per
+        decision. The log-probabilities a sampled run records carry this noise,
+        and so does the ratio the clipped objective forms with them: its first
+        batch starts near 1 rather than at it. An FP64 encoder would remove it
+        at several times the backbone's cost.
         """
         with torch.autocast(device_type=self.device.type, enabled=False):
             return self.encoder(batch)
@@ -524,9 +527,11 @@ class PolicyNetwork(nn.Module):
         temperature 1, each [decisions]: drawn from the scores divided by
         `temperature` (one number, or one per decision), or the most likely slot
         when not sampling. A decision whose `explore` row marks slots is drawn among
-        those alone, at their relative odds; its log-probability is still the whole
-        distribution's for the slot drawn (what the policy itself would have drawn it
-        with), so that what is explored is the action and not the record.
+        those alone, at their relative odds; one with a `rank` of 0 or more takes the
+        legal slot of that place in the policy's order, with no draw. Either way its
+        log-probability is still the whole distribution's for the slot taken (what the
+        policy itself would have drawn it with), so that what is explored is the action
+        and not the record.
         """
         batch = decisions.batch
         hidden = self.hidden(batch)
@@ -541,6 +546,10 @@ class PolicyNetwork(nn.Module):
             explore = decisions.explore & decisions.masks
             weights = torch.where(explore.any(-1, keepdim=True), weights.masked_fill(~explore, 0), weights)
             slots = torch.multinomial(weights, 1).squeeze(1)
+            rank = decisions.rank.to(slots.device)
+            # Illegal slots score -inf and sort last; a rank names a legal slot (`prepare_decisions`).
+            ranked = log_probs.argsort(-1, descending=True).gather(1, rank.clamp_min(0).unsqueeze(1)).squeeze(1)
+            slots = torch.where(rank >= 0, ranked, slots)
         else:
             slots = log_probs.argmax(-1)
         at = slots.unsqueeze(1)

@@ -2,7 +2,7 @@
 
 本文说明 `Spire-model/sts2-cli` 相对上游 [wuhao21/sts2-cli](https://github.com/wuhao21/sts2-cli) 改了什么。来源与许可证见 [UPSTREAM.md](../UPSTREAM.md)，协议本身的用法见 [decision-protocol.md](decision-protocol.md)，设计依据见 [architecture](../../docs/architecture.md)。
 
-- 比较对象：上游 `084d1aa`（Merge pull request #93，适配 STS2 v0.111.0）。本地检出 `/home/nastukoi/main/sts2-cli` 的 HEAD 就是这个提交，也是 UPSTREAM.md 记录的引入基线，所以下面全部是本仓库自己的改动，没有混入上游后续更新。
+- 比较对象：上游 `084d1aa`（Merge pull request #93，适配 STS2 v0.111.0）。它是 UPSTREAM.md 记录的引入基线，所以下面全部是本仓库自己的改动，没有混入上游后续更新。
 - 比较方法：逐文件 `diff`；Python 文件另按语法树比较，把纯格式化与逻辑改动分开。
 - 未改动：`CLAUDE.md`、`.claude/settings.json`、`LICENSE`、`localization_eng/`、`localization_zhs/`、`src/sts2-cli.slnx`、`tests/test_save_load.py`，以及 GodotStubs 中除 `Core.cs`、`Math.cs`、`UI.cs` 之外的文件。
 
@@ -23,48 +23,48 @@
 | 无头兼容与规则一致 | 新增一批 Harmony 补丁；商店药水价格改回游戏原生抽取 | `HeadlessEventPresentation.cs`、`HeadlessMerchantParity.cs` 等 |
 | 工程 | 固定 .NET 9、单进程多局、输出与 JIT 调优、Python 侧共用运行时探测 | `Program.cs`、`Sts2Headless.csproj`、`python/` |
 
-规模：`src/Sts2Headless` 从上游的 2 个源文件 4,164 行变为 22 个源文件 6,897 行。`RunSimulator.cs` 本身只改了约 300 行（+301／−221），新功能几乎都在新增的 partial 文件里，上游的 `action` 命令路径仍然保留。
+`src/Sts2Headless` 的新功能几乎都在新增的 partial 文件里，`RunSimulator.cs` 本身改动不多，上游的 `action` 命令路径仍然保留。
 
 有三点会影响“和上游行为是否一致”，先列在这里：
 
 1. **同一个种子的对局会和上游分叉。** 商店药水定价改为执行游戏的原生随机抽取（上游在 TestMode 下跳过），每次定价多消耗一次商店随机流。这个补丁在引擎初始化时安装，旧的 `action` 路径同样受影响。
 2. **旧命令的校验变严。** `select_cards`、`select_bundle`、`skip_select` 等不再静默修正非法输入（见 [3.6](#36-上游命令的行为变化)）。
-3. **本目录不能再单独拿出去编译。** `Sts2Headless.csproj` 编译根目录的 `public_history/*.cs`，Python 脚本导入根目录的 `model.dotnet_runtime`。
+3. **本目录不能再单独拿出去编译。** `Sts2Headless.csproj` 编译根目录的 `public_history/*.cs`，Python 脚本导入根目录的 `main.env.dotnet_runtime`。
 
 ## 2. 文件级差异
 
 ### 只在本仓库
 
-| 路径 | 行数 | 作用 |
-| --- | --- | --- |
-| `UPSTREAM.md` | | 上游地址、引入基线、本地维护范围 |
-| `docs/decision-protocol.md` | 120 | 决策协议说明 |
-| `docs/upstream-differences.md` | | 本文 |
-| `src/Sts2Headless/DecisionGate.cs` | 57 | 候选句柄的发布、校验与一次性消费 |
-| `src/Sts2Headless/PendingOperation.cs` | 62 | 跨外部选择保持的后台操作 |
-| `src/Sts2Headless/InlineSynchronizationContext.cs` | 54 | 从 `RunSimulator.cs` 拆出并改为线程安全 |
-| `src/Sts2Headless/NativeContinuations.cs` | 53 | 跟踪游戏自己发起、无人持有的续延 |
-| `src/Sts2Headless/SelectionSession.cs` | 80 | 多选过程的前缀缓冲与约束校验 |
-| `src/Sts2Headless/SelectionMetadata.cs` | 52 | 选牌的操作／来源／去向／可否取消 |
-| `src/Sts2Headless/HeadlessEventPresentation.cs` | 160 | 去掉无头环境缺失的音效、立绘、震屏调用 |
-| `src/Sts2Headless/HeadlessMerchantParity.cs` | 42 | 商店药水原生定价 |
-| `src/Sts2Headless/AnchorMerchant.cs` | 67 | 锚点商店：按记录提供卡牌稀有度和遗物 |
-| `src/Sts2Headless/AnchorTreasure.cs` | 57 | 锚点宝箱：条件化一次金币抽取 |
-| `src/Sts2Headless/RunSimulator.Decisions.cs` | 393 | 协议契约、边界推进、选牌／卡包边界、执行 |
-| `src/Sts2Headless/RunSimulator.Phases.cs` | 220 | 战斗、药水、地图、事件、营火边界 |
-| `src/Sts2Headless/RunSimulator.PublicState.cs` | 268 | 公开快照 |
-| `src/Sts2Headless/RunSimulator.RewardsProtocol.cs` | 203 | 奖励菜单与战后流程 |
-| `src/Sts2Headless/RunSimulator.MerchantTreasure.cs` | 123 | 商店与宝箱边界 |
-| `src/Sts2Headless/RunSimulator.CrystalSphere.cs` | 77 | 水晶球边界 |
-| `src/Sts2Headless/RunSimulator.PotionPresentation.cs` | 48 | 臭药水对商人／假商人的无头桥接 |
-| `src/Sts2Headless/RunSimulator.Milestones.cs` | 123 | 遭遇开始／完成、通关、死亡等事件 |
-| `src/Sts2Headless/RunSimulator.Catalog.cs` | 66 | `public_catalog` 静态内容目录 |
-| `src/Sts2Headless/RunSimulator.Anchor.cs` | 381 | 锚点命令 |
-| `tests/DecisionProtocolChecks/` | 92 | 不依赖游戏 DLL：`SelectionSession` 与 `DecisionGate` |
-| `tests/PendingOperationChecks/` | 92 | 不依赖游戏 DLL：`PendingOperation` 与同步上下文 |
-| `tests/MerchantParityChecks/` | 46 | 依赖游戏 DLL：同一随机状态下原生与无头的药水价格及下一个随机数 |
-| `tests/test_decision_protocol.py` | 379 | 协议的引擎测试，16 个用例 |
-| `tests/test_pending_operations.py` | 76 | 异步调度的引擎测试，4 个用例 |
+| 路径 | 作用 |
+| --- | --- |
+| `UPSTREAM.md` | 上游地址、引入基线、本地维护范围 |
+| `docs/decision-protocol.md` | 决策协议说明 |
+| `docs/upstream-differences.md` | 本文 |
+| `src/Sts2Headless/DecisionGate.cs` | 候选句柄的发布、校验与一次性消费 |
+| `src/Sts2Headless/PendingOperation.cs` | 跨外部选择保持的后台操作 |
+| `src/Sts2Headless/InlineSynchronizationContext.cs` | 从 `RunSimulator.cs` 拆出并改为线程安全 |
+| `src/Sts2Headless/NativeContinuations.cs` | 跟踪游戏自己发起、无人持有的续延 |
+| `src/Sts2Headless/SelectionSession.cs` | 多选过程的前缀缓冲与约束校验 |
+| `src/Sts2Headless/SelectionMetadata.cs` | 选牌的操作／来源／去向／可否取消 |
+| `src/Sts2Headless/HeadlessEventPresentation.cs` | 去掉无头环境缺失的音效、立绘、震屏调用 |
+| `src/Sts2Headless/HeadlessMerchantParity.cs` | 商店药水原生定价 |
+| `src/Sts2Headless/AnchorMerchant.cs` | 锚点商店：按记录提供卡牌稀有度和遗物 |
+| `src/Sts2Headless/AnchorTreasure.cs` | 锚点宝箱：条件化一次金币抽取 |
+| `src/Sts2Headless/RunSimulator.Decisions.cs` | 协议契约、边界推进、选牌／卡包边界、执行 |
+| `src/Sts2Headless/RunSimulator.Phases.cs` | 战斗、药水、地图、事件、营火边界 |
+| `src/Sts2Headless/RunSimulator.PublicState.cs` | 公开快照 |
+| `src/Sts2Headless/RunSimulator.RewardsProtocol.cs` | 奖励菜单与战后流程 |
+| `src/Sts2Headless/RunSimulator.MerchantTreasure.cs` | 商店与宝箱边界 |
+| `src/Sts2Headless/RunSimulator.CrystalSphere.cs` | 水晶球边界 |
+| `src/Sts2Headless/RunSimulator.PotionPresentation.cs` | 臭药水对商人／假商人的无头桥接 |
+| `src/Sts2Headless/RunSimulator.Milestones.cs` | 遭遇开始／完成、通关、死亡等事件 |
+| `src/Sts2Headless/RunSimulator.Catalog.cs` | `public_catalog` 静态内容目录 |
+| `src/Sts2Headless/RunSimulator.Anchor.cs` | 锚点命令与续局命令（`resume_save`、`resume_fight`） |
+| `tests/DecisionProtocolChecks/` | 不依赖游戏 DLL：`SelectionSession` 与 `DecisionGate` |
+| `tests/PendingOperationChecks/` | 不依赖游戏 DLL：`PendingOperation` 与同步上下文 |
+| `tests/MerchantParityChecks/` | 依赖游戏 DLL：同一随机状态下原生与无头的药水价格及下一个随机数 |
+| `tests/test_decision_protocol.py` | 协议的引擎测试 |
+| `tests/test_pending_operations.py` | 异步调度的引擎测试 |
 
 `lib/`（游戏程序集）和 `logs/`（对局日志）也只在本地存在，两边都被 `.gitignore` 排除，不属于源码差异。
 
@@ -72,7 +72,7 @@
 
 | 路径 | 说明 |
 | --- | --- |
-| `agent/` | 上游的 LLM 游玩代理：`auto_play.py`、`sts2_bridge.py`、`combat_helper.py`、`validate_learning.py`、亡灵契约师学习笔记、`bug.md`。本仓库的策略在根目录 `model/`，没有引入 |
+| `agent/` | 上游的 LLM 游玩代理：`auto_play.py`、`sts2_bridge.py`、`combat_helper.py`、`validate_learning.py`、亡灵契约师学习笔记、`bug.md`。本仓库的策略在根目录 `main/`，没有引入 |
 | `docs/compatibility-v0.111.0.md` | v0.111.0 适配说明 |
 | `docs/demo_en.gif`、`docs/demo_zh.gif` | 演示动图；README 里对应的两处图片引用也一并删除 |
 
@@ -103,12 +103,14 @@
 | `advance_to_boundary` | 新增 | 推进到下一个边界；已有已发布的决策时原样返回它，不会恢复执行 |
 | `public_catalog` | 新增 | 静态内容标识和 21 个动作动词，用于冻结词表；不需要对局，不生成任何未来内容 |
 | `enter_anchor`、`anchor_room`、`anchor_state`、`anchor_event`、`content_info` | 新增 | 摘要锚点入口（见 [3.4](#34-摘要锚点入口)） |
+| `resume_save` | 新增 | 从地图上写下的续局存档续打这一局，契约 `initialization = act-resume-v1`；用于幕开头存档（见 [decision-protocol](decision-protocol.md#摘要锚点入口summary-anchor-v1)） |
+| `resume_fight` | 新增 | 从一场战斗第一个决策处写下的续局存档重进这场战斗，契约 `initialization = fight-resume-v1`；用于 Boss 入场存档 |
 | `start_run` | 扩展 | 新参数 `decision_protocol`（返回 `decision_frame` 而不是上游的决策点）和 `acts`（指定幕序列，例如 `["UNDERDOCKS","HIVE","GLORY"]`） |
 | `load_save` | 扩展 | 新参数 `diagnostic_protocol`：允许诊断探针用协议驱动，但读档的对局永远不标记为可训练 |
 | `enter_room` | 扩展 | 新参数 `decision_protocol` |
 | `get_map` | 扩展 | 返回值多一个 `encounter_pools`（各幕的弱怪／普通／精英／Boss 遭遇池），只供诊断，不属于协议 |
 
-`start_run`、`load_save`、`action`、`set_player`、`enter_room`、`set_draw_order`、`quit`、`enter_anchor` 在执行前都会让当前的候选句柄失效，并把 `training_ready` 置为 false。也就是说上游的写命令和调试命令仍可用，但用过之后这一局不再有训练资格。
+`start_run`、`load_save`、`action`、`set_player`、`enter_room`、`set_draw_order`、`quit`、`enter_anchor`、`resume_save`、`resume_fight` 在执行前都会让当前的候选句柄失效，并把 `training_ready` 置为 false。也就是说上游的写命令和调试命令仍可用，但用过之后这一局不再有训练资格；`start_run`（带 `decision_protocol`）、`enter_anchor`、`resume_save`、`resume_fight` 随后按各自的契约重新建立训练资格。
 
 ### 3.2 决策协议
 
@@ -202,7 +204,7 @@
 
 ### 3.7 同一进程里的下一局
 
-上游一个进程实际上只跑一局。本仓库中，已有对局时再发 `start_run`、`load_save` 或 `enter_anchor`，`Program.cs` 先调用 `EndRun()`（内部是 `RunManager.CleanUp`），成功后换一个新的 `RunSimulator`。新一局的决策序号、状态版本和全部协议状态从头开始，得到的帧与新进程的第一局相同，只有 `episode_id` 不同。
+上游一个进程实际上只跑一局。本仓库中，已有对局时再发 `start_run`、`load_save`、`enter_anchor`、`resume_save` 或 `resume_fight`，`Program.cs` 先调用 `EndRun()`（内部是 `RunManager.CleanUp`），成功后换一个新的 `RunSimulator`。新一局的决策序号、状态版本和全部协议状态从头开始，得到的帧与新进程的第一局相同，只有 `episode_id` 不同。
 
 为此，战斗事件由匿名委托改为具名方法，以便退订；选牌器的注册保留为可释放的作用域；结束时还会还原奖励选择器并清空续延跟踪。战斗进行中、仍有游戏代码在执行、或这一局出过错时拒绝结束，返回 `run_not_ended`。
 
@@ -245,9 +247,9 @@
 
 ## 4. Python 客户端
 
-`python/play.py`（交互游玩）和 `python/play_full_run.py`（随机策略跑完整局）仍然用上游的 `action` 命令，没有改成决策协议；协议的客户端在仓库根目录的 `model/` 和 `combat_solver_cli/`。两个文件的 diff 行数很多（`play.py` +882／−396），绝大部分是格式化，逻辑改动只有：
+`python/play.py`（交互游玩）和 `python/play_full_run.py`（随机策略跑完整局）仍然用上游的 `action` 命令，没有改成决策协议；协议的客户端在仓库根目录的 `main/` 和 `combat_solver_cli/`。两个文件的 diff 很大，绝大部分是格式化，逻辑改动只有：
 
-- **运行时探测**：`_find_dotnet` 改为调用根目录 `model.dotnet_runtime.find_runtime()`，按 `STS2_DOTNET`、`~/.dotnet-spire`、`~/.dotnet-arm64`、`~/.dotnet`、系统 `dotnet` 的顺序找带 .NET 9 运行时的宿主，只装了运行时没装 SDK 也可以。构建另用 `find_sdk()`。
+- **运行时探测**：`_find_dotnet` 改为调用根目录 `main.env.dotnet_runtime.find_runtime()`，按 `STS2_DOTNET`、`~/.dotnet-spire`、`~/.dotnet-arm64`、`~/.dotnet`、系统 `dotnet` 的顺序找带 .NET 9 运行时的宿主，只装了运行时没装 SDK 也可以。构建另用 `find_sdk()`。
 - **启动方式**：由 `dotnet run --no-build --project ...` 改为直接执行 `bin/Debug/net9.0/Sts2Headless.dll`。
 - **提示文案**：找不到运行时的提示改为中英双语，并指向 `~/.dotnet-spire` 和 `STS2_DOTNET`。
 - **`play_full_run.py`**：新增 `--ascension`（0–10）并传给 `start_run`；自动选牌改为按 `min_select` 选满，配合 [3.6](#36-上游命令的行为变化) 的严格校验（上游固定提交 `"0"`）。
@@ -271,8 +273,8 @@
 
 上游是自包含的；本目录现在依赖并被依赖于仓库的其它部分：
 
-- **依赖出去**：`Sts2Headless.csproj` → `public_history/*.cs`；`python/play.py`、`python/play_full_run.py`、`tests/conftest.py` → `model/dotnet_runtime.py`。
-- **被依赖**：`combat_solver_cli/` 引用并宿主这个引擎，其中 `PublicSnapshot.AddCard` 被按“恰好三个参数”反射调用，改签名会破坏求解器；`spire_codex_data/`、`model/` 通过 JSON Lines 使用协议和锚点命令。
+- **依赖出去**：`Sts2Headless.csproj` → `public_history/*.cs`；`python/play.py`、`python/play_full_run.py`、`tests/conftest.py` → `main/env/dotnet_runtime.py`。
+- **被依赖**：`combat_solver_cli/` 引用并宿主这个引擎，其中 `PublicSnapshot.AddCard` 被按“恰好三个参数”反射调用，改签名会破坏求解器；`spire_codex_data/`、`main/` 通过 JSON Lines 使用协议、锚点与续局命令。
 - **版本身份**：契约里的适配器程序集哈希取自 `Sts2Headless.dll`，游戏程序集哈希取自 `sts2.dll`。本目录任何影响公开字段或随机数消耗的改动，都会让依赖这些哈希或公开状态哈希的既有数据失去可比性。
 
 ## 7. 合并上游更新时的注意事项

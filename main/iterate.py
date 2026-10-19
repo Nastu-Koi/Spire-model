@@ -10,7 +10,8 @@ One iteration, repeated (`python -m main iterate`):
    (`main/learn/groups.py`), returns passed back up the chain of waves.
 3. **Update**: one pass over the round, every logical batch drawing from each wave
    by its share (`batches.wave_shares`), with the clipped ratio and a KL to the
-   starting checkpoint (`grpo.group_update`).
+   reference policy (`grpo.group_update`): the starting checkpoint, renewed every
+   `reference_every` iterations to the policy as it then stood (`Driver.reference`).
 4. **Evaluate** the policy greedily on fixed seeds every few iterations; the
    evaluation keeps each run's outcome, not its frames.
 5. **Clean up** what nothing reads any more: the round's frames, indexes and
@@ -26,7 +27,7 @@ at the iteration's cleanup.
 
     groups/round-N/            the rounds: a directory per wave; after the update only the summaries
     evaluation/iteration-NNNN/ the evaluation after iteration N, with report.json
-    seeds/, logs/              the seeds of each round; the output of the commands run
+    seeds/                     the seeds of each round
     state.json                 what every iteration's steps came to
     status.json, history.jsonl, updates.jsonl   the status, one line per iteration, one per update
 
@@ -61,7 +62,7 @@ from main.play.evaluation import evaluate_runs
 from main.learn.history import TrainingHistory
 from main.learn.trainer import Learner
 from main.env.protocol import CHARACTERS, ProtocolError
-from main.play.rollout import SUMMARY_RUNS, RolloutRunner, collect_round, exploration_rates
+from main.play.rollout import PRECISIONS, SUMMARY_RUNS, RolloutRunner, collect_round, exploration_rates
 from main.play.sampling import Samplers
 from main.env.seeds import validate_evaluation_seeds
 
@@ -88,7 +89,13 @@ class Settings:
     bosses: list = field(default_factory=list)  # the acts whose boss fight act groups also cut at
     group_n: int = act_groups.N  # segments from each seed in the first wave
     group_m: list = field(default_factory=lambda: [act_groups.M])  # segments from each save, one or one per wave
+    # Decisions with a choice at the start of every segment that fork its group in two,
+    # by the policy's order (`rollout.fork_ranks`); 0 forks none.
+    fork_depth: int = 0
     updates: str = "round"  # `round` (one pass over the round) or a number of updates per iteration
+    # Macro-actions of one optimizer step: a multiple of the profile's logical batch, whose
+    # batches are accumulated into the step (`trainer.Learner.fit`); the logical batch when None.
+    batch: int | None = None
     weight_cap: float = batches.WEIGHT_CAP  # what a decision of a small group may weigh, in even shares; 0 for no cap
     phase_weights: str = "group"  # how a wave's decisions share its weight: by (character, phase) group, or even
     window_shards: int = 8
@@ -96,13 +103,17 @@ class Settings:
     eval_seeds: str | None = None  # the seed file of the evaluations; without it none is made
     eval_runs_per_character: int | None = None  # the leading seeds of each character to play
     eval_workers: int | None = None
+    # The precision the evaluations play at (`PRECISIONS`); the checkpoint's when None.
+    # Sampling keeps the checkpoint's: the precision is part of what the samples are.
+    eval_precision: str | None = None
     # The waves' relative shares of a batch, one per wave in order; by their decisions when None.
     wave_shares: list | None = None
     # Stop once an update's mean policy entropy on its decisions falls below this.
     min_entropy: float | None = None
     # Every this many iterations the KL's reference becomes the policy of that moment
-    # (the archive of the iteration before); 0 keeps the starting checkpoint throughout.
-    reference_every: int = 0
+    # (the archive of the iteration before): the evaluation interval unless given, so
+    # that the reference is an evaluated policy; 0 keeps the starting checkpoint throughout.
+    reference_every: int | None = None
     # A JSON file of the rates this run's updates train at (`LearningRates`); the checkpoint's without it.
     learning_rates: str | None = None
     clip: float = grpo.CLIP
@@ -120,18 +131,26 @@ class Settings:
             LearningRates.load(self.learning_rates)
         if not 0 < self.clip < 1 or self.kl < 0:
             raise ValueError("The clip ε is in (0, 1) and the KL coefficient not negative")
+        if self.batch is not None and (type(self.batch) is not int or self.batch < 1):
+            raise ValueError("An optimizer step's batch is a positive number of macro-actions")
         if self.updates != "round" and not (str(self.updates).isdigit() and int(self.updates) > 0):
             raise ValueError("Updates per iteration: `round` or a positive number")
         if self.weight_cap and self.weight_cap < 1:
             raise ValueError("The cap on a sampled decision's weight is in even shares: at least one, or 0 for none")
         if self.phase_weights not in batches.PHASE_WEIGHTS:
             raise ValueError("Phase weights are `group` or `even`")
+        if self.reference_every is None:
+            self.reference_every = self.evaluate_every
+        if self.eval_precision is not None and self.eval_precision not in PRECISIONS:
+            raise ValueError(f"The evaluation precision is one of {sorted(PRECISIONS)}")
         if type(self.reference_every) is not int or self.reference_every < 0:
             raise ValueError("The reference is renewed every so many iterations, or never with 0")
         names = act_groups.waves(self.boundaries, self.bosses)
         self.group_m = act_groups.per_wave(self.group_m, len(names) - 1)
         if self.group_n < 1:
             raise ValueError("Act groups: at least one segment from each seed")
+        if type(self.fork_depth) is not int or self.fork_depth < 0:
+            raise ValueError("Act groups fork at a depth of no decisions or more")
         if self.wave_shares is not None:
             self.wave_shares = [float(share) for share in self.wave_shares]
             batches.wave_shares(dict.fromkeys(names, 1), self.wave_shares)
@@ -231,6 +250,17 @@ def samplers_for(pool, engines, settings, engine_factory, model, vocabulary):
     return Samplers(engine_factory, model, vocabulary, engines=engines, processes=settings.processes)
 
 
+def accumulation(settings, config):
+    """How many of the profile's logical batches make one optimizer step of the
+    settings' `batch` macro-actions."""
+    if settings.batch is None:
+        return 1
+    if settings.batch % config.logical_batch_size:
+        raise ValueError(f"An optimizer step's batch ({settings.batch}) is a multiple of the profile's "
+                         f"logical batch ({config.logical_batch_size}), whose batches it accumulates")
+    return settings.batch // config.logical_batch_size
+
+
 def play_round(samplers, runner, seeds, directory, settings, output):
     """A round of act groups on `seeds` into `directory` (`main.play.groups`), by the
     sampling processes `samplers` (a context manager). A round cut off on these seeds
@@ -241,7 +271,8 @@ def play_round(samplers, runner, seeds, directory, settings, output):
         set_aside(output, directory)
     with samplers as pool:
         return sample_groups(pool, runner, seeds, directory, n=settings.group_n, m=settings.group_m,
-                             boundaries=settings.boundaries, bosses=settings.bosses, resume=True)
+                             boundaries=settings.boundaries, bosses=settings.bosses,
+                             fork_depth=settings.fork_depth, resume=True)
 
 
 def round_result(summary, directory, settings):
@@ -263,6 +294,7 @@ def round_result(summary, directory, settings):
         win_rate=round(last["outcomes"].get("win", 0) / last["written"], 4),
         decisions={wave: sum(summary[wave]["phases"].values()) for wave in waves},
         explored={wave: summary[wave].get("explored", 0) for wave in waves},
+        forked={wave: summary[wave].get("forked", 0) for wave in waves},
         collector={wave: summary[wave].get("collector") for wave in waves},
         policy_version=summary["policy_version"],
         policy_digest=summary["policy_digest"], temperature=summary["temperature"], seconds=summary["seconds"])
@@ -401,6 +433,7 @@ class Driver:
                                   training=TrainConfig.from_profile(self.settings.config)
                                   if self.settings.config else None,
                               rates=LearningRates.load(rates) if rates else None)
+        accumulation(self.settings, learner.config)
         return learner
 
     def excluded(self):
@@ -412,10 +445,12 @@ class Driver:
             seeds |= seeds_of(path)
         return seeds
 
-    def sampler(self, iteration=None):
+    def sampler(self, iteration=None, precision=None):
+        """The runner of a round, or of an evaluation at `precision`."""
         learner, settings = self.learner, self.settings
         return RolloutRunner(
-            learner.model, learner.vocabulary, precision=learner.config.precision, version=learner.policy_version,
+            learner.model, learner.vocabulary, precision=precision or learner.config.precision,
+            version=learner.policy_version,
             max_steps=settings.max_steps, ascension=learner.config.ascension,
             temperatures=learner.config.temperatures, explore_potions=settings.explore_potions, iteration=iteration)
 
@@ -455,7 +490,8 @@ class Driver:
             runs=head["runs"], decisions=head["decisions"], advantage=head["advantage"],
             **{key: head["stats"][key] for key in ("groups", "return_mean", "between_share", "uniform_groups")},
             tree_share=head["stats"]["tree"]["share"], branching_share=head["stats"]["tree"]["branching_share"],
-            r2_within=head["stats"]["baseline"]["r2_within"], explored=head["stats"].get("explored"))
+            r2_within=head["stats"]["baseline"]["r2_within"], explored=head["stats"].get("explored"),
+            forked=head["stats"].get("forked"))
             for wave, head in written.items()}
 
     @staticmethod
@@ -479,11 +515,6 @@ class Driver:
         if not every or iteration < every:
             return Path(self.settings.checkpoint)
         return self.policy / f"iteration-{(iteration // every) * every - 1:04d}"
-
-    def is_reference(self, number):
-        """Whether the archive of iteration `number` serves as a KL reference at some point."""
-        every = self.settings.reference_every
-        return bool(every) and (number + 1) % every == 0
 
     def prune_archives(self, iteration):
         """Remove the policy archives of earlier iterations that nothing reads any more.
@@ -519,7 +550,7 @@ class Driver:
 
     def update(self, iteration):
         """One pass over the iteration's round with the clipped objective
-        (`grpo.group_update`), the KL to the policy the iterations started from."""
+        (`grpo.group_update`), the KL to the reference of `Driver.reference`."""
         settings, learner, directory = self.settings, self.learner, self.groups / f"round-{iteration}"
         current, archived = self.policy / "current", self.policy / f"iteration-{iteration:04d}"
         applied = getattr(learner, "checkpoint_metadata", {}) if self.resumed else {}
@@ -530,8 +561,10 @@ class Driver:
             return applied["update"]
         waves = {wave: directory / wave for wave in groups_summary(directory)["waves"]}
         macros = batches.priced_macros(waves)
+        accumulate = accumulation(settings, learner.config)
+        # The pass in logical batches: every wave seen once, or the steps asked for.
         updates = (batches.pass_updates(macros, learner.config.logical_batch_size) if settings.updates == "round"
-                   else int(settings.updates))
+                   else int(settings.updates) * accumulate)
         shares = settings.group_shares(macros)
         started = time.monotonic()
         told = lambda update: self.history.append_update(  # noqa: E731
@@ -543,13 +576,15 @@ class Driver:
         metrics = grpo.group_update(
             learner, waves, reference, clip=settings.clip, kl=settings.kl, updates=updates,
             window_shards=settings.window_shards, weight_cap=settings.weight_cap, shares=shares,
-            phase_weights=settings.phase_weights, on_update=told)
+            phase_weights=settings.phase_weights, on_update=told, accumulate=accumulate)
         del reference
         self.release()
         done = metrics["groups"]
         result = dict(
             policy=str(archived), policy_version=learner.policy_version,
-            updates=learner.updates, pass_updates=max(wave["batches"] for wave in done["waves"].values()),
+            updates=learner.updates,
+            pass_updates=-(-max(wave["batches"] for wave in done["waves"].values()) // accumulate),
+            batch=done["batch"], accumulate=accumulate,
             round=directory.name, advantages=self.entry(iteration)["advantages"],
             loss=metrics["loss"], accuracy=metrics["accuracy"], entropy=metrics.get("entropy"),
             losses=done["losses"], shares=done["shares"], sizes=done["sizes"], decisions=done["decisions"],
@@ -568,7 +603,8 @@ class Driver:
 
     def evaluate(self, iteration):
         settings, directory = self.settings, self.output / "evaluation" / f"iteration-{iteration:04d}"
-        result = play_evaluation(self.samplers(settings.eval_workers or settings.workers), self.sampler(),
+        result = play_evaluation(self.samplers(settings.eval_workers or settings.workers),
+                                 self.sampler(precision=settings.eval_precision),
                                  evaluation_seeds(settings), directory, iteration,
                                  getattr(self.learner, "checkpoint_metadata", {}), self.output)
         self.release()

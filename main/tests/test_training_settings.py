@@ -63,6 +63,29 @@ def test_dataset_size_and_micro_splitting_do_not_shrink_a_batch_update():
         assert updates[2][group]["mean_delta_l2"] == pytest.approx(expected["mean_delta_l2"], rel=.01)
 
 
+def test_logical_batches_accumulated_into_one_step_are_the_step_of_one_larger_batch():
+    runs, vocabulary, base, training = setup()
+    items = samples(runs)[:4]
+    assert len(items) == 4
+    told = {}
+    results, parameters = {}, {}
+    for name, batch, accumulate in (("large", 4, 1), ("accumulated", 2, 2)):
+        config = replace(training, logical_batch_size=batch, microbatch_size=batch)
+        learner = Learner(copy.deepcopy(base), vocabulary, config)
+        told[name] = []
+        results[name] = learner.fit(batches(items, vocabulary, config), total=12, accumulate=accumulate,
+                                    on_update=told[name].append)
+        parameters[name] = torch.cat([p.detach().flatten() for p in learner.model.parameters()])
+        # One optimizer step, over the four samples, on the scale of one batch of four.
+        assert learner.updates == 1 and results[name]["updates"] == 1
+        assert [update["samples"] for update in told[name]] == [4]
+        assert results[name]["loss_scale"] == pytest.approx(3.0)
+    torch.testing.assert_close(parameters["accumulated"], parameters["large"], rtol=1e-4, atol=2e-6)
+    learner = Learner(copy.deepcopy(base), vocabulary, training)
+    with pytest.raises(ValueError, match="accumulate"):
+        learner.fit(batches(items, vocabulary, training), total=12, accumulate=0)
+
+
 def test_short_tail_keeps_nominal_batch_divisor():
     runs, vocabulary, base, training = setup()
     # Repeating the same macro ensures gradient direction is identical.

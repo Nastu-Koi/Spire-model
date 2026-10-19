@@ -12,6 +12,7 @@ import torch
 from main.env.protocol import CHARACTERS, ProtocolError
 from main.env.runtime import configure_runtime
 from main.commands import COMMANDS
+from main.play.rollout import PRECISIONS
 from main.steam import parse_duration
 
 
@@ -157,6 +158,8 @@ def parser():
     )
     x.add_argument("--ascension", type=int,
                    help="Play the runs at this ascension; default the checkpoint's")
+    x.add_argument("--precision", choices=sorted(PRECISIONS),
+                   help="Precision of the network's global layers: bf16 (autocast) or fp32; default the checkpoint's")
     x.add_argument("--engine-root")
     x.add_argument("--output", required=True)
     x.add_argument("--max-steps", type=int, default=10000)
@@ -208,11 +211,14 @@ def parser():
     x.add_argument("--group-n", type=int, default=8, help="Segments from each seed in the first wave")
     x.add_argument("--group-m", type=int, nargs="+", default=[8],
                    help="Segments from each save, one number or one for each later wave")
+    x.add_argument("--fork-depth", type=int, default=0,
+                   help="Decisions with a choice at the start of every segment at which its group parts in "
+                        "two, half taking the policy's most likely candidate and half its second; 0 forks none")
     x.add_argument("--clip", type=float, default=0.2, help="The ratio's clip ε")
     x.add_argument("--kl", type=float, default=0.01, help="The coefficient of the KL to the reference")
-    x.add_argument("--reference-every", type=int, default=0,
+    x.add_argument("--reference-every", type=int,
                    help="Renew the KL's reference every this many iterations with the policy of that moment; "
-                        "0 keeps --checkpoint as the reference throughout")
+                        "every --evaluate-every iterations by default, 0 keeps --checkpoint as the reference throughout")
     x.add_argument("--learning-rates",
                    help="JSON file of the rates this run trains at (muon, backbone, embedding, head); "
                         "the checkpoint's without it")
@@ -223,7 +229,10 @@ def parser():
                         "USE_POTION candidates instead of a sample from the policy: one value for every fight, "
                         "two for normal fights and for elite and boss fights, three for each kind; 0 explores nothing")
     x.add_argument("--updates", default="round",
-                   help="Updates per iteration: `round` (a pass over the round) or a number")
+                   help="Updates per iteration: `round` (a pass over the round) or a number of optimizer steps")
+    x.add_argument("--batch", type=int,
+                   help="Macro-actions of one optimizer step, a multiple of the profile's logical batch whose "
+                        "batches are accumulated into it; the logical batch by default. The rates stay as given")
     x.add_argument("--weight-cap", type=float, default=10.0,
                    help="What one sampled decision of a small character and phase group may weigh, "
                         "in even shares of its wave; 0 for no cap")
@@ -236,6 +245,9 @@ def parser():
     x.add_argument("--eval-runs-per-character", type=int,
                    help="The leading seeds of each character an evaluation plays; all by default")
     x.add_argument("--eval-workers", type=int, help="Engines of an evaluation; as a round's by default")
+    x.add_argument("--eval-precision", choices=sorted(PRECISIONS),
+                   help="Precision of the evaluations' network: bf16 (autocast) or fp32; the checkpoint's by "
+                        "default. Sampling keeps the checkpoint's")
     x = sub.add_parser("infer")
     x.add_argument("--checkpoint", required=True)
     x.add_argument(

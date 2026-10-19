@@ -29,7 +29,7 @@ from game_log import GameLogger
 sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
-from model.dotnet_runtime import find_runtime, runtime_command
+from main.env.dotnet_runtime import find_runtime, runtime_command
 
 VALID_CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
 

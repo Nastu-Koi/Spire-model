@@ -53,7 +53,7 @@ def buffer_weights(source_counts, cap=WEIGHT_CAP, phase_weights="group"):
     rest of its share goes to the other groups, which may bring the next smallest over
     the cap in turn. Without a cap, the plain rule. With `even`, every decision weighs
     the same, whatever its phase: the plain policy gradient over the wave's decisions,
-    where fights are three quarters of them."""
+    most of which are fights."""
     if phase_weights not in PHASE_WEIGHTS:
         raise ValueError("Phase weights are `group` or `even`")
     counts = {key: count for key, count in source_counts.items() if count}

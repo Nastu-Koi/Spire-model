@@ -22,7 +22,7 @@ from game_log import GameLogger
 sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
-from model.dotnet_runtime import find_runtime, find_sdk, runtime_command
+from main.env.dotnet_runtime import find_runtime, find_sdk, runtime_command
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT = os.path.join(ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")

@@ -8,6 +8,7 @@ using Godot;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Events;
+using MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.RestSite;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
@@ -138,6 +139,10 @@ internal static class LiveUi
             if (!screen.IsComplete && rewards?.Rewards.Any(r => !r.SuccessfullySelected) == true) return null;
             return Nodes(screen).OfType<NProceedButton>().FirstOrDefault(CanClick);
         }
+        // The finished sphere stays on the stack once its rewards close. Its Proceed is
+        // enabled only after those rewards (OnMinigameFinished), so it cannot skip them.
+        if (overlay is NCrystalSphereScreen sphere)
+            return Nodes(sphere).OfType<NProceedButton>().FirstOrDefault(CanClick);
         if (overlay != null) return null;
         var nodes = Nodes(NGame.Instance).ToArray();
         var dialogue = nodes.OfType<NAncientDialogueHitbox>().FirstOrDefault(CanClick);
