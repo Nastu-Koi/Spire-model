@@ -1,6 +1,5 @@
 """One serial JSON-lines connection per engine process, with bounded I/O."""
 
-import json
 import os
 import queue
 import subprocess
@@ -8,6 +7,9 @@ import tempfile
 import threading
 from pathlib import Path
 
+import orjson
+
+from main.env.clock import timed
 from main.env.dotnet_runtime import runtime_command
 from main.env.protocol import ProtocolError
 from main.env.saves import fight_resume_command
@@ -15,6 +17,11 @@ from main.env.saves import fight_resume_command
 
 # An engine process grows by a few megabytes with every run it plays.
 RUNS_PER_PROCESS = 16
+# The .NET runtime's own work beside the game's, which every engine of a round pays
+# for on a machine whose cores the round fills: profile-guided recompilation and the
+# background collector. Without them an engine takes about a fifth less CPU a step and
+# plays the same states. The process's environment overrides them.
+RUNTIME_SETTINGS = {"DOTNET_TieredPGO": "0", "DOTNET_gcConcurrent": "0"}
 
 
 class CliEngine:
@@ -42,7 +49,7 @@ class CliEngine:
         self.proc = proc = subprocess.Popen(
             self.command,
             cwd=self.root,
-            env=dict(os.environ, STS2_GAME_DIR=str(self.root / "lib")),
+            env=dict(RUNTIME_SETTINGS, **os.environ, STS2_GAME_DIR=str(self.root / "lib")),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self.stderr,
@@ -72,14 +79,18 @@ class CliEngine:
 
     def _read(self):
         try:
-            line = self.responses.get(timeout=self.timeout)
+            # The engine's own time, its pipe's and its reader thread's (`clock`).
+            with timed("engine"):
+                line = self.responses.get(timeout=self.timeout)
         except queue.Empty:
             self.close()  # A timed-out stream cannot safely associate the next response.
             raise TimeoutError("Engine response timeout; connection closed") from None
         if line is None:
             raise ProtocolError(f"Engine exited ({self.proc.poll()})")
         try:
-            return json.loads(line)
+            with timed("engine_parse"):
+                # Frames are tens of kilobytes; the engine's numbers fit 64 bits and are never NaN.
+                return orjson.loads(line)
         except ValueError as exc:
             raise ProtocolError("Malformed engine JSON") from exc
 
@@ -87,7 +98,7 @@ class CliEngine:
         with self.lock:
             if self.closed:
                 raise ProtocolError("Engine connection is closed")
-            self.proc.stdin.write(json.dumps(command, allow_nan=False) + "\n")
+            self.proc.stdin.write(orjson.dumps(command).decode() + "\n")
             self.proc.stdin.flush()
             return self._read()
 

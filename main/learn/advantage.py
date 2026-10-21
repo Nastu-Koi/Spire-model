@@ -37,8 +37,10 @@ def write(directory, identity, runs):
                     advantages={run: [[index, round(value, 6), round(advantage, 6)]
                                       for index, value, advantage in entries] for run, entries in runs.items()})
     temporary = path.with_name(path.name + ".tmp")
-    with gzip.open(temporary, "wt", encoding="utf-8") as stream:
-        json.dump(document, stream, allow_nan=False, separators=(",", ":"))
+    # One write of the whole text, at gzip's level 6: piece by piece at level 9 it took
+    # seconds a wave (`json.dump` writes a stream of small chunks).
+    with gzip.open(temporary, "wt", encoding="utf-8", compresslevel=6) as stream:
+        stream.write(json.dumps(document, allow_nan=False, separators=(",", ":")))
     temporary.replace(path)
     return {key: value for key, value in document.items() if key != "advantages"}
 

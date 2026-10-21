@@ -6,7 +6,9 @@ tokens into tensors. In one process all of that shares an interpreter lock with 
 thread that runs the network, and the lock, not the GPU or the engines, bounds the
 round. Here the engines and that work live in sampling processes. The collecting
 process keeps the model: it joins what the processes have packed since its last
-pass, chooses for all of it in one pass and sends the choices back.
+pass, chooses for all of it in one pass and sends the choices back. What the entity
+encoder makes of a token or program it keeps for the round (`wire`): a sampling process
+sends the fields of each only once a round.
 
 A pass takes about as long for one decision as for a hundred, and a decision waits
 for the pass under way to end before its own begins. So a round is as fast as the
@@ -36,11 +38,13 @@ from multiprocessing.connection import wait
 import torch
 
 from main.network.policy import Choice, SessionPolicy, prepare_decisions
+from main.env import clock
 from main.env.processes import end, end_with, release_memory
-from main.encoding.representation import forget
+from main.encoding.representation import forget, observation
+from main.play import digests
 from main.play.rollout import FULL_RUNS, RolloutRunner, packed_line, play, precision_context
 from main.play.evaluation import climb
-from main.play.wire import pack, unpack
+from main.play.wire import Sent, pack, tables, unpack
 
 # A sampling process says something whenever a decision or a run is ready. Silence
 # this long is checked against the processes being alive.
@@ -50,9 +54,11 @@ SILENCE_SECONDS = 60
 class _Waiting:
     """The decisions the engines of one sampling process wait for."""
 
-    def __init__(self, connection, send, vocabulary, runner):
+    def __init__(self, connection, send, vocabulary, runner, sent):
         self.connection, self.send = connection, send
         self.vocabulary, self.runner = vocabulary, runner
+        # What this process has sent the collecting process's encoder tables this round.
+        self.sent = sent
         self.requests = queue.Queue()
 
     def policy(self, job):
@@ -70,8 +76,9 @@ class _Waiting:
                 if len(candidates) == 1:
                     return Choice(candidates[0]["candidate_ref"])
                 result = Future()
-                requests.put((job, frame, temperature, restrict, rank if sample else None, result))
-                return result.result()
+                with clock.timed("choice_wait"):
+                    requests.put((job, frame, temperature, restrict, rank if sample else None, result))
+                    return result.result()
 
         return Remote()
 
@@ -88,18 +95,40 @@ class _Waiting:
             except queue.Empty:
                 break
         observations, messages = [], []
+        laps = clock.Laps()
         for job, frame, temperature, restrict, rank, _ in waiting:
-            (obs,), decisions = prepare_decisions(self.vocabulary, [frame], restrict=[restrict], rank=[rank])
+            # Fields become tensors in `pack`, of what it sends alone.
+            (obs,), decisions = prepare_decisions(self.vocabulary, [frame], restrict=[restrict], rank=[rank],
+                                                  observe=_observe, tensors=False)
+            laps("preparing")
             observations.append(obs)
-            messages.append((job, pack(decisions), temperature))
+            messages.append((job, pack(decisions, [obs], self.sent), temperature))
+            laps("wire_packing")
         self.send(("decisions", messages))
-        chosen = self.connection.recv()
-        for (_, frame, _, restrict, rank, result), obs, (slot, log_prob, base) in zip(waiting, observations, chosen):
+        laps("sending")
+        chosen, drawn = self.connection.recv()
+        laps("collector_wait")
+        for number, ((_, frame, _, restrict, rank, result), obs, (slot, log_prob, base)) in enumerate(
+                zip(waiting, observations, chosen)):
             slot = obs.slot_refs[int(slot)]
+            candidates = frame["legal"]["candidates"]
+            if drawn is None:
+                distribution = None
+            else:
+                # Each candidate's log-probability at its temperature, in the frame's order.
+                place = {ref: index for index, ref in enumerate(obs.slot_refs)}
+                distribution = [round(float(drawn[number, place[c["decoder_slot_ref"]]]), 6) for c in candidates]
             result.set_result(Choice(
-                next(c["candidate_ref"] for c in frame["legal"]["candidates"]
-                     if c["decoder_slot_ref"] == slot),
-                log_prob, base_log_prob=base, explored=restrict is not None, forked=rank is not None))
+                next(c["candidate_ref"] for c in candidates if c["decoder_slot_ref"] == slot),
+                log_prob, base_log_prob=base, explored=restrict is not None, forked=rank is not None,
+                log_probs=distribution))
+        laps("answering")
+
+
+def _observe(frame):
+    # The frames a policy is asked about are `clean_frame`'s (`RolloutRunner.run`).
+    with clock.timed("observation"):
+        return observation(frame, cleaned=True)
 
 
 def _without_frames(run):
@@ -115,7 +144,15 @@ def _without_frames(run):
     ]
     handed["explored"] = explored_steps(run)
     handed["forked"] = explored_steps(run, "forked")
+    handed["distributions"] = recorded_distributions(run)
     return handed
+
+
+def recorded_distributions(run):
+    """Whether every decision of a run with a choice kept the distribution it was drawn
+    from (`Choice.log_probs`): what an update needs to take them for its reference's."""
+    return all("log_probs" in step for macro in run["macros"] if "steps" in macro
+               for step in macro["steps"] if not step["forced"])
 
 
 def explored_steps(run, mark="explored"):
@@ -141,15 +178,25 @@ def _handed(run, layout):
 
 def _shard_line(run):
     """A run, its frames still packed, as the line it makes in a shard, with what its
-    index row counts."""
-    line, phases = packed_line(run)
-    return dict(member=line, phases=phases,
+    index row counts and its line of the wave's digest (`digests`), taken from the
+    frames the shard line builds anyway."""
+    decisions, unreadable = [], []
+
+    def digest(index, macro, frame):
+        try:
+            decisions.append(digests.decision(index, macro, frame))
+        except ValueError as error:
+            # A frame the advantages cannot read: they read the wave's shards and say so there.
+            unreadable.append(error)
+
+    line, phases = packed_line(run, digest)
+    return dict(member=line, phases=phases, digest=None if unreadable else digests.line(run, decisions),
                 stored_steps=sum(len(macro["steps"]) for macro in run["macros"] if "steps" in macro))
 
 
-def _sample(connection, inherited, collector, engine_factory, model, vocabulary, taken, count):
-    """A sampling process: round after round, its `count` engines play the jobs they
-    take, each engine one run after another."""
+def _sample(connection, inherited, collector, engine_factory, model, vocabulary, taken, count, process):
+    """Sampling process number `process`: round after round, its `count` engines play
+    the jobs they take, each engine one run after another."""
     status = 1
     sending = threading.Lock()
     engines = [None] * count
@@ -185,11 +232,14 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
                 send(("rested", None))
                 continue
             settings, digest, jobs, sample, layout = message
+            # Where this process's time goes in the round (`_Timing`).
+            began = clock.totals()
             runner = RolloutRunner(model, vocabulary, **settings)
             # Hashed once by the collecting process, not here from weights that are
             # not this process's to read.
             runner._digest = digest
-            waiting = _Waiting(connection, send, vocabulary, runner)
+            # A round's encoder tables are new: nothing of them has been sent.
+            waiting = _Waiting(connection, send, vocabulary, runner, Sent(process))
             finished = []
 
             def work(slot):
@@ -199,11 +249,14 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
                         taken.value += 1
                     if index >= len(jobs):
                         return
-                    if engines[slot] is None:
-                        engines[slot] = engine_factory()
-                    run = play(engines[slot], runner, jobs[index], sample=sample,
-                               policy=waiting.policy(index), **layout)
-                    send(("run", (index, _handed(run, layout))))
+                    with clock.timed("playing"):
+                        if engines[slot] is None:
+                            engines[slot] = engine_factory()
+                        run = play(engines[slot], runner, jobs[index], sample=sample,
+                                   policy=waiting.policy(index), **layout)
+                    with clock.timed("handing_over"):
+                        handed = _handed(run, layout)
+                    send(("run", (index, handed)))
                     finished.append(index)
 
             # No `with`: after a failure the engine threads wait for choices that will
@@ -217,8 +270,9 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
                     # megabytes that this process would otherwise keep, like every
                     # other sampling process, for as long as it lives.
                     finished.clear()
-                    forget()
-                    release_memory()
+                    with clock.timed("releasing"):
+                        forget()
+                        release_memory()
                 for future in [future for future in working if future.done()]:
                     future.result()
                     working.remove(future)
@@ -226,7 +280,7 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
             # Nothing of the round is held between rounds.
             forget()
             release_memory()
-            send(("done", None))
+            send(("done", clock.since(began)))
         status = 0
     except BaseException:
         try:
@@ -241,13 +295,26 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
 
 
 class _Timing:
-    """The collecting process's account of one round."""
+    """The collecting process's account of one round, and the sampling processes'."""
 
     def __init__(self):
         self.started = time.monotonic()
         self.seconds = 0.0
         self.passes = self.decisions = 0
         self.waiting = self.unpacking = self.choosing = self.sending = 0.0
+        # By `clock` name: the collecting process's own, and the sampling processes' summed.
+        self.collecting, self.sampling = {}, {}
+
+    def sampled(self, totals):
+        """Add a sampling process's account of the round (`clock.since`)."""
+        for name, (seconds, count) in totals.items():
+            before = self.sampling.get(name, (0.0, 0))
+            self.sampling[name] = (before[0] + seconds, before[1] + count)
+
+    def _parts(self, totals):
+        return {name: dict(seconds=round(seconds, 3), count=count,
+                           ms_per_decision=round(1000 * seconds / self.decisions, 3) if self.decisions else None)
+                for name, (seconds, count) in sorted(totals.items())}
 
     def report(self):
         accounted = self.waiting + self.unpacking + self.choosing + self.sending
@@ -258,7 +325,8 @@ class _Timing:
             seconds_per_pass=round(self.seconds / self.passes, 6) if self.passes else None,
             waiting_seconds=round(self.waiting, 3), unpacking_seconds=round(self.unpacking, 3),
             choosing_seconds=round(self.choosing, 3), sending_seconds=round(self.sending, 3),
-            other_seconds=round(max(self.seconds - accounted, 0.0), 3))
+            other_seconds=round(max(self.seconds - accounted, 0.0), 3),
+            collecting=self._parts(self.collecting), sampling=self._parts(self.sampling))
 
 
 class Samplers:
@@ -272,6 +340,8 @@ class Samplers:
         self.model, self.vocabulary = model, vocabulary
         # Where the collecting process's time went in the last round (`timing`).
         self._timing = _Timing()
+        # The encoder's output for what the processes have sent, during a round (`wire`).
+        self._tables = None
         processes = min(processes, engines)
         context = multiprocessing.get_context("fork")
         self.taken = context.Value("i", 0)
@@ -285,7 +355,7 @@ class Samplers:
                 ours, theirs = context.Pipe()
                 process = context.Process(target=_sample, args=(
                     theirs, [*self.connections, ours], os.getpid(), engine_factory, model,
-                    vocabulary, self.taken, engines // processes + (index < engines % processes)))
+                    vocabulary, self.taken, engines // processes + (index < engines % processes), index))
                 process.start()
                 theirs.close()
                 self.samplers.append(process)
@@ -347,6 +417,10 @@ class Samplers:
         except BaseException:
             self.close()
             raise
+        finally:
+            # Rows of the weights this round sampled with; between rounds the memory is
+            # the trainer's.
+            self._tables = None
 
     def _collect(self, runner, jobs, sample, on_run, layout):
         self.model.eval()
@@ -355,6 +429,8 @@ class Samplers:
         if hasattr(self.model, "graphed"):
             self.model.graphed(True)
         self.taken.value = 0
+        # Each process starts the round with nothing sent (`_sample`).
+        self._tables = tables(self.model, len(self.samplers))
         settings = {name: getattr(runner, name) for name in (
             "precision", "version", "max_steps", "timeout", "ascension", "claim_rewards",
             "temperatures", "explore_potions", "iteration")}
@@ -364,6 +440,7 @@ class Samplers:
         completed = 0
         summaries = [None] * len(jobs)
         timing = self._timing = _Timing()
+        began = clock.totals()
         while active:
             waited = time.monotonic()
             ready = wait(list(active.values()), timeout=SILENCE_SECONDS)
@@ -395,12 +472,15 @@ class Samplers:
                         elif kind == "error":
                             raise RuntimeError("Sampling process failed:\n" + value)
                         else:
+                            # Done with the round, with where its time went.
+                            timing.sampled(value)
                             del active[index]
                 except EOFError:
                     raise RuntimeError(f"Sampling process {index} exited without finishing") from None
             if asked:
                 self._answer(runner, asked, sample)
         timing.seconds = time.monotonic() - timing.started
+        timing.collecting = clock.since(began)
         return summaries
 
     @property
@@ -408,7 +488,12 @@ class Samplers:
         """Where the collecting process's time went in the last round: how many passes
         of the network it made, the decisions they carried, and the seconds spent
         waiting for the sampling processes, unpacking their decisions, choosing (the
-        pass and the copy of its choices back to the host) and sending the choices."""
+        pass and the copy of its choices back to the host) and sending the choices.
+        `collecting` splits the passes by `clock` name (the host's time at each stage of
+        the network, `network_*`, and the wait for its choices, `readback`); `sampling`
+        is where the sampling processes' time went, summed over them, so that its
+        milliseconds per decision are what each decision cost the process that played it
+        (`docs/implementation/play.md`)."""
         return self._timing.report()
 
     def _answer(self, runner, asked, sample):
@@ -416,21 +501,28 @@ class Samplers:
         process sent a list of (job, packed decision, temperature)."""
         timing, began = self._timing, time.monotonic()
         tagged = [triple for _, triples in asked for triple in triples]
-        decisions, unregistered = unpack([message for _, message, _ in tagged], self.model.device)
+        decisions, unregistered = unpack([message for _, message, _ in tagged], self._tables)
         self.vocabulary.report(unregistered)
         unpacked = time.monotonic()
         with torch.no_grad(), precision_context(self.model, runner.precision):
             chosen = self.model.choose(
-                decisions, sample=sample,
+                decisions, sample=sample, distributions=sample,
                 temperature=torch.tensor([temperature for _, _, temperature in tagged],
                                          dtype=torch.float32, device=self.model.device))
-            # One transfer for the whole pass: (slot, log-probability, at temperature 1) rows.
-            rows = torch.stack([column.float() for column in chosen], dim=1).cpu().tolist()
+            # One transfer for the whole pass: (slot, log-probability, at temperature 1) rows,
+            # and when sampling every slot's log-probability after them, which the
+            # update's KL may take for its reference's (`main/learn/grpo.py`).
+            with clock.timed("readback"):
+                columns = [column.float().unsqueeze(1) for column in chosen[:3]]
+                table = torch.cat(columns + [chosen[3].float()] if sample else columns, dim=1).cpu().numpy()
+        rows = table[:, :3].tolist()
+        drawn = table[:, 3:] if sample else None
         chose = time.monotonic()
         start = 0
         for connection, triples in asked:
-            connection.send(rows[start:start + len(triples)])
-            start += len(triples)
+            end = start + len(triples)
+            connection.send((rows[start:end], None if drawn is None else drawn[start:end]))
+            start = end
         timing.passes += 1
         timing.decisions += len(tagged)
         timing.unpacking += unpacked - began

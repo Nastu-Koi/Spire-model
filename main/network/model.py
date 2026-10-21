@@ -8,8 +8,9 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
+from main.env.clock import Laps
 from main.network.attention import Attention, relation_bias, relation_biases
-from main.encoding.batch import collate
+from main.encoding.batch import Fields, TableBatch, collate
 from main.network.config import ModelConfig
 from main.encoding.representation import Observation
 
@@ -139,6 +140,27 @@ class SharedEncoder(nn.Module):
             / mask.sum(1).clamp_min(1).sqrt().unsqueeze(-1)
         )
 
+    def _program(self, group, nodes, entities):
+        """The vectors of one group's programs, from the field encodings of their real
+        nodes; a bound node adds the encoding of its entity, a row of `entities`."""
+        count, length = len(group.lengths), group.length
+        x = nodes.new_zeros((count * length, nodes.shape[-1])).index_copy_(0, group.nodes, nodes)
+        x = x.view(count, length, -1)
+        if group.binding_targets.numel():
+            additions = self.program_binding(
+                entities.index_select(0, group.binding_sources)
+                + self.field(group.binding_roles)
+            )
+            x = x.flatten(0, 1).index_add(0, group.binding_targets, additions).view_as(x)
+        valid = torch.arange(length, device=nodes.device).unsqueeze(
+            0
+        ) < group.lengths.unsqueeze(1)
+        bias = relation_bias(self.program_relation, group.edges, valid)
+        for block in self.local_blocks:
+            x = block(x, valid, bias)
+        pooled = (x * valid.unsqueeze(-1)).sum(1) / group.lengths.sqrt().unsqueeze(-1)
+        return x[:, 0] + pooled
+
     def programs(self, batch, base):
         """Encode each distinct local program once; one row per program. The fields
         of a group are those of its real nodes, a small part of the padded rows in a
@@ -147,38 +169,55 @@ class SharedEncoder(nn.Module):
         stay the zeros the field block would have left."""
         result = base.new_zeros((batch.program_count, base.shape[-1]))
         for group in batch.programs:
-            count, length = len(group.lengths), group.length
-            nodes = self.fields(group.fields)
-            x = nodes.new_zeros((count * length, nodes.shape[-1])).index_copy_(0, group.nodes, nodes)
-            x = x.view(count, length, -1)
-            if group.binding_targets.numel():
-                additions = self.program_binding(
-                    base.index_select(0, group.binding_sources)
-                    + self.field(group.binding_roles)
-                )
-                x = x.flatten(0, 1).index_add(0, group.binding_targets, additions).view_as(x)
-            valid = torch.arange(length, device=base.device).unsqueeze(
-                0
-            ) < group.lengths.unsqueeze(1)
-            bias = relation_bias(self.program_relation, group.edges, valid)
-            for block in self.local_blocks:
-                x = block(x, valid, bias)
-            pooled = (x * valid.unsqueeze(-1)).sum(1) / group.lengths.sqrt().unsqueeze(-1)
-            result = result.index_copy(0, group.slots, x[:, 0] + pooled)
+            result = result.index_copy(0, group.slots, self._program(group, self.fields(group.fields), base))
         return result
+
+    def _referenced(self, base, batch):
+        """Every token's encoding with what the entities it references add to it."""
+        if not batch.reference_targets.numel():
+            return base
+        contributions = self.reference(
+            base.index_select(0, batch.reference_sources)
+            + self.field(batch.reference_roles)
+        )
+        return base.index_add(0, batch.reference_targets, contributions)
 
     def forward(self, batch):
         """Encode every token of a packed batch; returns [tokens, hidden]."""
         base = self.fields(batch.tokens)
-        fused = base
-        if batch.reference_targets.numel():
-            contributions = self.reference(
-                base.index_select(0, batch.reference_sources)
-                + self.field(batch.reference_roles)
-            )
-            fused = fused.index_add(0, batch.reference_targets, contributions)
         programs = self.programs(batch, base).index_select(0, batch.token_programs)
-        return self.projection(self.local_norm(fused + programs))
+        return self.projection(self.local_norm(self._referenced(base, batch) + programs))
+
+    def from_tables(self, batch):
+        """`forward` of a sampling pass's `TableBatch`: the tokens and programs new to the
+        tables are encoded and written to them, then every token's encoding and program
+        are read from them. The new tokens and the nodes of every new program go through
+        one `fields` pass: there are few of them, and every pass is a round of launches."""
+        tables = batch.tables
+        parts = [batch.tokens, *(group.fields for group in batch.programs)]
+        sizes = [len(part.ids) for part in parts]
+        if sum(sizes):
+            encoded = self.fields(Fields.cat(parts)).split(sizes)
+            if sizes[0]:
+                tables.tokens.index_copy_(0, batch.new_token_rows, encoded[0])
+            for group, nodes in zip(batch.programs, encoded[1:]):
+                # A bound node reads its entity from the table, written above if new.
+                tables.programs.index_copy_(0, group.slots, self._program(group, nodes, tables.tokens))
+        base = tables.tokens.index_select(0, batch.token_rows)
+        programs = tables.programs.index_select(0, batch.token_programs)
+        return self.projection(self.local_norm(self._referenced(base, batch) + programs))
+
+
+class EncoderTables:
+    """The entity encoder's output for the tokens and programs a round's sampling
+    processes have sent (`main.play.wire`), on the model's device: one row of `tokens`
+    or `programs` each, every process owning a range of rows. Rows hold what the weights
+    of their pass computed: a round makes tables of its own."""
+
+    def __init__(self, model, token_rows, program_rows):
+        width, device = model.config.local_size, model.device
+        self.tokens = torch.zeros((token_rows, width), device=device)
+        self.programs = torch.zeros((program_rows, width), device=device)
 
 
 @dataclass
@@ -342,6 +381,8 @@ class PolicyNetwork(nn.Module):
         at several times the backbone's cost.
         """
         with torch.autocast(device_type=self.device.type, enabled=False):
+            if isinstance(batch, TableBatch):
+                return self.encoder.from_tables(batch)
             return self.encoder(batch)
 
     def hidden(self, batch):
@@ -354,7 +395,11 @@ class PolicyNetwork(nn.Module):
 
     def _hidden(self, batch):
         self.encoder_calls += 1
+        # The host's time at each stage (`clock`): what a sampling pass, bound by the
+        # host, spends launching each part of the network.
+        laps = Laps()
         tokens = self._entities(batch)
+        laps("network_encoder")
         rows, pad, total = len(batch.lengths), batch.pad, tokens.shape[0]
         lengths = batch.lengths
         # A graphed pass pads the batch to a bucketed shape: the rows added hold one
@@ -378,8 +423,11 @@ class PolicyNetwork(nn.Module):
         slots = row * pad_ + torch.arange(total, device=tokens.device) - starts[row]
         hidden = tokens.new_zeros((rows_ * pad_, tokens.shape[-1])).index_copy_(0, slots, tokens).view(rows_, pad_, -1)
         biases = self._relation_biases(batch.relations, valid)
+        laps("network_layout")
         if graphed:
-            return self._graphs(hidden, valid, biases)[:rows, :pad]
+            hidden = self._graphs(hidden, valid, biases)[:rows, :pad]
+            laps("network_layers")
+            return hidden
         for block, bias in zip(self.blocks, biases):
             if (
                 self.config.checkpoint_layers
@@ -389,7 +437,9 @@ class PolicyNetwork(nn.Module):
                 hidden = checkpoint(block, hidden, valid, bias, use_reentrant=False)
             else:
                 hidden = block(hidden, valid, bias)
-        return self.final_norm(hidden)
+        hidden = self.final_norm(hidden)
+        laps("network_layers")
+        return hidden
 
     def encode(self, observations, vocabulary, *, pad_to=None):
         if not observations:
@@ -520,11 +570,13 @@ class PolicyNetwork(nn.Module):
             result.append(kl.new_zeros(macros).index_add(0, prepared.owners, kl))
         return tuple(result)
 
-    def choose(self, decisions, *, sample=True, temperature=1.0):
+    def choose(self, decisions, *, sample=True, temperature=1.0, distributions=False):
         """One action for every decision of a packed batch, in a single pass.
 
         Returns the chosen slot, its log-probability and its log-probability at
-        temperature 1, each [decisions]: drawn from the scores divided by
+        temperature 1, each [decisions], and with `distributions` every slot's
+        log-probability at the decision's temperature [decisions, slots] (−inf off its
+        legal slots): drawn from the scores divided by
         `temperature` (one number, or one per decision), or the most likely slot
         when not sampling. A decision whose `explore` row marks slots is drawn among
         those alone, at their relative odds; one with a `rank` of 0 or more takes the
@@ -535,6 +587,7 @@ class PolicyNetwork(nn.Module):
         """
         batch = decisions.batch
         hidden = self.hidden(batch)
+        laps = Laps()
         self.decoder_calls += len(batch.lengths)
         state = hidden[:, 0]
         keys = self._keys(self._actions(hidden, batch))
@@ -553,7 +606,9 @@ class PolicyNetwork(nn.Module):
         else:
             slots = log_probs.argmax(-1)
         at = slots.unsqueeze(1)
-        return slots, log_probs.gather(1, at).squeeze(1), scores.log_softmax(-1).gather(1, at).squeeze(1)
+        chosen = slots, log_probs.gather(1, at).squeeze(1), scores.log_softmax(-1).gather(1, at).squeeze(1)
+        laps("network_heads")
+        return (*chosen, log_probs) if distributions else chosen
 
     def decode(self, encoded, legal_mask):
         return self.decode_batch([encoded], [legal_mask])[0]

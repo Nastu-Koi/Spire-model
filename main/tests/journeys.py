@@ -68,14 +68,15 @@ class Journey(SyntheticEngine):
             from pathlib import Path
 
             save = json.loads(Path(command["path"]).read_text())
-            Path(command["path"]).write_text(json.dumps(dict(save, room=self.room, character=self.character)))
+            Path(command["path"]).write_text(json.dumps(dict(save, room=self.room, character=self.character,
+                                                             ascension=self.ascension)))
         return reply
 
     def resume(self, save):
         """Go on from a save written in a room: that room's fight again, from its first
-        decision (`CliEngine.resume`)."""
+        decision (`CliEngine.resume`), at the save's ascension as the game's own saves hold it."""
         self.character = save.get("character", getattr(self, "character", "Ironclad"))
-        self.seed, self.ascension = str(save["seed"]), getattr(self, "ascension", 0)
+        self.seed, self.ascension = str(save["seed"]), save.get("ascension", getattr(self, "ascension", 0))
         self.commands, self.version, self.room = [], 0, save["room"]
         self.enter_room()
         return self.frame()

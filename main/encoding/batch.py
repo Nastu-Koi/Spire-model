@@ -48,6 +48,39 @@ class Fields(Packed):
     def pack(cls, rows, vocabulary):
         return cls(*field_tensors(rows, vocabulary))
 
+    @classmethod
+    def cat(cls, parts):
+        """The rows of several `Fields` in one, each padded to the widest."""
+        width = max(part.mask.shape[1] for part in parts)
+
+        def padded(tensor):
+            extra = width - tensor.shape[1]
+            return F.pad(tensor, (0, 0) * (tensor.dim() - 2) + (0, extra)) if extra else tensor
+
+        return cls(*(torch.cat([padded(getattr(part, name)) for part in parts])
+                     for name in ("ids", "kinds", "numbers", "mask")))
+
+
+@dataclass
+class Rows:
+    """Field rows not yet made tensors, and the width `Fields.pack` would give them. A
+    sampling process sends the fields of only the rows new to the collecting process's
+    tables (`main.play.wire`): it makes tensors of those alone (`fields`), at the width
+    all the rows would have had, so that what it sends is the same."""
+
+    rows: list
+    width: int
+    vocabulary: object
+
+    @classmethod
+    def of(cls, rows, vocabulary):
+        return cls(rows, max(map(len, rows), default=1), vocabulary)
+
+    def fields(self, keep):
+        """`Fields` of the rows `keep` marks."""
+        return Fields(*field_tensors([row for row, kept in zip(self.rows, keep) if kept], self.vocabulary,
+                                     width=self.width))
+
 
 @dataclass
 class ProgramGroup(Packed):
@@ -83,13 +116,56 @@ class Batch(Packed):
     unregistered: list[str]  # names met here which the vocabulary never registered
 
 
+@dataclass
+class TableBatch(Batch):
+    """A sampling pass's batch whose entities and programs are rows of the collecting
+    process's encoder tables (`main.play.wire`, `EncoderTables`). `tokens` holds the
+    fields of the tokens new to the tables only; `token_rows` is the table row of every
+    token's encoding and `new_token_rows` the row each new one goes to. `programs` holds
+    the programs new to the tables: their `slots` and every `token_programs` entry are
+    rows of the program table, their `binding_sources` rows of the token table.
+    `program_count` is 0. The rest is a `Batch`'s."""
+
+    token_rows: torch.Tensor  # [tokens]
+    new_token_rows: torch.Tensor  # [new tokens]
+    tables: object  # the EncoderTables the rows are of
+
+
 def _long(values, width=None):
     tensor = torch.tensor(values, dtype=torch.long)
     return tensor if width is None else tensor.reshape(-1, width)
 
 
-def collate(observations, vocabulary, pad_to=None):
+def program_items(observations):
+    """The distinct programs of observations batched together, in the order a batch
+    numbers them: each an (effect, bindings) pair whose bindings are (node, token row,
+    role) with the token rows counted across the observations; and the program of
+    every token."""
+    # A program is shared by every token holding the same parsed program with
+    # the same entity bindings: repeated cards, and the map behind a frontier
+    # node across the decisions of a batch.
+    index, items, token_programs, offset = {}, [], [], 0
+    for obs in observations:
+        for effect in obs.effects:
+            bindings = []
+            for node, ref, role in effect.bindings:
+                if ref not in obs.refs:
+                    raise ValueError("Unresolved effect-program entity reference")
+                bindings.append((node, offset + obs.refs[ref], role))
+            key = (id(effect), tuple(bindings))
+            if key not in index:
+                index[key] = len(items)
+                items.append((effect, bindings))
+            token_programs.append(index[key])
+        offset += len(obs.tokens)
+    return items, token_programs
+
+
+def collate(observations, vocabulary, pad_to=None, *, tensors=True):
+    """The batch of `observations`. Without `tensors`, the token and program fields are
+    `Rows`, left for `main.play.wire.pack` to make tensors of what it sends."""
     field, relation = vocabulary.fields.encode, vocabulary.relations.encode
+    tabled = (lambda rows: Fields.pack(rows, vocabulary)) if tensors else (lambda rows: Rows.of(rows, vocabulary))
     before = set(vocabulary.unregistered())
     offsets, token_rows = [], []
     for obs in observations:
@@ -105,22 +181,7 @@ def collate(observations, vocabulary, pad_to=None):
                 sources.append(offset + key)
                 roles.append(field("reference." + role))
 
-    # A program is shared by every token holding the same parsed program with
-    # the same entity bindings: repeated cards, and the map behind a frontier
-    # node across the decisions of a batch.
-    index, items, token_programs = {}, [], []
-    for obs, offset in zip(observations, offsets):
-        for effect in obs.effects:
-            bindings = []
-            for node, ref, role in effect.bindings:
-                if ref not in obs.refs:
-                    raise ValueError("Unresolved effect-program entity reference")
-                bindings.append((node, offset + obs.refs[ref], role))
-            key = (id(effect), tuple(bindings))
-            if key not in index:
-                index[key] = len(items)
-                items.append((effect, bindings))
-            token_programs.append(index[key])
+    items, token_programs = program_items(observations)
 
     # Programs of similar size share a group, so a long map program does not
     # pad every single-node program to its length.
@@ -145,7 +206,7 @@ def collate(observations, vocabulary, pad_to=None):
                 binding_roles.append(field("binding." + role))
         groups.append(
             ProgramGroup(
-                Fields.pack(rows, vocabulary),
+                tabled(rows),
                 length,
                 _long(lengths),
                 torch.cat(edges) if edges else _long([], 4),
@@ -163,7 +224,7 @@ def collate(observations, vocabulary, pad_to=None):
         for obs in observations
     ]
     return Batch(
-        Fields.pack(token_rows, vocabulary),
+        tabled(token_rows),
         _long([len(obs.tokens) for obs in observations]),
         max(max(len(obs.tokens) for obs in observations), pad_to or 0),
         _long(targets),

@@ -487,7 +487,9 @@ def clean_public(public):
 
 def clean_frame(frame):
     """Retain replay/routing metadata, but only whitelisted model input fields."""
-    result = deepcopy(frame)
+    # The public state and the candidates, most of a frame, are built anew below: only
+    # the rest is copied, in the frame's order.
+    result = {key: value if key in ("public", "legal") else deepcopy(value) for key, value in frame.items()}
     result["public"] = clean_public(frame["public"])
     # Public candidate semantics are cleaned by the same representation path.
     result["legal"] = {

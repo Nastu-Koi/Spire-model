@@ -1,8 +1,8 @@
 """The fields of an entity as the network reads them: a symbol under a field name,
 numbers with their known/applicable flags (`fields_of`, `scalar_field`), the rows of an
-entity cached by content (`entity_fields`), and rows packed into tensors (`field_tensors`)."""
+entity cached by content (`entity_fields`) with a digest of that content (`row_digest`),
+and rows packed into tensors (`field_tensors`)."""
 
-import json
 import math
 from dataclasses import dataclass
 
@@ -97,6 +97,31 @@ def scalar_field(name, value, known=True, applicable=True):
     return Field(name, f"{name}={value}", (0, 1, 1, 0))
 
 
+class FieldRow(list):
+    """The fields of one entity (`entity_fields`), with the digest of their content kept
+    beside them (`row_digest`): a row is shared by every frame of a run that shows the
+    entity, so its digest is taken once."""
+
+    __slots__ = ("digest",)
+
+
+def content_digest(rows):
+    """A 64-bit digest of what the network reads of rows of fields: their names, symbols
+    and numbers. Python's own hash, so digests compare within one process (and the
+    processes it forks) only."""
+    return hash(tuple(tuple((f.name, f.symbol, tuple(f.number)) for f in row) for row in rows))
+
+
+def row_digest(row):
+    """`content_digest` of one row; taken once for a `FieldRow`."""
+    digest = getattr(row, "digest", None)
+    if digest is None:
+        digest = content_digest([row])
+        if isinstance(row, FieldRow):
+            row.digest = digest
+    return digest
+
+
 _FIELD_ROWS = {}
 
 
@@ -105,25 +130,25 @@ _FIELD_ROWS_LIMIT = 16384
 
 def entity_fields(entity):
     """`fields_of` an entity, shared between equal entities: the cards, relics and
-    powers of a run repeat across its frames and across runs. Rows are read only."""
-    try:
-        key = json.dumps(entity, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
-        return fields_of(entity)
+    powers of a run repeat across its frames and across runs. Rows are read only.
+    Keyed by the entity as Python writes it, keys in their order: `fields_of` sorts
+    them, so an equal entity written in another order only misses the cache."""
+    key = repr(entity)
     rows = _FIELD_ROWS.get(key)
     if rows is None:
-        rows = fields_of(entity)
+        rows = FieldRow(fields_of(entity))
         if len(_FIELD_ROWS) >= _FIELD_ROWS_LIMIT:
             _FIELD_ROWS.pop(next(iter(_FIELD_ROWS)))
         _FIELD_ROWS[key] = rows
     return rows
 
 
-def field_tensors(rows, vocabulary):
-    """Pack field rows into (symbol ids, field-name ids, numbers, mask) on the CPU."""
+def field_tensors(rows, vocabulary, width=None):
+    """Pack field rows into (symbol ids, field-name ids, numbers, mask) on the CPU,
+    padded to `width` (the longest row's, unless told)."""
     import torch
 
-    width = max(map(len, rows), default=1)
+    width = max(map(len, rows), default=1) if width is None else width
     raw_ids, raw_kinds, raw_nums, raw_mask = [], [], [], []
     symbol, name = vocabulary.encode, vocabulary.fields.encode
     for row in rows:

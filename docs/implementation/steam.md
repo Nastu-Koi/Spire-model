@@ -54,3 +54,4 @@ Python 控制端对只有一个可用事件选项、其余仅能丢药的事件�
 
 - 不要用 headless 修改过的游戏 DLL 构建 Mod。
 - 仓库与已安装 Mod 的源码不一致时，从 DLL 内嵌的 PDB 提取原始源码对照，不要反编译。
+- 一局赢下时游戏会结束两次：`RunManager.WinRun()` 先调 `OnEnded(isVictory: true)`，再 `GuaranteeKillAllPlayers()`，玩家死亡的路径（`CreatureCmd`）又调一次 `OnEnded(isVictory: false)`。挂在 `OnEnded` 上的补丁两次都会运行，所以胜负只认同一局的第一次（`LiveBridge.RunEnded`；录制器由 `EnsureRun` 挡住第二次）。0.6.2 之前桥接取最后一次，`bridge/runs.jsonl` 把胜局记成 `victory: false`。这条路径在无头引擎里不出现（游戏在测试模式下不走它），只能实机验证。

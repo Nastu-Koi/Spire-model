@@ -96,7 +96,12 @@ internal static class LiveBridge
 
     internal static void RunEnded(bool victory)
     {
-        _outcomeRun = RunManager.Instance?.DebugOnlyGetState();
+        // A win ends a run twice: WinRun calls OnEnded(true), then kills the players, and
+        // their death calls OnEnded(false) on the same run. The game keeps the first call
+        // (the run history is uploaded once); so does the bridge.
+        var run = RunManager.Instance?.DebugOnlyGetState();
+        if (_outcome is bool && ReferenceEquals(run, _outcomeRun)) return;
+        _outcomeRun = run;
         _outcome = victory;
     }
 

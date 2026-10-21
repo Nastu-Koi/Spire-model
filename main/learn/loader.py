@@ -9,6 +9,15 @@ Feeder processes read the sharded windows, each with workers of its own, and
 hand over packed batches: while one feeder decodes its next shards, the workers of
 the others pack. Only their bounded final remainders enter the trainer.
 
+Feeders are not forked from the trainer but from a server process that imported this
+module and holds nothing else (multiprocessing's `forkserver`), their arguments
+pickled. A process forked from the trainer allocates first into the free slots of
+the trainer's partly used memory pools, and copies every page it writes there: the
+more an iteration's transient objects (an advantage step's segments, a round's
+tables) have fragmented the trainer's heap, the more each of some fifty feeders and
+workers copied, iteration after iteration, whatever the heap's garbage collector was
+told.
+
 A feeder forks its next workers once per window, and a thread's lock copied
 mid-operation into a child can never be released there, so a feeder holds no
 thread when it forks. Packed tensors therefore cross process boundaries as named
@@ -32,6 +41,7 @@ import random
 import sys
 import traceback
 from dataclasses import replace
+from multiprocessing import forkserver
 from multiprocessing.connection import wait
 
 import torch
@@ -179,7 +189,9 @@ def _stream(dataset, workers, release=False, report=None):
     # collection writes to every object it visits: what exists now is set aside from
     # the collector, here and in the workers forked next. Nothing is collected first:
     # walking everything a window or a round holds takes over a second each time, and
-    # what it would free is not what a worker reads.
+    # what it would free is not what a worker reads. A heap frozen before (a caller's
+    # own reasons) stays frozen.
+    thawed = not gc.get_freeze_count()
     gc.freeze()
     done = 0
     try:
@@ -211,7 +223,8 @@ def _stream(dataset, workers, release=False, report=None):
                 del iterator
                 _release_shared(packers)
     finally:
-        gc.unfreeze()
+        if thawed:
+            gc.unfreeze()
 
 
 def batches(items, vocabulary, config):
@@ -248,10 +261,14 @@ def _feed(connection, shards, windows, weights, vocabulary, config, shuffle, see
     try:
         # The feeder leads a process group with its workers, so that the trainer can
         # end them together when it stops early; a worker whose feeder is gone would
-        # otherwise wait forever to finish writing a result to it.
-        trainer = os.getppid()
+        # otherwise wait forever to finish writing a result to it. Its parent is the
+        # feeder server, which exits when the trainer does (`_feeders`).
+        server = os.getppid()
+        _forget_server()
         os.setsid()
-        end_with(trainer)
+        end_with(server)
+        # Forked from the server, not the trainer: the sharing strategy is set here.
+        _share_by_name()
         # The parent's intra-op pool does not survive the fork; packing needs none.
         torch.set_num_threads(1)
         # The trainer's thread launches the kernels of every step; the feeders and their
@@ -284,6 +301,40 @@ def _feed(connection, shards, windows, weights, vocabulary, config, shuffle, see
         connection.close()
 
 
+def _forget_server():
+    """Let go of a feeder server this process did not start. The server reads a pipe
+    from the process that started it to the end, and exits there; every process it
+    forks, and every process forked from the one that started it, is handed a copy of
+    the writing end, which would keep the server, and the feeders that end with it,
+    alive after the trainer."""
+    server = forkserver._forkserver
+    if server._forkserver_alive_fd is not None:
+        os.close(server._forkserver_alive_fd)
+    server._forkserver_alive_fd = server._forkserver_address = server._forkserver_pid = None
+
+
+def _feeders():
+    """The context feeders are started in: forked from the feeder server, a process
+    that imported this module and nothing of the trainer's (see the module's notes).
+    The server starts with the first stream and exits when this process does: it
+    reads to the end of a pipe only this process writes to (`_forget_server`), and a
+    feeder ends with it (`end_with`). Preloading this module spares each feeder the
+    imports."""
+    server = forkserver._forkserver
+    if server._forkserver_pid is not None:
+        try:
+            running = os.waitpid(server._forkserver_pid, os.WNOHANG)[0] == 0
+        except ChildProcessError:
+            # The server of a process this one was forked from: start one of its own.
+            running = False
+        if not running:
+            _forget_server()
+    context = multiprocessing.get_context("forkserver")
+    # Never `__main__`, the default: `python -m main` runs its command at import.
+    context.set_forkserver_preload([__name__])
+    return context
+
+
 def stream(shards, vocabulary, config, *, window_shards, shuffle, weights=None):
     """The logical batches of sharded runs, as `batches` yields them, with samples that
     carry no frames. `window_shards` shards are in memory at a time. With workers
@@ -306,7 +357,7 @@ def stream(shards, vocabulary, config, *, window_shards, shuffle, weights=None):
         return
     _share_by_name()
     _release_shared()
-    context = multiprocessing.get_context("fork")
+    context = _feeders()
     windows = shards.window_names(max(1, window_shards // config.loader_feeders), shuffle)
     count = min(config.loader_feeders, len(windows))
     feeders, receivers = [], []

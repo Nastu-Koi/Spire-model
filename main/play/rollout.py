@@ -9,10 +9,12 @@ from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 
+import orjson
 import torch
 
 from main.network.policy import SessionPolicy
 from main.data.index import COMPRESSION
+from main.env.clock import timed
 from main.env.control import CONTROL_VERSION, REWARD_RULE, environment_action, free_reward, is_policy_frame
 from main.env.protocol import CHARACTERS, SCHEMA, ProtocolError, execution_command, fingerprint, segment_key, validate_frame
 from main.encoding.frames import clean_frame
@@ -87,12 +89,14 @@ def climbed(stands):
 def _pack(frame):
     """A frame as a run holds it while it is played: compressed. A run is hundreds of
     frames of tens of kilobytes that differ little; packed, a sampling process holds
-    a run in a few hundred kilobytes instead of tens of megabytes."""
-    return zlib.compress(json.dumps(frame, separators=(",", ":"), allow_nan=False).encode(), 1)
+    a run in a few hundred kilobytes instead of tens of megabytes. The text is
+    orjson's, as the frame's line of a shard holds it (`packed_line`)."""
+    with timed("frame_packing"):
+        return zlib.compress(orjson.dumps(frame), 1)
 
 
 def _unpack(packed):
-    return json.loads(zlib.decompress(packed))
+    return orjson.loads(zlib.decompress(packed))
 
 
 # Stands in a run's text for a packed frame: a string JSON writes as "\u0000<n>",
@@ -100,9 +104,11 @@ def _unpack(packed):
 _FRAME = re.compile(r'"\\u0000(\d+)"')
 
 
-def packed_line(run):
+def packed_line(run, on_policy=None):
     """A run whose frames are still packed (`run(..., packed=True)`) as the line it makes
     in a shard (`index.member`), with the count of its policy macro-actions by phase.
+    `on_policy(index, macro, frame)` is told of every policy macro-action, the
+    `index`-th of the run, with its first step's frame built (`play.digests`).
 
     Built whole, a run's frames are tens of megabytes of objects for a line of under
     a megabyte, and a sampling process keeps the pages of its largest run for as long
@@ -116,13 +122,17 @@ def packed_line(run):
 
     phases = Counter()
     macros = []
-    for macro in run["macros"]:
+    for index, macro in enumerate(run["macros"]):
         if "steps" not in macro:
             macros.append(macro)
             continue
         # One frame built at a time, as `control.policy_macros` reads them.
-        if any(is_policy_frame(_unpack(step["frame"])) for step in macro["steps"]):
+        first = _unpack(macro["steps"][0]["frame"]) if macro["steps"] else None
+        if macro["steps"] and (is_policy_frame(first) or any(is_policy_frame(_unpack(step["frame"]))
+                                                             for step in macro["steps"][1:])):
             phases[macro["phase"]] += 1
+            if on_policy is not None:
+                on_policy(index, macro, first)
         macros.append(dict(macro, steps=[dict(step, frame=stand_in(step["frame"])) for step in macro["steps"]]))
     skeleton = dict(run, macros=macros)
     if "environment_actions" in run:
@@ -234,7 +244,7 @@ class RolloutRunner:
 
     def run(self, engine, character, seed, *, sample=True, journal=None,
             combat_frames=True, resume=None, until_act=None, until_boss=None, run_id=None, group=None,
-            fork=None, packed=False, _policy=None):
+            fork=None, ascension=None, packed=False, _policy=None):
         """Play one run, or a segment of one.
 
         With `resume` (a save a segment stopped at, as `save` below) the run goes on
@@ -250,7 +260,9 @@ class RolloutRunner:
         group of segments it belongs to (`main.play.groups`). With `fork` (`fork_ranks`:
         the segment's place in its group, the group's size, a depth) a sampled segment
         takes its first decisions with a choice by the policy's order instead of a draw,
-        so that the group's segments part there two ways.
+        so that the group's segments part there two ways. `ascension` is the run's
+        (the runner's own without one); a save goes on at the ascension it was
+        written at, which must be the one asked for.
 
         Without `combat_frames` the macro-actions played inside fights keep their
         counts and log-probability but not their frames, which are most of a run.
@@ -258,12 +270,15 @@ class RolloutRunner:
         (`_pack`), for `packed_line` to write without building them again."""
         if character not in CHARACTERS:
             raise ValueError("Unknown character")
+        ascension = self.ascension if ascension is None else ascension
+        if type(ascension) is not int or not 0 <= ascension <= 10:
+            raise ValueError("Ascension must be an integer from 0 to 10")
         ranks = fork_ranks(fork) if sample and fork else []
         trace = {
             "schema": SCHEMA,
             "character": character,
             "seed": str(seed),
-            "ascension": self.ascension,
+            "ascension": ascension,
             "policy_version": self.version,
             "policy_digest": self.digest,
             "precision": self.precision,
@@ -321,9 +336,9 @@ class RolloutRunner:
                 # a sampling process must not even ask what its device supports.
                 nullcontext() if _policy else precision_context(self.model, self.precision),
             ):
-                frame = engine.reset(character, seed, self.ascension) if resume is None else _resumed(engine, resume)
+                frame = engine.reset(character, seed, ascension) if resume is None else _resumed(engine, resume)
                 require_history_version(frame.get("contract", {}).get("public_history_version"))
-                if frame.get("contract", {}).get("fixed_ascension") != self.ascension:
+                if frame.get("contract", {}).get("fixed_ascension") != ascension:
                     raise ProtocolError("Engine started a different ascension than requested")
                 trace["run_id"] = run_id or frame.get("routing", {}).get(
                     "episode_id", fingerprint([character, seed])
@@ -371,7 +386,8 @@ class RolloutRunner:
                     if steps >= self.max_steps:
                         trace["error"] = "unresolved_step_limit"
                         break
-                    frame = clean_frame(frame)
+                    with timed("cleaning"):
+                        frame = clean_frame(frame)
                     act, floor, length = stand(frame)
                     if until_act is not None and act is not None and act >= until_act:
                         # The first decision of the act the segment stops at belongs to
@@ -417,6 +433,9 @@ class RolloutRunner:
                         step["explored"] = True
                     if getattr(choice, "forked", False):
                         step["forked"] = True
+                    if branching and getattr(choice, "log_probs", None) is not None:
+                        # The distribution it was drawn from: the update's KL may take it for its reference's.
+                        step["log_probs"] = choice.log_probs
                     if branching:
                         if active_macro is None:
                             active_macro = {
@@ -533,8 +552,8 @@ def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, jour
     """One job of a round: a run and, as the layout says (`FULL_RUNS`,
     `SUMMARY_RUNS`), its journal and its run file. With `segment` the job is
     (character, spec, None): a segment of a run (`main.play.groups`), `spec` naming
-    its seed, `run_id`, `group`, `until_act` or `until_boss` and, to go on from a save,
-    the file the save is in (`resume`). Returns the run; one that no file of its own is written for
+    its seed, `run_id`, `group`, `until_act` or `until_boss`, its `ascension` if not
+    the runner's and, to go on from a save, the file the save is in (`resume`). Returns the run; one that no file of its own is written for
     keeps its frames packed, for the line it makes in a shard (`packed_line`)."""
     if segment:
         from main.play.groups import read_save
@@ -544,7 +563,7 @@ def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, jour
             engine, character, spec["seed"], sample=sample, combat_frames=combat_frames,
             resume=read_save(spec["resume"]) if spec.get("resume") else None,
             until_act=spec.get("until_act"), until_boss=spec.get("until_boss"), run_id=spec["run_id"],
-            group=spec["group"], fork=spec.get("fork"),
+            group=spec["group"], fork=spec.get("fork"), ascension=spec.get("ascension"),
             packed=not trajectory, _policy=policy)
     character, seed, path = job
     trace = runner.run(

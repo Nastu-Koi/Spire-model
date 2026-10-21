@@ -92,11 +92,11 @@ python -m main --device cuda bootstrap --data data/bootstrap data/a10-battles \
 ```bash
 # seeds.json 按五个角色各列等量种子；评估种子须与训练隔离
 python -m main --device cuda evaluate --checkpoint <检查点> --seeds seeds.json --output runs/eval-x \
-  --workers 32 --processes 32 --precision fp32    # 不给 --precision 时按检查点的精度（bf16）
+  --precision fp32    # 不给 --precision 时按检查点的精度（bf16）
 python -m main compare runs/eval-x runs/eval-y --head 60      # 配对符号检验
 ```
 
-评估默认按检查点训练时的难度对局，`--ascension 10` 改在 A10 评估；`--claim-rewards` 让奖励界面上的金币、遗物和有空位的药水由固定控制器代领（示范数据按这个假设重建），默认不开，领奖是策略决策。`--workers` 是同时运行的引擎数（每个引擎配一个采样进程），按内存定，资源见 [play](docs/implementation/play.md#采样进程分工)。报告的格式见 [play](docs/implementation/play.md#评估报告)。
+评估默认按检查点训练时的难度对局，`--ascension 10` 改在 A10 评估；`--claim-rewards` 让奖励界面上的金币、遗物和有空位的药水由固定控制器代领（示范数据按这个假设重建），默认不开，领奖是策略决策。`--workers` 是同时运行的引擎数（每个引擎配一个采样进程），默认 64（训练机上最快），内存不够时调小，资源见 [play](docs/implementation/play.md#采样进程分工)。报告的格式见 [play](docs/implementation/play.md#评估报告)。
 
 ## 迭代
 
@@ -105,12 +105,12 @@ python -m main --device cuda iterate --kl 0.1 --learning-rates configs/learning-
   --checkpoint <起点检查点> --config configs/rtxpro6000.json \
   --output runs/iterate-v1 --iterations 6 --runs-per-character 25 \
   --boundary-acts 2 3 --boundary-bosses 3 --group-n 4 --group-m 4 6 4 --min-entropy 0.45 \
-  --workers 48 --engine-root <引擎目录> \
+  --engine-root <引擎目录> \
   --exclude-seeds <开发集与测试集种子文件…> \
   --eval-seeds <开发集种子文件> --eval-runs-per-character 100 --evaluate-every 2
 ```
 
-`--explore-potions p` 让采样时战斗里有药可用的决策以概率 p 改为用药（探索步，见 [architecture](docs/architecture.md#用药探索)），给两个数时分别是普通战和精英／Boss 战的率，三个数则按普通、精英、Boss；默认 0。重跑同一条命令即断点续跑：`--checkpoint` 与 `--seed-root` 是运行身份（记在输出目录的 `iterate.json`），不能换，其余参数可以改、从剩下的步骤生效。每次迭代：按切点分波采样幕组（`--boundary-acts` 幕开头、`--boundary-bosses` Boss 入场；`--runs-per-character` 是每角色的种子数，`--group-n`、`--group-m` 是每个起点的段数）、算各波的优势、一遍更新、按间隔评估、清理。一遍默认把每一波各看一次；`--wave-shares 1 1 1` 这类相对数改各波在批里的份额，份额就是该波在梯度里的占比。更新是裁剪目标（`--clip`、`--kl`），KL 的参考每 `--reference-every k` 次迭代换成当时的策略（默认 k 等于 `--evaluate-every`，0 则固定为 `--checkpoint`）。`--learning-rates <json>`（`bootstrap` 也收）给这次运行自己的四组学习率，不给时沿用检查点的。`--fork-depth 2` 让每段开头两个有选择的决策按段在组里的序号取策略排第一或第二的候选，组在那里对半分开（分叉步，见 [architecture](docs/architecture.md#幕组的回报与优势)）。`--batch 2048` 让一个优化器步累加四个 512 的加载批（必须是 profile 逻辑批的整数倍），学习率不变；`--eval-precision fp32` 让评估关掉 bf16 autocast，采样不受影响。步骤、参数、存储与资源见 [learn](docs/implementation/learn.md#迭代驱动)。检查点直接写在 `checkpoints/<运行>/`（不入库，`checkpoints/INDEX.md` 记来源、内部版本与评估），清理步只留评估过的、待评估的和下一次更新的 KL 参考；`runs/<运行>/` 只留运行记录。不给 `--eval-seeds` 就不评估；`--min-entropy` 触发时驱动在这次迭代完成后停下。
+`--explore-potions p` 让采样时战斗里有药可用的决策以概率 p 改为用药（探索步，见 [architecture](docs/architecture.md#用药探索)），给两个数时分别是普通战和精英／Boss 战的率，三个数则按普通、精英、Boss；默认 0。重跑同一条命令即断点续跑：`--checkpoint` 与 `--seed-root` 是运行身份（记在输出目录的 `iterate.json`），不能换，其余参数可以改、从剩下的步骤生效。每次迭代：按切点分波采样幕组（`--boundary-acts` 幕开头、`--boundary-bosses` Boss 入场；`--runs-per-character` 是每角色的种子数，`--group-n`、`--group-m` 是每个起点的段数）、算各波的优势、一遍更新、按间隔评估、清理。一遍默认把每一波各看一次；`--wave-shares 1 1 1` 这类相对数改各波在批里的份额，份额就是该波在梯度里的占比。更新是裁剪目标（`--clip`、`--kl`），KL 的参考每 `--reference-every k` 次迭代换成当时的策略（默认 k 等于 `--evaluate-every`，0 则固定为 `--checkpoint`）。`--learning-rates <json>`（`bootstrap` 也收）给这次运行自己的四组学习率，不给时沿用检查点的。`--fork-depth 2` 让每段开头两个有选择的决策按段在组里的序号取策略排第一或第二的候选，组在那里对半分开（分叉步，见 [architecture](docs/architecture.md#幕组的回报与优势)）。`--ascensions 0 5` 让每个种子的组在 A0–A5 里分到一个难度（难度窗口，续局同难度），评估仍按检查点的难度。`--batch 2048` 让一个优化器步累加四个 512 的加载批（必须是 profile 逻辑批的整数倍），学习率不变；`--eval-precision fp32` 让评估关掉 bf16 autocast，采样不受影响。步骤、参数、存储与资源见 [learn](docs/implementation/learn.md#迭代驱动)。检查点直接写在 `checkpoints/<运行>/`（不入库，`checkpoints/INDEX.md` 记来源、内部版本与评估），清理步只留评估过的、待评估的和下一次更新的 KL 参考；`runs/<运行>/` 只留运行记录。不给 `--eval-seeds` 就不评估；`--min-entropy` 触发时驱动在这次迭代完成后停下。
 
 ## 其它命令
 

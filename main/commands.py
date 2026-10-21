@@ -370,7 +370,7 @@ def run_iterate(args, runtime):
         max_steps=args.max_steps, engine_root=args.engine_root, config=args.config,
         wave_shares=args.wave_shares,
         boundaries=args.boundary_acts, bosses=args.boundary_bosses, group_n=args.group_n, group_m=args.group_m,
-        fork_depth=args.fork_depth,
+        fork_depth=args.fork_depth, ascensions=args.ascensions,
         min_entropy=args.min_entropy, clip=args.clip, kl=args.kl, reference_every=args.reference_every,
         learning_rates=args.learning_rates, explore_potions=args.explore_potions,
         eval_precision=args.eval_precision, batch=args.batch,

@@ -6,6 +6,7 @@ import pickle
 from copy import deepcopy
 from dataclasses import fields
 
+import numpy as np
 import pytest
 import torch
 
@@ -23,7 +24,8 @@ from main.play.testing import SyntheticEngine, demonstration
 from main.tests.test_encoding import build, duel, logits, map_frame
 from main.play.evaluation import climb, evaluate_runs
 from main.learn.trainer import Learner
-from main.play.wire import GROUPED, pack, size, unpack
+from main.play import wire
+from main.play.wire import GROUPED, Sent, pack, size, tables, unpack
 
 
 def setup_round(temperatures=None):
@@ -118,53 +120,143 @@ FRAMES = [map_frame(), duel("enemy:0"), map_frame(("map:1:2", "Elite")), duel("e
           map_frame(("map:0:2", "Shop"))]
 
 
-def test_a_pack_crosses_to_the_collecting_process_with_its_programs_regrouped():
-    model, vocabulary = build(FRAMES)
-    for frames in (FRAMES[:1], FRAMES[1:2], FRAMES):
-        decisions = prepare_decisions(vocabulary, frames)[1]
-        message = pickle.loads(pickle.dumps(pack(decisions)))
-        arrived, unregistered = unpack([message], "cpu")
-        assert size(message) == len(frames) and unregistered == []
-        # Everything but the program groups arrives as it was packed.
-        assert same(arrived.masks, decisions.masks)
-        assert all(same(getattr(arrived.batch, f.name), getattr(decisions.batch, f.name))
-                   for f in fields(arrived.batch) if f.name != "programs")
-        # The programs are the same ones in fewer groups, each still at its place.
-        groups = decisions.batch.programs, arrived.batch.programs
-        assert len(groups[1]) <= min(len(groups[0]), len(GROUPED))
-        for name in ("lengths", "slots", "binding_sources", "binding_roles"):
-            assert all(sorted(torch.cat([getattr(g, name) for g in a]).tolist())
-                       == sorted(torch.cat([getattr(g, name) for g in groups[0]]).tolist()) for a in groups)
-        # A group holds the fields of its real nodes only, each at its row of the padded layout.
-        for group in [*groups[0], *groups[1]]:
-            rows = torch.cat([torch.arange(n) + p * group.length for p, n in enumerate(group.lengths.tolist())])
-            assert same(group.nodes, rows) and len(group.fields.ids) == len(rows)
-        with torch.no_grad():
-            for a, b in zip(model.choose(arrived, sample=False), model.choose(decisions, sample=False)):
-                assert torch.allclose(a.float(), b.float(), atol=1e-5)
+def crossed(model, *packs):
+    """Decisions as the collecting process receives them in one pass: each
+    (observations, decisions) packed by a sampling process of its own at the start of a
+    round, through a pickle as a pipe sends it."""
+    messages = [pickle.loads(pickle.dumps(pack(decisions, observations, Sent(index))))
+                for index, (observations, decisions) in enumerate(packs)]
+    return unpack(messages, tables(model, len(packs)))
+
+
+def assert_chosen_alike(model, arrived, decisions):
+    """The table pass encodes and chooses as the pass of the decisions' own batch."""
+    with torch.no_grad():
+        assert torch.allclose(model._entities(arrived.batch), model._entities(decisions.batch), atol=1e-5)
+        found, expected = model.choose(arrived, sample=False), model.choose(decisions, sample=False)
+    assert found[0].tolist() == expected[0].tolist()
+    assert torch.allclose(found[1], expected[1], atol=1e-5)
 
 
 def test_packs_of_several_processes_are_chosen_for_as_one_pack():
     model, vocabulary = build(FRAMES)
     together = prepare_decisions(vocabulary, FRAMES)[1]
-    # As the collecting process receives them: packed by different processes.
-    messages = [pack(prepare_decisions(vocabulary, part)[1])
-                for part in (FRAMES[:1], FRAMES[1:3], FRAMES[3:])]
-    joined, _ = unpack(messages, "cpu")
+    parts = [prepare_decisions(vocabulary, part) for part in (FRAMES[:1], FRAMES[1:3], FRAMES[3:])]
+    joined, unregistered = crossed(model, *parts)
+    assert unregistered == [] and joined.batch.program_count == 0
     assert joined.masks.shape == together.masks.shape
-    assert same(joined.batch.lengths, together.batch.lengths)
-    with torch.no_grad():
-        expected = model.choose(together, sample=False)
-        found = model.choose(joined, sample=False)
-    assert found[0].tolist() == expected[0].tolist()
-    assert torch.allclose(found[1], expected[1], atol=1e-5)
+    assert same(joined.batch.lengths, together.batch.lengths) and same(joined.batch.relations, together.batch.relations)
+    # Each process sent all it holds, its programs regrouped into few groups of their
+    # real nodes, each at its row of the padded layout.
+    assert len(joined.batch.new_token_rows) == len(joined.batch.token_rows.unique())
+    assert len(joined.batch.programs) <= len(GROUPED)
+    for group in joined.batch.programs:
+        rows = torch.cat([torch.arange(n) + p * group.length for p, n in enumerate(group.lengths.tolist())])
+        assert same(group.nodes, rows) and len(group.fields.ids) == len(rows)
+    assert [size(pack(d, o, Sent(0))) for o, d in parts] == [1, 2, 2]
+    assert_chosen_alike(model, joined, together)
+
+
+def test_a_process_sends_each_token_and_program_once_a_round():
+    model, vocabulary = build(FRAMES)
+    sent, table = Sent(0), tables(model, 1)
+    sent_tokens, sent_programs = [], []
+    for frames in (FRAMES[:2], FRAMES[1:5], FRAMES):
+        observations, decisions = prepare_decisions(vocabulary, frames)
+        arrived, _ = unpack([pack(decisions, observations, sent)], table)
+        sent_tokens.append(len(arrived.batch.new_token_rows))
+        sent_programs.append(sum(len(group.lengths) for group in arrived.batch.programs))
+        # What was sent before is read from the tables, what is new is written to them.
+        assert_chosen_alike(model, arrived, decisions)
+    # The second pass shows a map the first did not (in its frontier's program) and
+    # sends that alone; the last shows only what was sent: nothing travels but rows.
+    assert sent_tokens[0] > 0 and sent_programs[0] > sent_programs[1] > 0
+    assert sent_tokens[2] == 0 and sent_programs[2] == 0
+
+
+def bound_duel(hp):
+    """A duel whose card's program binds the enemy it hits, of `hp` hit points."""
+    frame = duel("enemy:0")
+    for entity in frame["public"]["entities"]:
+        if entity["ref"] == "enemy:0":
+            entity["hp"] = hp
+        if entity["ref"] == "card:0":
+            entity["semantic_program"] = {"op": "DAMAGE", "amount": 6,
+                                          "target": {"kind": "entity", "ref": "enemy:0"}}
+    return frame
+
+
+def test_a_bound_program_is_sent_again_when_what_it_binds_changes():
+    frames = [bound_duel(40), bound_duel(40), bound_duel(30)]
+    model, vocabulary = build(frames)
+    assert any(effect.bindings for effect in observation(frames[0]).effects)
+    sent, table = Sent(0), tables(model, 1)
+    sent_programs = []
+    for frame in frames:
+        observations, decisions = prepare_decisions(vocabulary, [frame])
+        arrived, _ = unpack([pack(decisions, observations, sent)], table)
+        sent_programs.append(sum(len(group.lengths) for group in arrived.batch.programs))
+        assert_chosen_alike(model, arrived, decisions)
+    assert sent_programs[0] > 0 and sent_programs[1] == 0
+    # The enemy's hit points changed: the program that binds it, and nothing else, again.
+    assert sent_programs[2] == 1
+
+
+def test_a_process_that_fills_its_rows_starts_over_without_spoiling_what_it_sent(monkeypatch):
+    """Rows are filled half by half; a pass that changes halves between two packs of one
+    process reads the rows the first pack named as they were."""
+    monkeypatch.setattr(wire, "TOKEN_ROWS", 52)
+    monkeypatch.setattr(wire, "PROGRAM_ROWS", 12)
+    frames = FRAMES + [bound_duel(hp) for hp in range(40, 0, -4)]
+    model, vocabulary = build(frames)
+    sent, table = Sent(1), tables(model, 2)
+    sides = set()
+    for start in range(12):
+        # Two engines of one process: two packs in one message.
+        chosen = [frames[(start + k) % len(frames)] for k in (0, 3)]
+        parts = [prepare_decisions(vocabulary, [frame]) for frame in chosen]
+        messages = []
+        for observations, decisions in parts:
+            messages.append(pack(decisions, observations, sent))
+            sides.add((sent.tokens.side, sent.programs.side))
+        arrived, _ = unpack(messages, table)
+        assert_chosen_alike(model, arrived, prepare_decisions(vocabulary, chosen)[1])
+    assert {tokens for tokens, _ in sides} == {programs for _, programs in sides} == {0, 1}
+    observations, decisions = prepare_decisions(vocabulary, frames)
+    with pytest.raises(ValueError, match="half"):
+        pack(decisions, observations, Sent(0))
+
+
+def test_a_pack_of_fields_left_as_rows_is_the_pack_of_their_tensors(monkeypatch):
+    """A sampling process makes tensors of only the fields it sends (`tensors=False`):
+    what it sends is the same, names never registered and a change of halves included."""
+    monkeypatch.setattr(wire, "TOKEN_ROWS", 52)
+    monkeypatch.setattr(wire, "PROGRAM_ROWS", 12)
+    frames = FRAMES + [bound_duel(hp) for hp in range(40, 0, -4)]
+    _, vocabulary = build(frames[:1])
+    sides = {True: set(), False: set()}
+    met = False
+    eager, deferred = (deepcopy(vocabulary), Sent(1)), (deepcopy(vocabulary), Sent(1))
+    for frame in frames * 2:
+        packs = []
+        for tensors, (known, sent) in ((True, eager), (False, deferred)):
+            observations, decisions = prepare_decisions(known, [frame], tensors=tensors)
+            packs.append(pack(decisions, observations, sent))
+            sides[tensors].add(sent.tokens.side)
+        (header, integers, numbers, names), (header_, integers_, numbers_, names_) = packs
+        assert np.array_equal(header, header_) and np.array_equal(integers, integers_)
+        assert integers.dtype == integers_.dtype and numbers.dtype == numbers_.dtype
+        assert np.array_equal(numbers, numbers_) and names == names_
+        met |= bool(names)
+    assert met and sides[True] == sides[False] == {0, 1}
 
 
 def test_names_the_vocabulary_never_registered_reach_the_collecting_process():
-    _, vocabulary = build(FRAMES[:1])
-    messages = [pack(prepare_decisions(vocabulary, [frame])[1]) for frame in FRAMES[:2]]
+    model, vocabulary = build(FRAMES[:1])
+    parts = [prepare_decisions(vocabulary, [frame]) for frame in FRAMES[:2]]
+    messages = [pack(decisions, observations, Sent(index)) for index, (observations, decisions) in enumerate(parts)]
     assert messages[0][3] == [] and messages[1][3]
-    assert unpack(messages, "cpu")[1] == sorted(messages[1][3])
+    assert unpack(messages, tables(model, 2))[1] == sorted(messages[1][3])
 
 
 def test_each_decision_is_drawn_at_its_own_temperature():
@@ -210,6 +302,19 @@ def test_a_round_sampled_in_processes_replays_as_it_was_stored(tmp_path):
     parts = sum(timing[key] for key in ("waiting_seconds", "unpacking_seconds", "choosing_seconds", "sending_seconds",
                                         "other_seconds"))
     assert 0 < timing["seconds"] and parts == pytest.approx(timing["seconds"], abs=0.01)
+    # Each stage of a pass, and where the sampling processes' time went, summed over
+    # them: every run played and handed over, every decision with a choice observed,
+    # prepared, packed and waited for, every frame played cleaned.
+    assert all(timing["collecting"][name]["count"] == timing["passes"] for name in (
+        "network_encoder", "network_layout", "network_layers", "network_heads", "readback"))
+    sampling = timing["sampling"]
+    assert sampling["playing"]["count"] == sampling["handing_over"]["count"] == 20
+    assert all(sampling[name]["count"] == timing["decisions"]
+               for name in ("observation", "preparing", "wire_packing", "choice_wait"))
+    assert sampling["cleaning"]["count"] >= timing["decisions"]
+    assert sampling["collector_wait"]["count"] >= timing["passes"]
+    assert sampling["playing"]["ms_per_decision"] == pytest.approx(
+        1000 * sampling["playing"]["seconds"] / timing["decisions"], abs=1e-2)
     assert [run["status"] for run in runs] == ["complete"] * 20
     # Every job is announced once as it ends, by its index, with the run's summary.
     assert sorted(done) == [(index, run["character"], "complete") for index, run in enumerate(runs)]
@@ -448,9 +553,12 @@ def test_the_shard_line_of_a_run_goes_to_on_run_and_is_not_kept(tmp_path):
     jobs = assign(seeds, tmp_path / "round")
     seen = []
     with samplers(runner, engines=5, processes=3) as pool:
-        played = pool.collect(runner, jobs, sample=True, on_run=lambda index, run: seen.append("member" in run),
+        played = pool.collect(runner, jobs, sample=True,
+                              on_run=lambda index, run: seen.append(("member" in run, run.get("digest"))),
                               layout=dict(trajectory=False, journal=False, combat_frames=False))
-    assert len(seen) == len(jobs) and all(seen)
+    assert len(seen) == len(jobs) and all(member for member, _ in seen)
+    # These frames show no player's act and floor: no digest, the advantages read the shards.
+    assert all(digest is None for _, digest in seen)
     assert all(run["status"] == "complete" and "member" not in run for run in played)
 
 
@@ -460,7 +568,7 @@ def test_the_graphed_global_layers_choose_as_the_eager_ones_do():
     within the padding's rounding. On the CPU the switch does nothing."""
     frames = [map_frame(), duel("enemy:0"), map_frame(("map:1:2", "Elite"))]
     model, vocabulary = build(frames)
-    _, decisions = prepare_decisions(vocabulary, frames)
+    observations, decisions = prepare_decisions(vocabulary, frames)
     model.eval()
     with torch.no_grad():
         eager = model.choose(decisions, sample=False)
@@ -471,7 +579,7 @@ def test_the_graphed_global_layers_choose_as_the_eager_ones_do():
         assert not model._graphs.graphs  # nothing is captured on the CPU
         if torch.cuda.is_available():
             model.to("cuda")
-            cuda, _ = unpack([pack(decisions)], "cuda")
+            cuda, _ = crossed(model, (observations, decisions))
             model.graphed(False)
             plain = model.choose(cuda, sample=False)
             with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -543,7 +651,7 @@ def verb_of(step):
 def test_a_decision_marked_to_explore_is_drawn_among_its_marked_slots_with_the_policys_log_probability():
     frames = [map_frame(), duel("enemy:0"), map_frame(("map:1:2", "Elite"))]
     model, vocabulary = build(frames)
-    _, decisions = prepare_decisions(vocabulary, frames, restrict=[None, ["play:enemy:1"], None])
+    observations, decisions = prepare_decisions(vocabulary, frames, restrict=[None, ["play:enemy:1"], None])
     slot = observation(frames[1]).slot_refs.index("play:enemy:1")
     assert decisions.explore[1].nonzero().tolist() == [[slot]] and not decisions.explore[[0, 2]].any()
     expected = logits(model, vocabulary, frames)[1]
@@ -560,8 +668,8 @@ def test_a_decision_marked_to_explore_is_drawn_among_its_marked_slots_with_the_p
         # Greedy choices ignore the marks.
         assert int(model.choose(decisions, sample=False)[0][1]) == int(expected.argmax())
     # The marks cross to the collecting process with the pack.
-    crossed, _ = unpack([pack(decisions)], "cpu")
-    assert same(crossed.explore, decisions.explore) and same(crossed.masks, decisions.masks)
+    arrived, _ = crossed(model, (observations, decisions))
+    assert same(arrived.explore, decisions.explore) and same(arrived.masks, decisions.masks)
     with pytest.raises(ProtocolError, match="restriction"):
         prepare_decisions(vocabulary, frames, restrict=[None, ["play:enemy:9"], None])
 
@@ -569,7 +677,7 @@ def test_a_decision_marked_to_explore_is_drawn_among_its_marked_slots_with_the_p
 def test_a_decision_marked_with_a_rank_takes_the_slot_of_that_rank_with_the_policys_log_probability():
     frames = [map_frame(), duel("enemy:0"), map_frame(("map:1:2", "Elite"))]
     model, vocabulary = build(frames)
-    _, decisions = prepare_decisions(vocabulary, frames, rank=[1, None, 0])
+    observations, decisions = prepare_decisions(vocabulary, frames, rank=[1, None, 0])
     assert decisions.rank.tolist() == [1, -1, 0]
     expected = logits(model, vocabulary, frames)
     legal = [observation(frame).slot_refs for frame in frames]
@@ -590,8 +698,8 @@ def test_a_decision_marked_with_a_rank_takes_the_slot_of_that_rank_with_the_poli
         assert int(model.choose(decisions, sample=False)[0][0]) == int(expected[0].argmax())
     assert len(legal[0]) >= 2
     # The ranks cross to the collecting process with the pack, beside other packs.
-    crossed, _ = unpack([pack(decisions), pack(prepare_decisions(vocabulary, frames[:1])[1])], "cpu")
-    assert crossed.rank.tolist() == [1, -1, 0, -1]
+    arrived, _ = crossed(model, (observations, decisions), prepare_decisions(vocabulary, frames[:1]))
+    assert arrived.rank.tolist() == [1, -1, 0, -1]
     # The single-process path takes the same slot.
     from main.network.policy import SessionPolicy
     for row, rank in ((0, 1), (2, 0)):
@@ -628,6 +736,7 @@ def test_a_run_explores_potion_use_at_the_rate_asked_and_records_the_policys_log
     from main.data.shards import samples as training_samples
     flagged = [item.explored for item in training_samples([run])]
     assert flagged[0] and not any(flagged[1:])
+    assert not any(item.forked for item in training_samples([run]))
     # Outside sampling, or at rate 0, nothing is explored and nothing is marked.
     greedy = exploring.run(drinking(), "Ironclad", "greedy", sample=False)
     assert greedy["explore_potions"] is None and not explored_steps(greedy)
@@ -674,7 +783,8 @@ def test_a_segment_forks_its_first_decisions_by_its_place_in_the_group(tmp_path)
     # Recorded with the policy's own log-probability, as a draw would be.
     assert replayed_gap(model, vocabulary, runs) < 1e-4
     from main.data.shards import samples as training_samples
-    assert training_samples([runs[2]])[0].explored
+    forked_sample = training_samples([runs[2]])[0]
+    assert forked_sample.forked and not forked_sample.explored
     # A depth of two parts each half again; greedy runs and runs without a fork never fork.
     deeper = [runner.run(engine(), "Ironclad", "fork", fork=dict(index=j, size=4, depth=2)) for j in range(4)]
     assert [[rank_of(model, vocabulary, step) for step in branching_steps(run)[:2]] for run in deeper] == [

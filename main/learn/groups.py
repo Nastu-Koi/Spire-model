@@ -25,6 +25,7 @@ Written beside each wave's shards as a round's advantages are
 fitted apart: their returns mean different things.
 """
 
+import gc
 import os
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
@@ -36,16 +37,14 @@ import numpy as np
 
 from main.data.shards import RunShards
 from main.env.control import policy_macros
-from main.env.protocol import fingerprint
 from main.learn.advantage import header, write
-from main.learn.features import NAMES, summary, where
+from main.learn.features import NAMES, summary
+from main.play import digests
 from main.play.groups import groups_summary
 
 KIND = "act-groups"
 RIDGE = 1.0
 RETURNS = {"win": 1.0, "loss": -1.0}
-# Processes that read a wave's shards: a decision's frame is fingerprinted once.
-PROCESSES = 8
 
 
 @dataclass(slots=True)
@@ -65,44 +64,77 @@ class Segment:
     character: str
     outcome: str
     decisions: list
+    ascension: int | None = None
 
 
-def frame_key(frame):
-    """What makes two frames the same decision: the public state and the candidates."""
-    return fingerprint({"public": frame["public"], "legal": frame["legal"]})
-
-
-def _shard_segments(shards, names):
+def _shard_segments(task):
+    """The segments of one shard (`task` is the shard's part of the wave's data and
+    its name), with what the advantages need of each decision and nothing else of
+    its frames, as a digest has it (`play.digests`): a run at a time, so that a
+    reader holds one decoded run."""
+    shards, name = task
     found = []
-    for run in shards.read(names):
+    for run in shards.runs([name]):
         place = {id(macro): index for index, macro in enumerate(run["macros"])}
-        decisions = []
-        for macro in policy_macros(run):
-            frame = macro["steps"][0]["frame"]
-            act, floor, state = where(frame)
-            decisions.append(Decision(
-                place[id(macro)], frame_key(frame), tuple(step["candidate_ref"] for step in macro["steps"]),
-                summary(run["character"], act, floor, state, macro.get("fight") is not None),
-                any(step.get("explored") for step in macro["steps"]),
-                any(step.get("forked") for step in macro["steps"])))
-        found.append(Segment(run["run_id"], run["group"], run["character"], run["outcome"], decisions))
+        found.append(_digested(dict(run, decisions=[
+            digests.decision(place[id(macro)], macro, macro["steps"][0]["frame"]) for macro in policy_macros(run)])))
     return found
 
 
-def segments(directory, processes=None):
-    """The segments of a wave, with what the advantages need of each decision and
-    nothing else of its frames: a shard at a time, `processes` shards abreast."""
-    shards = RunShards(directory)
-    names = [name for window in shards.window_names(shards=1) for name in window]
+def _digested(entry):
+    """A segment as its wave's digest has it (`play.digests`)."""
+    character = entry["character"]
+    decisions = []
+    for index, key, action, act, floor, *rest in entry["decisions"]:
+        *state, fight, explored, forked = rest
+        decisions.append(Decision(index, key, tuple(action),
+                                  summary(character, act, floor, dict(zip(digests.STATE, state)), fight),
+                                  explored, forked))
+    return Segment(entry["run_id"], entry["group"], character, entry["outcome"], decisions, entry.get("ascension"))
+
+
+def read_waves(directory, waves, processes=None):
+    """{wave: its segments, in the order of its shards} of a round's `waves`. A wave
+    whose digest (`play.digests`) holds every segment of its index is read from it.
+    The others are read from their shards, which is decoding every frame they hold:
+    their shards are read `processes` abreast (half the machine's CPUs by default: its
+    cores, beyond which the decoding gains little and every worker holds a decoded
+    run), each by a worker handed the index rows of its own shard alone."""
+    tasks, found = [], {}
+    for wave in waves:
+        shards = RunShards(Path(directory) / wave)
+        rows = sorted(shards.rows, key=lambda row: (row["shard"], row["line"]))
+        path = Path(directory) / wave / digests.FILE
+        # A line at a time, kept only as the segment it makes: the later line of a run stands.
+        digested = {entry["run_id"]: _digested(entry) for entry in digests.entries(path)} if path.is_file() else {}
+        if all(row["run_id"] in digested for row in rows):
+            found[wave] = [digested[row["run_id"]] for row in rows]
+            continue
+        found[wave] = []
+        by_shard = defaultdict(list)
+        for row in rows:
+            by_shard[row["shard"]].append(row)
+        tasks += [(wave, RunShards(shards.directories, part), name) for name, part in sorted(by_shard.items())]
     if processes is None:
-        processes = min(PROCESSES, os.cpu_count() or 1, len(names))
-    if processes <= 1:
-        for name in names:
-            yield from _shard_segments(shards, [name])
-        return
-    with ProcessPoolExecutor(processes, mp_context=get_context("fork")) as pool:
-        for found in pool.map(_shard_segments, [shards] * len(names), [[name] for name in names]):
-            yield from found
+        processes = max(1, (os.cpu_count() or 1) // 2)
+    if min(processes, len(tasks)) <= 1:
+        for wave, shards, name in tasks:
+            found[wave] += _shard_segments((shards, name))
+        return found
+    # A collection in a worker would write to every object it inherits from the
+    # driver and so copy it: what exists now is set aside first.
+    thawed = not gc.get_freeze_count()
+    gc.collect()
+    gc.freeze()
+    try:
+        with ProcessPoolExecutor(min(processes, len(tasks)), mp_context=get_context("fork")) as pool:
+            read = pool.map(_shard_segments, [(shards, name) for _, shards, name in tasks])
+            for (wave, _, _), segments in zip(tasks, read):
+                found[wave] += segments
+    finally:
+        if thawed:
+            gc.unfreeze()
+    return found
 
 
 def returns(waves):
@@ -211,6 +243,7 @@ def wave_advantages(wave_segments, table, ridge=RIDGE):
     weights, r2, fitted = fit(groups, table, ridge)
     counts, runs = Counter(), {}
     explored, forked = [], []  # the advantages of the explored and of the forked decisions
+    explored_at = defaultdict(list)  # the explored decisions' advantages by ascension
     prefix = {}
     for members in groups.values():
         found, node_counts = tree(members, table)
@@ -233,6 +266,7 @@ def wave_advantages(wave_segments, table, ridge=RIDGE):
                 entries.append((decision.index, value, advantage))
                 if decision.explored:
                     explored.append(advantage)
+                    explored_at[segment.ascension].append(advantage)
                 if decision.forked:
                     forked.append(advantage)
             runs[segment.run_id] = entries
@@ -252,8 +286,27 @@ def wave_advantages(wave_segments, table, ridge=RIDGE):
         # what they tried paid off on average; the signed counts how often.
         explored=signed(explored),
         # What forking taught: its decisions stand on the tree, each half against the other.
-        forked=signed(forked))
+        forked=signed(forked),
+        # The same by ascension: a group is at one (`main.play.groups`).
+        by_ascension=by_ascension(groups, table, explored_at))
     return runs, stats
+
+
+def by_ascension(groups, table, explored_at):
+    """Each ascension's groups, how many are uniform, their mean return and the
+    advantages of their explored decisions."""
+    levels = defaultdict(list)
+    for members in groups.values():
+        levels[members[0].ascension].append(members)
+    found = {}
+    for level, groups_at in sorted(levels.items(), key=lambda item: str(item[0])):
+        returns = [table[s.run_id] for members in groups_at for s in members]
+        found[str(level)] = dict(
+            groups=len(groups_at), segments=len(returns),
+            uniform_groups=sum(len({table[s.run_id] for s in members}) == 1 for members in groups_at),
+            return_mean=round(sum(returns) / len(returns), 5) if returns else None,
+            explored=signed(explored_at.get(level, [])))
+    return found
 
 
 def signed(values):
@@ -277,7 +330,7 @@ def advantages(directory, ridge=RIDGE, processes=None):
     if all(found[wave] is not None and all(found[wave].get(key) == value for key, value in identity.items())
            for wave in summary_["waves"]):
         return found
-    waves = [(wave, list(segments(directory / wave, processes))) for wave in summary_["waves"]]
+    waves = list(read_waves(directory, summary_["waves"], processes).items())
     table = returns(waves)
     written = {}
     for wave, wave_segments in waves:

@@ -1,13 +1,15 @@
 """Observation and encoder properties: field binding, map compression, relations, batching."""
 
 import copy
+import json
 
 import torch
 
 from main.network.config import ModelConfig
 from main.network.model import PolicyNetwork
 from main.encoding.batch import Fields
-from main.encoding.fields import fields_of
+from main.encoding.fields import entity_fields, fields_of, row_digest
+from main.encoding.programs import effect_tree
 from main.encoding.representation import observation
 from main.encoding.vocabulary import Vocabulary
 
@@ -79,6 +81,19 @@ def test_numbers_are_bound_to_their_fields():
         a, swapped, same = encoder.fields(Fields.pack(rows, row_vocabulary(rows)))
     assert torch.allclose(a, same, atol=1e-6)
     assert (a - swapped).abs().max() > 1e-3
+
+
+def test_rows_and_programs_of_the_same_content_have_the_same_digest():
+    """What the network reads decides a digest: an entity's reference does not, a
+    number does; a program's digest is its nodes' and edges'."""
+    enemy = {"ref": "enemy:0", "entity_type": "enemy", "content_id": "MONSTER.CULTIST", "hp": 40}
+    row = entity_fields(enemy)
+    assert row_digest(row) == row.digest == row_digest(entity_fields(dict(enemy, ref="enemy:1")))
+    assert row_digest(row) == row_digest(list(row))
+    assert row_digest(row) != row_digest(entity_fields(dict(enemy, hp=39)))
+    damage = {"op": "DAMAGE", "amount": 6, "target": {"kind": "entity", "ref": "enemy:0"}}
+    assert effect_tree(damage).digest == effect_tree(dict(damage, target={"kind": "entity", "ref": "enemy:1"})).digest
+    assert effect_tree(damage).digest != effect_tree(dict(damage, amount=7)).digest
 
 
 def test_adjacent_large_numbers_stay_distinct():
@@ -211,3 +226,54 @@ def test_free_travel_reaches_every_node_of_the_next_floor():
     rest, treasure = contents.index("content_id=RestSite"), contents.index("content_id=Treasure")
     assert relation[0, rest] == "map_forward_direct"
     assert relation[0, treasure] == "map_free_direct" and relation[treasure, 0] == "map_free_reverse"
+
+
+def test_a_cleaned_frame_copies_what_it_keeps_of_the_engines_frame():
+    from main.encoding.frames import clean_frame, clean_public
+    from main.env.protocol import execution_command
+    from main.play.testing import SyntheticEngine
+
+    engine = SyntheticEngine()
+    frame = engine.reset()
+    seen = 0
+    while frame["boundary"] != "terminal":
+        kept = copy.deepcopy(frame)
+        cleaned = clean_frame(frame)
+        # As a copy of the whole frame with the model's fields cleaned would be, key order included.
+        whole = copy.deepcopy(frame)
+        whole["public"] = clean_public(frame["public"])
+        whole["legal"] = {"candidates": [clean_public({"decoder_bank": [c]})["decoder_bank"][0]
+                                         for c in frame["legal"]["candidates"]]}
+        assert json.dumps(cleaned) == json.dumps(whole)
+        assert frame == kept
+        assert all(cleaned[key] is not value for key, value in frame.items() if isinstance(value, (dict, list)))
+        seen += 1
+        frame = engine.send(execution_command(frame, frame["legal"]["candidates"][0]["candidate_ref"]))
+    assert seen > 1
+
+
+def observed(obs):
+    """What an observation hands the batch, comparable."""
+    return ([[(f.name, f.symbol, f.number) for f in row] for row in obs.tokens], [e.digest for e in obs.effects],
+            obs.refs, obs.action_indices, obs.slot_refs, obs.edges, obs.context)
+
+
+def test_a_cleaned_frame_is_observed_without_cleaning_it_again_as_it_was_with():
+    from main.encoding.frames import clean_frame
+    from main.env.protocol import execution_command
+    from main.play.testing import SyntheticEngine
+    from main.tests.test_rules import event_frame, naming_frame
+
+    frames = [event_frame(), naming_frame("ENCHANTMENT.SHARP"), map_frame(), duel("enemy:0")]
+    engine = SyntheticEngine()
+    frame = engine.reset()
+    while frame["boundary"] != "terminal":
+        frames.append(frame)
+        frame = engine.send(execution_command(frame, frame["legal"]["candidates"][-1]["candidate_ref"]))
+    for frame in map(clean_frame, frames):
+        kept = copy.deepcopy(frame)
+        # Cleaning a cleaned frame changes nothing, so it need not be cleaned again.
+        assert json.dumps(clean_frame(frame)) == json.dumps(frame)
+        assert observed(observation(frame, cleaned=True)) == observed(observation(frame))
+        # Nothing the observation binds or marks is written back to the frame.
+        assert frame == kept

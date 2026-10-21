@@ -25,6 +25,18 @@ def _by_source(sources):
             for name, (loss, weight, count) in sorted(sources.items())}
 
 
+# What the global layers of a pass's microbatches computed over, by source (`_shape`).
+SHAPES = ("microbatches", "rows", "tokens", "padded_tokens", "pairs", "padded_pairs")
+
+
+def _shape(prepared):
+    """A packed batch's rows, tokens and attention pairs (a relation bias and a score
+    per pair), as they are and as padded to its length (`SHAPES`)."""
+    lengths, pad = prepared.batch.lengths, prepared.batch.pad
+    rows = len(lengths)
+    return 1, rows, int(lengths.sum()), rows * pad, int(lengths.square().sum()), rows * pad * pad
+
+
 def _steps(logicals, accumulate):
     """The microbatches of every optimizer step: `accumulate` logical batches at a
     time, the last step whatever is left."""
@@ -232,6 +244,7 @@ class Learner:
         # Weighted loss, weight and samples of every source: what a report of mixed
         # sources tells apart. The update itself sums by weight alone.
         sources = defaultdict(lambda: [0.0, 0.0, 0])
+        shapes = defaultdict(lambda: [0] * len(SHAPES))
         last_rates = {}
         waited_seconds = 0.0  # blocked on the loader for the next logical batch
         duration_seconds = 0.0
@@ -293,6 +306,10 @@ class Learner:
             logical_items = []
             logical_accuracy = []
             for micro, prepared in logical:
+                # Read from the host's copy, before the pass moves it to the GPU.
+                shape = shapes[micro[0].source or "unknown"]
+                for index, value in enumerate(_shape(prepared)):
+                    shape[index] += value
                 if objective is None:
                     log_prob, entropy, accuracy = self._replay(prepared, with_accuracy=True)
                     loss = -log_prob
@@ -362,6 +379,7 @@ class Learner:
         total_metrics["duration_seconds"] = duration_seconds
         total_metrics["loss_scale"] = loss_scale
         total_metrics["sources"] = _by_source(sources)
+        total_metrics["shapes"] = {name: dict(zip(SHAPES, values)) for name, values in sorted(shapes.items())}
         total_metrics["learning_rates"] = last_rates
         total_metrics["gradient_clip_fraction"] = gradient_clipped / max(len(grad_norms), 1)
         if grad_norms:

@@ -6,6 +6,7 @@ import os
 import signal
 import threading
 import time
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,8 +20,9 @@ from main.cli import main, parser
 from main.learn.history import TrainingHistory
 from main.learn.trainer import Learner
 from main.network.config import LearningRates
-from main.iterate import COMPILED_VARIANTS, Driver, Settings, canonical, round_seeds, seeds_of
+from main.iterate import COMPILED_VARIANTS, Driver, Settings, canonical, round_ascensions, round_seeds, seeds_of
 from main.env.protocol import CHARACTERS, ProtocolError
+from main.play import digests
 from main.play.groups import groups_summary
 from main.tests import journeys
 from main.tests.journeys import Journey
@@ -283,7 +285,7 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
     # summaries stay; the archive of an iteration nobody evaluated goes too.
     for wave in ("act1", "act2", "act3"):
         directory = world.output / "groups/round-0" / wave
-        for name in ("accepted", "saves", "index.jsonl.gz", FILE):
+        for name in ("accepted", "saves", "index.jsonl.gz", FILE, digests.FILE):
             assert not (directory / name).exists()
         assert (directory / "summary.json").exists()
     assert groups_summary(world.output / "groups/round-0")["waves"] == ["act1", "act2", "act3"]
@@ -305,6 +307,47 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
     # Finished iterations are left alone.
     assert driver(world).run(2) == state
 
+
+
+def test_a_window_plays_each_group_at_an_ascension_of_its_own_and_evaluates_at_the_checkpoints(world):
+    seeds = round_seeds("root", 3, 7)
+    levels = round_ascensions("root", 3, seeds, [0, 5])
+    for character in CHARACTERS:
+        assert set(levels[character]) == set(seeds[character])
+        counts = Counter(levels[character].values())
+        assert set(counts) <= set(range(6)) and max(counts.values()) - min(counts.get(a, 0) for a in range(6)) <= 1
+    assert round_ascensions("root", 3, seeds, [0, 5]) == levels
+    assert {a for listed in round_ascensions("root", 3, seeds, [2, 2]).values() for a in listed.values()} == {2}
+
+    state = driver(world, ascensions=[0, 2], evaluate_every=1).run(1)
+    first = state["iterations"]["0"]
+    assert first["settings"]["ascensions"] == [0, 2]
+    assigned = read(world.output / "seeds/iteration-0000-ascensions.json")
+    assert assigned == read(world.output / "groups/round-0/metadata/ascensions.json")
+    assert assigned == round_ascensions("test", 0, read(world.output / "seeds/iteration-0000.json"), [0, 2])
+    for wave in first["sample"]["waves"]:
+        counted = first["sample"]["by_ascension"][wave]
+        assert set(counted) <= {str(a) for a in assigned_levels(assigned)}
+        assert sum(entry["written"] for entry in counted.values()) == groups_summary(
+            world.output / "groups/round-0")[wave]["written"]
+        assert sum(entry["groups"] for entry in first["advantages"][wave]["by_ascension"].values()) == \
+            first["advantages"][wave]["groups"]
+    # The evaluation stays at the checkpoint's ascension.
+    played = [read(path) for path in (world.output / "evaluation/iteration-0000").glob("*.json") if path.name[0].isupper()]
+    assert played and {run["ascension"] for run in played} == {0}
+    # Without a window every group is at the checkpoint's.
+    assert settings(world).ascensions is None
+    for wrong in ([3, 2], [0, 11], [-1, 2], [1], [0.5, 2]):
+        with pytest.raises(ValueError, match="ascension window"):
+            settings(world, ascensions=wrong)
+    arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
+                                     "--ascensions", "0", "5"])
+    assert arguments.ascensions == [0, 5]
+    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).ascensions is None
+
+
+def assigned_levels(assigned):
+    return {level for listed in assigned.values() for level in listed.values()}
 
 
 def test_act_group_settings_resolve_their_defaults_and_refuse_what_cannot_be_run(world):
@@ -461,6 +504,9 @@ def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
     # iteration 1, as it stood when their stretch began.
     assert updates["0"]["reference"] == updates["1"]["reference"] == str(world.checkpoint)
     assert updates["2"]["reference"] == updates["3"]["reference"] == str(world.checkpoints / "iteration-0001")
+    # Where the reference is the policy that played the round (the first of a stretch),
+    # the KL is to the distributions its decisions were drawn from: no pass of it.
+    assert [updates[str(number)]["reference_recorded"] for number in range(4)] == [True, False, True, False]
     # The first update of a stretch is on-policy with its reference: the KL starts at zero.
     first_of_stretch = [record["metrics"] for record in lines(world.output / "updates.jsonl") if record["round"] == 2][0]
     assert first_of_stretch["kl"] == pytest.approx(0.0, abs=1e-5)

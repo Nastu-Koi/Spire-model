@@ -3,6 +3,7 @@
 import copy
 import gzip
 import json
+import os
 import random
 from collections import Counter
 from dataclasses import astuple, replace
@@ -402,8 +403,13 @@ def test_bc_defaults_have_no_automatic_validation_or_stopping_rule():
     assert TrainConfig().logical_batch_size == 512
 
 
+def vanish(connection, *args):
+    """A feeder that exits at once, saying nothing: started from the feeder server, it
+    is named by its module, so it lives at the top of one."""
+    os._exit(0)
+
+
 def test_feeders_share_tensors_by_name_and_a_dead_feeder_is_reported(tmp_path, monkeypatch):
-    import os
     import torch.multiprocessing
     from main.learn import loader
 
@@ -423,9 +429,6 @@ def test_feeders_share_tensors_by_name_and_a_dead_feeder_is_reported(tmp_path, m
     # The feeders' tails are packed by the trainer itself, after every feeder batch.
     assert len(shared) > 1 and all(shared[:-1]) and not shared[-1]
     assert torch.multiprocessing.get_sharing_strategy() == "file_system"
-
-    def vanish(connection, *args):
-        os._exit(0)
 
     monkeypatch.setattr(loader, "_feed", vanish)
     with pytest.raises(RuntimeError, match="exited without finishing"):
@@ -461,26 +464,40 @@ def test_stalled_loader_workers_are_replaced_without_losing_or_repeating_batches
     assert started == [(7, 4, loader.STALL_SECONDS), (4, 4, loader.STALL_SECONDS)]
 
 
+def busy(*args):
+    """A feeder in the middle of a window, its workers alive: `_feed` with a stream that
+    waits after each batch. It runs in a process forked from the feeder server, whose
+    `loader` is its own."""
+    import time
+    from main.learn import loader
+
+    packing = loader._stream
+
+    def waiting(dataset, workers, release=False, report=None):
+        for value in packing(dataset, workers, release, report):
+            yield value
+            time.sleep(60)
+
+    loader._stream = waiting
+    loader._feed(*args)
+
+
 def test_feeders_and_their_workers_end_when_the_trainer_is_killed(tmp_path, monkeypatch):
-    import os
     import signal
     import time
     import torch.multiprocessing as multiprocessing
+    from multiprocessing import forkserver
     from main.learn import loader
 
     shards, runs = sharded(tmp_path)
     vocabulary = vocabulary_for(runs, ModelConfig.tiny())
     training = TrainConfig(precision="no", loader_workers=1, loader_feeders=2, logical_batch_size=3,
                            microbatch_size=2)
-    packing = loader._stream
-
-    def busy(dataset, workers, release=False, report=None):
-        # A feeder in the middle of a window, its workers alive.
-        for value in packing(dataset, workers, release, report):
-            yield value
-            time.sleep(60)
-
-    monkeypatch.setattr(loader, "_stream", busy)
+    monkeypatch.setattr(loader, "_feed", busy)
+    # The trainer is forked from a process with a feeder server of its own, which it
+    # can neither use nor keep alive.
+    loader._feeders()
+    forkserver.ensure_running()
 
     def trainer(connection):
         batches = stream(shards, vocabulary, training, window_shards=2, shuffle=False)
@@ -627,16 +644,9 @@ def test_a_stream_stopped_early_leaves_no_shared_files_of_its_feeders_and_packer
     vocabulary = vocabulary_for(runs, ModelConfig.tiny())
     training = TrainConfig(precision="no", loader_workers=1, loader_feeders=2, logical_batch_size=3,
                            microbatch_size=2)
-    packing = loader._stream
-
-    def slow(dataset, workers, release=False, report=None):
-        # Every batch after the first waits in the feeder: the pipe and the packers'
-        # prefetch hold results the trainer will never read.
-        for value in packing(dataset, workers, release, report):
-            yield value
-            time.sleep(60)
-
-    monkeypatch.setattr(loader, "_stream", slow)
+    # Every batch after the first waits in the feeder: the pipe and the packers'
+    # prefetch hold results the trainer will never read.
+    monkeypatch.setattr(loader, "_feed", busy)
     batches = stream(shards, vocabulary, training, window_shards=2, shuffle=False)
     first = next(batches)
     assert first

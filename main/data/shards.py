@@ -9,6 +9,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import orjson
+
 from main.env.protocol import CHARACTERS, SCHEMA, ProtocolError, segment_key, validate_frame
 from main.encoding.frames import clean_frame
 from main.env.rewards import require_reward_version
@@ -372,6 +374,11 @@ class RunShards:
     def read(self, names):
         """The validated runs of these shards that belong to this part of the data.
         Lines of other runs are skipped unparsed: a held-out part is a tenth of a shard."""
+        return list(self.runs(names))
+
+    def runs(self, names):
+        """`read` a run at a time: a reader that keeps only what it takes of each run
+        holds one decoded run, not a shard of them."""
         names = [self._key(name) for name in names]
         # The files asked for of each directory: most of a million rows match none.
         selected = defaultdict(set)
@@ -382,14 +389,14 @@ class RunShards:
             root = row.get("root", 0)
             if row["shard"] in selected[root]:
                 wanted[root, row["shard"]][row["line"]] = row
-        runs = []
         for key in names:
             found = 0
             root, name = key
             with gzip.open(self.directories[root] / name, "rt", encoding="utf-8") as stream:
                 for number, line in enumerate(stream):
                     if number in wanted[key]:
-                        run = json.loads(line)
+                        # A run is megabytes of frames: the loader's feeders decode every one.
+                        run = orjson.loads(line)
                         row = wanted[key][number]
                         if run["run_id"] != row["run_id"]:
                             raise ProtocolError("Shard does not hold its runs in the order of the index")
@@ -398,11 +405,10 @@ class RunShards:
                             raise ProtocolError("Policy index counts disagree with the shard; rebuild the index")
                         if sample_source(run) != row_source(row):
                             raise ProtocolError("Policy index source disagrees with the shard; rebuild the index")
-                        runs.append(run)
                         found += 1
+                        yield run
             if found != len(wanted[key]):
                 raise ProtocolError("Shard is missing indexed runs; rebuild the index")
-        return runs
 
     def windows(self, shards=8, shuffle=False):
         """Lists of validated runs, each from `shards` shard files."""
@@ -462,9 +468,11 @@ class Sample:
     old_log_prob: float | None = None
     temperature: float | None = None
     advantage: float | None = None
-    # A decision of it was explored or forked (taken by rank), not drawn from the policy
-    # (`RolloutRunner`): the update holds it on both sides (`main/learn/grpo.py`).
+    # A decision of it was explored (a potion use drawn by the exploration) or forked
+    # (taken by rank), not drawn from the policy (`RolloutRunner`): the update learns
+    # the one by its score and holds the other on both sides (`main/learn/grpo.py`).
     explored: bool = False
+    forked: bool = False
     _lengths: tuple[tuple[int, int], ...] | None = field(
         default=None, repr=False, compare=False
     )
@@ -474,7 +482,8 @@ def _sample(run, macro, weight, source, index):
     branches = sum(is_policy_frame(step["frame"]) for step in macro["steps"])
     return Sample(macro, run["character"], run["run_id"], weight, macro["phase"], branches,
                   run.get("ascension"), source, index, macro.get("old_log_prob"), macro.get("temperature"),
-                  explored=any(step.get("explored", False) or step.get("forked", False) for step in macro["steps"]))
+                  explored=any(step.get("explored", False) for step in macro["steps"]),
+                  forked=any(step.get("forked", False) for step in macro["steps"]))
 
 
 def samples(runs, *, weights=None):

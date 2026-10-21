@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from functools import lru_cache
 
-from main.encoding.fields import Field, fields_of
+from main.encoding.fields import Field, content_digest, fields_of
 
 
 @dataclass
@@ -17,6 +17,16 @@ class Effect:
     edges: list[tuple[int, int, str]] = field(default_factory=list)
     bindings: list[tuple[int, str, str]] = field(default_factory=list)
     _tables: dict = field(default_factory=dict, repr=False, compare=False)
+    _digest: int | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def digest(self):
+        """A 64-bit digest of the program's content, its nodes' fields and its edges,
+        taken once (`content_digest`). Bindings name entities of a frame rather than
+        content: a bound program is told apart by what it binds (`main.play.wire`)."""
+        if self._digest is None:
+            self._digest = hash((content_digest(self.nodes), tuple(self.edges)))
+        return self._digest
 
     def edge_table(self, vocabulary):
         """Rows of (source, target, relation index), built once per vocabulary."""

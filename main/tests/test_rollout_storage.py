@@ -140,6 +140,25 @@ def test_evaluate_writes_full_runs(tmp_path, monkeypatch, capsys):
     assert {(run["ascension"], run["contract"]["fixed_ascension"]) for run in runs} == {(3, 3)}
 
 
+def test_a_packed_frame_and_its_shard_line_hold_the_frame_exactly():
+    """Packed with orjson: 64-bit integers (the engine's saves hold unsigned ones),
+    text beyond ASCII and small numbers come back as they were, types included, and
+    read back alike with the standard library."""
+    from main.data.index import member
+    from main.play.rollout import _pack, _unpack, packed_line
+
+    frame = {"public": {"phase": "map", "entities": [
+        {"ref": "e:0", "seed": 18444737294803818499, "low": -(2 ** 63), "name": "Ébène 中", "hp": 1e-05,
+         "zero": -0.0, "big": 1e16, "flags": [True, False, None]}]},
+        "legal": {"candidates": [{"candidate_ref": "c0", "verb": "CHOOSE"}]}}
+    back = _unpack(_pack(frame))
+    assert json.dumps(back) == json.dumps(frame)
+    run = {"run_id": "r", "macros": [{"phase": "map", "steps": [{"frame": _pack(frame), "candidate_ref": "c0"}]}]}
+    line, _ = packed_line(run)
+    built = dict(run, macros=[dict(run["macros"][0], steps=[dict(run["macros"][0]["steps"][0], frame=frame)])])
+    assert json.dumps(json.loads(gzip.decompress(line))) == json.dumps(json.loads(gzip.decompress(member(built))))
+
+
 def test_a_run_with_packed_frames_makes_the_shard_line_of_the_built_run():
     from collections import Counter
 

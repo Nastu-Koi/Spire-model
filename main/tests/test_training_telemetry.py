@@ -19,7 +19,7 @@ from main.data.shards import samples
 from main.network.model import PolicyNetwork
 from main.env.protocol import CHARACTERS
 from main.play.testing import demonstration
-from main.learn.trainer import Learner
+from main.learn.trainer import SHAPES, Learner
 
 
 def setup_learner():
@@ -168,6 +168,21 @@ def test_an_update_limit_stops_in_the_middle_of_an_epoch_and_reports_it():
     assert len(learner.bootstrap(runs, epochs=3, max_updates=whole)) == 1 and learner.updates == whole
     with pytest.raises(ValueError, match="at least one update"):
         learner.bootstrap(runs, max_updates=0)
+
+
+def test_a_pass_counts_what_its_microbatches_computed_over_as_they_are_and_padded():
+    learner, runs = setup_learner()
+    items = samples(runs)[:7]
+    logicals = list(batches(items, learner.vocabulary, learner.config))
+    metrics = learner._optimize(iter(logicals), total=len(items))
+    parts = [prepared for logical in logicals for _, prepared in logical]
+    assert list(metrics["shapes"]) == sorted({item.source or "unknown" for item in items})
+    shape = {key: sum(entry[key] for entry in metrics["shapes"].values()) for key in SHAPES}
+    assert shape["microbatches"] == len(parts) == 7
+    assert shape["rows"] == sum(len(prepared.batch.lengths) for prepared in parts)
+    assert shape["tokens"] == sum(int(prepared.batch.lengths.sum()) for prepared in parts) <= shape["padded_tokens"]
+    assert shape["padded_tokens"] == sum(len(prepared.batch.lengths) * prepared.batch.pad for prepared in parts)
+    assert shape["tokens"] <= shape["pairs"] <= shape["padded_pairs"]
 
 
 def test_the_time_an_update_waits_for_its_batch_is_told_apart_from_its_duration():

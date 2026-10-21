@@ -4,7 +4,7 @@
 
 | 模块 | 内容 |
 | --- | --- |
-| `model.py`、`attention.py` | `PolicyNetwork`：实体编码器、字段间注意力、局部程序编码器、带关系偏置的全局层、决策头；`GraphedStack` 把采样时的全局层按桶补齐后作 CUDA graph 重放 |
+| `model.py`、`attention.py` | `PolicyNetwork`：实体编码器、字段间注意力、局部程序编码器、带关系偏置的全局层、决策头；`GraphedStack` 把采样时的全局层按桶补齐后作 CUDA graph 重放；`EncoderTables` 与 `SharedEncoder.from_tables` 是采样时按内容存表的实体编码 |
 | `config.py` | profile 的 `model` 与 `training` 节（`ModelConfig`、`TrainConfig`），采样温度，一次运行的学习率（`LearningRates`）；`ModelConfig.backend` 是注意力实现（`sdpa` 默认，`reference` 供 `tiny()` 的 CPU 正确性检查），`TrainConfig.optimizer` 是 `muon_adamw`（默认）或全用 AdamW 的 `adamw` |
 | `optim.py` | Muon／AdamW 分组（`HybridOptimizer` 把两者合成一个优化器，`BatchedMuon`）、BC 学习率日程（预热、查找表衰减、收尾衰减） |
 | `checkpoint.py` | 检查点保存、载入、版本检查、归档（`archive_checkpoint` 用硬链接发布不可变的快照）；`checkpoints_for`：由输出目录定检查点目录 |
@@ -22,7 +22,7 @@
 
 200M 是 20M 的三倍宽度版本：深度不变，沿关系做多跳推理的层数和学习率随深度的行为与小配置一致；局部编码器与骨干保持 1:2 宽度比，头维度 64。关系偏置是 `[批, 头, token, token]` 的稠密张量（各全局层的表并排一次查表、直接按各层读取的 [层, 批, 头, query, key] 布局就地散布、就地填充 −inf，在 autocast 下直接建成注意力的 dtype，多条关系的和在该 dtype 里相加；每次散布的元素数不超过 `attention.BIAS_ELEMENTS`：采样一批几千对一次建完，训练微批到 pair 预算时退回逐层）。200M 不开层重算时一个逻辑批放不进显存，所以必须开；显存预算（`token_budget`、`pair_budget`）取 profile 里的值，给同机运行的评估留出显存。`ModelConfig.tiny()` 只用于 CPU 正确性检查。
 
-局部程序编码器按节点数分组、每组补齐到 2 的幂（`ProgramGroup`），但每组的字段表只装真实节点的字段，`nodes` 记各节点在补齐的 `programs × length` 布局里的行；编码器对紧凑表算字段块，再散布进零矩阵（`SharedEncoder.programs`）。原因：一组里的节点数参差（采样时 `wire.GROUPED` 还把几个桶并成一组，见 [play](play.md#采样进程分工)），补齐行占多数，字段块的注意力与逐元素核在补齐行上照算；补齐行经字段块后本来就是零，紧凑计算的结果与补齐计算相同。
+局部程序编码器按节点数分组、每组补齐到 2 的幂（`ProgramGroup`），但每组的字段表只装真实节点的字段，`nodes` 记各节点在补齐的 `programs × length` 布局里的行；编码器对紧凑表算字段块，再散布进零矩阵（`SharedEncoder.programs`）。原因：一组里的节点数参差（采样时只编码编码表里还没有的程序，`wire.GROUPED` 把它们并成两组，见 [play](play.md#采样进程分工)），补齐行占多数，字段块的注意力与逐元素核在补齐行上照算；补齐行经字段块后本来就是零，紧凑计算的结果与补齐计算相同。
 
 全局层以 `torch.compile(dynamic=True)` 编译（`compile_blocks`）：宽度 256 的矩阵很小，一步要发几千个小算子，融合 norm、残差与门控比算力更要紧。编译在每个进程首次前向时进行，形状变化不重编。
 
@@ -44,7 +44,7 @@
 
 ## 精度
 
-默认 BF16 autocast；实体编码器与决策头（query、key）在所有路径上用 FP32，对数概率与加权损失 FP32。原因：同一个决策的概率在采样时几个会话一批、不填充，训练时填充到桶；全局层在 BF16 下对相同输入逐位一致，但实体编码器的批小且大小不定，FP32 矩阵核在小批上末位不同、散射求和不保证累加顺序，这些差异进入 BF16 后被逐层放大。`encoder_precision=fp32` 可让整个编码不用 autocast。裁剪目标的比值用采样时记下的 `old_log_prob`，采样与重放之间的这种数值差异会进入比值。
+默认 BF16 autocast；实体编码器与决策头（query、key）在所有路径上用 FP32，对数概率与加权损失 FP32。原因：同一个决策的概率在采样时几个会话一批、不填充，训练时填充到桶；全局层在 BF16 下对相同输入逐位一致，但实体编码器的批小且大小不定，FP32 矩阵核在小批上末位不同、散射求和不保证累加顺序，这些差异进入 BF16 后被逐层放大。`encoder_precision=fp32` 可让整个编码不用 autocast。裁剪目标的比值用采样时记下的 `old_log_prob`，采样与重放之间的这种数值差异会进入比值。采样时实体与程序的编码取自编码表（[play](play.md#采样进程分工)），是在更早的另一批里算的，同属这类 FP32 跨批差异：v30 第三幕的离线对照里，表上取的与本批现算的编码差均值 1.4e-7，同一批决策的 greedy 一致率与对数概率差（99.2–99.9%、均值 1e-3）和把同一批拆成两半的差别相当。
 
 精度有两套写法：`bootstrap --precision` 取 `no`／`bf16`，是训练的混合精度；`evaluate --precision` 与 `iterate --eval-precision` 取 `bf16`／`fp32`，`fp32` 关掉全局层的 autocast，用于降低评估噪声（[play 已知的坑](play.md#已知的坑)）。
 
@@ -71,3 +71,7 @@
 ## 采样时的全局层：CUDA graph
 
 一次采样前向只带少量决策，24 层全局层要发射几百个小核函数，解释器与分发器发射它们的时间比 GPU 跑完还长。采样进程（`Samplers`）打开 `PolicyNetwork.graphed()`：无梯度、评估模式、在 GPU 上的前向把批补齐到桶形状（行数 `ROW_BUCKETS`、每条决策的 token 数 `PAD_BUCKETS`；补的行各有一个有效 token，注意力才有限），每种形状第一次出现时录一张 CUDA graph（录前在旁路流上热身两次），之后把输入拷进图的缓冲区重放，输出切回原形状。重放的核函数就是 eager 在补齐批上发射的那些，所以 greedy 选择与 eager 相同，对数概率只差补齐带来的 bf16 舍入。训练与可微重放不走这条路。超出最大桶的批退回 eager。
+
+## 采样时的实体编码：编码表
+
+实体编码器的输出只依赖内容：一个 token 的编码只看它自己的字段行（`fields`），一个程序的向量只看它的节点、边与所绑实体的编码（`_program`）。依赖整条决策的部分（引用的加法、`token_programs` 的取用、`local_norm`、投影、全局层）都在这之后。所以采样时采集进程把编码按内容留在 `EncoderTables` 里：`TableBatch`（`main/play/wire.py` 解包出来的批）只带新内容的字段和每个 token、程序在表里的行。`from_tables` 先把新 token 与所有新程序节点合成一次 `fields`（`Fields.cat` 补齐到最宽的字段数），写进 token 表；再算新程序（绑定从 token 表取）、写进程序表；最后按行取出全部 token 的编码与程序，其余与 `forward` 相同。训练与可微重放不走这条路。协议与行的分配见 [play](play.md#采样进程分工)。

@@ -2,13 +2,21 @@
 back up the chain of waves, the tree of shared prefixes, the within-group ridge
 baseline."""
 
+import gc
+import gzip
+import json
+
 import numpy as np
 import pytest
 
+from main.data.shards import RunShards
 from main.env.protocol import CHARACTERS
 from main.learn import advantage
 from main.learn.features import NAMES
-from main.learn.groups import Decision, Segment, advantages, fit, headers, returns, share, tree, wave_advantages
+from main.learn.groups import (Decision, Segment, advantages, fit, headers, read_waves, returns, share, tree,
+                               wave_advantages)
+from main.play import digests
+from main.play.digests import where
 from main.play.groups import sample_groups
 from main.play.sampling import Samplers
 from main.tests.journeys import learner
@@ -24,6 +32,17 @@ def decision(index, key, action, **features):
 
 def segment(run_id, group, outcome, decisions, character="Ironclad"):
     return Segment(run_id, group, character, outcome, decisions)
+
+
+def test_the_state_summary_counts_the_deck_the_relics_and_the_potions():
+    entities = [dict(entity_type="card", zone="hand"), dict(entity_type="card", zone="deck"),
+                dict(entity_type="player", act=2, floor=20, hp=30, max_hp=80, gold=99),
+                dict(entity_type="card", zone="deck"), dict(entity_type="relic"), dict(entity_type="potion"),
+                dict(entity_type="player", act=3, floor=40), dict(entity_type="enemy")]
+    assert where(dict(public=dict(entities=entities))) == (
+        2, 20, dict(hp=30, max_hp=80, gold=99, deck=2, relics=1, potions=1))
+    with pytest.raises(ValueError, match="player"):
+        where(dict(public=dict(entities=entities[:2])))
 
 
 def test_a_segments_return_is_what_the_group_played_from_its_save_came_to():
@@ -116,6 +135,78 @@ def test_a_sampled_round_of_groups_gets_advantages_for_every_decision(tmp_path):
     # Written once: asking again reads the headers back.
     assert advantages(tmp_path / "groups") == written
     assert all(written[wave]["stats"]["forked"]["decisions"] == 0 for wave in written)
+
+
+def test_the_shards_of_every_wave_are_read_in_one_pool_as_in_one_process(tmp_path):
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, runner(policy), seeds, tmp_path / "groups", n=2, m=2, boundaries=BOUNDARIES,
+                      shard_samples=20)
+    waves = ["act1", "act2", "act3"]
+    assert all(len(RunShards(tmp_path / "groups" / wave).window_names(shards=1)) > 1 for wave in waves)
+    alone = read_waves(tmp_path / "groups", waves, processes=1)
+    pooled = read_waves(tmp_path / "groups", waves, processes=3)
+    # The same segments, wave by wave in the order of their shards, whoever read them.
+    assert list(pooled) == waves and pooled == alone
+    assert [len(alone[wave]) for wave in waves] == [10, 20, 40]
+    # The pool's workers inherit the heap frozen; it is thawed again after them.
+    assert gc.get_freeze_count() == 0
+
+
+def unzipped(path):
+    with gzip.open(path, "rb") as stream:
+        return stream.read()
+
+
+def test_a_round_keeps_a_digest_of_its_decisions_and_the_advantages_need_nothing_else(tmp_path, monkeypatch):
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, runner(policy), seeds, tmp_path / "groups", n=2, m=2, boundaries=BOUNDARIES,
+                      shard_samples=20, fork_depth=1)
+    waves = ["act1", "act2", "act3"]
+    # Every segment a wave wrote has its line in the wave's digest.
+    for wave in waves:
+        listed = [json.loads(line)["run_id"] for line in gzip.open(tmp_path / "groups" / wave / digests.FILE, "rt")]
+        assert sorted(listed) == sorted(RunShards(tmp_path / "groups" / wave).identities)
+    # Read from the digests, the waves are what their shards say, and no shard is opened.
+    for wave in waves:
+        (tmp_path / "groups" / wave / digests.FILE).rename(tmp_path / f"{wave}.digest")
+    from_shards = read_waves(tmp_path / "groups", waves, processes=1)
+    for wave in waves:
+        (tmp_path / f"{wave}.digest").rename(tmp_path / "groups" / wave / digests.FILE)
+
+    def unread(*_):
+        raise AssertionError("a shard was read")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(RunShards, "runs", unread)
+        assert read_waves(tmp_path / "groups", waves, processes=1) == from_shards
+        written = advantages(tmp_path / "groups", processes=2)
+    assert all(written[wave]["stats"]["forked"]["decisions"] > 0 for wave in waves)
+    kept = {wave: unzipped(tmp_path / "groups" / wave / advantage.FILE) for wave in waves}
+    # The same advantage files, to the byte, as from the shards.
+    for wave in waves:
+        (tmp_path / "groups" / wave / advantage.FILE).unlink()
+        (tmp_path / "groups" / wave / digests.FILE).unlink()
+    advantages(tmp_path / "groups", processes=2)
+    assert {wave: unzipped(tmp_path / "groups" / wave / advantage.FILE) for wave in waves} == kept
+
+
+def test_a_wave_whose_digest_misses_a_segment_is_read_from_its_shards(tmp_path):
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, runner(policy), seeds, tmp_path / "groups", n=2, m=2, boundaries=BOUNDARIES)
+    waves = ["act1", "act2", "act3"]
+    complete = read_waves(tmp_path / "groups", waves, processes=1)
+    # A digest cut short (the round was killed between a shard's line and its digest's).
+    path = tmp_path / "groups" / "act2" / digests.FILE
+    lines = gzip.open(path, "rt").readlines()
+    with gzip.open(path, "wt") as stream:
+        stream.writelines(lines[:-1])
+    assert read_waves(tmp_path / "groups", waves, processes=1) == complete
 
 
 def test_a_forked_round_compares_the_two_halves_of_every_group_at_its_first_choice(tmp_path):

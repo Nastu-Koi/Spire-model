@@ -79,8 +79,27 @@ def _bind_displayed_variables(entities, by_ref):
         }
 
 
-def observation(frame):
-    public = clean_public(frame["public"])
+def _writable(public):
+    """A cleaned public state, copied as far as an observation writes to it: the entity
+    lists, every entity, and the displayed values an entity gathers (`named`, `stats`,
+    `_bind_displayed_variables`). The rest is read only and stays shared."""
+
+    def entity(item):
+        copy = dict(item)
+        for key in ("named", "stats"):
+            if isinstance(copy.get(key), dict):
+                copy[key] = dict(copy[key])
+        return copy
+
+    return dict(public, entities=[entity(item) for item in public.get("entities", [])],
+                memory=[entity(item) for item in public.get("memory", [])])
+
+
+def observation(frame, *, cleaned=False):
+    """The observation of a frame. A frame that `clean_frame` returned (`cleaned`) is
+    not cleaned again: cleaning changes nothing of it (it is idempotent), and a
+    sampling process would clean every frame twice."""
+    public = _writable(frame["public"]) if cleaned else clean_public(frame["public"])
     from main.env.public_history import HISTORY_KINDS, unknown_memory
 
     if not any(e.get("entity_type") in HISTORY_KINDS for e in public["memory"]):
@@ -113,7 +132,7 @@ def observation(frame):
             ref = f"bundle-child:{len(entities)}:{i}"
             entities.append(dict(card, ref=ref, owner_ref=item["ref"]))
     bank = public.get("decoder_bank") or [
-        clean_entity(c, action=True) for c in frame["legal"]["candidates"]
+        c if cleaned else clean_entity(c, action=True) for c in frame["legal"]["candidates"]
     ]
     entities += [dict(c, entity_type="action") for c in bank]
     effects = [entity_program(x) for x in entities]

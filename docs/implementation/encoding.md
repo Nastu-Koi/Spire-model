@@ -5,17 +5,17 @@
 | 模块 | 内容 |
 | --- | --- |
 | `frames.py` | 公开字段白名单与清洗（`clean_frame`、`clean_public`、`clean_entity`） |
-| `fields.py` | 实体的字段编码（符号、字段名、数值与 known／applicable）、按内容缓存的字段行、字段行打包成张量（`field_tensors`） |
-| `programs.py` | 局部程序：效果程序与规则文本解析成节点与类型化边（`Effect`、`effect_tree`、`entity_program`），按内容缓存 |
+| `fields.py` | 实体的字段编码（符号、字段名、数值与 known／applicable）、按内容缓存的字段行（`FieldRow`，带内容摘要 `row_digest`）、字段行打包成张量（`field_tensors`） |
+| `programs.py` | 局部程序：效果程序与规则文本解析成节点与类型化边（`Effect`、`effect_tree`、`entity_program`），按内容缓存，带内容摘要（`Effect.digest`） |
 | `maps.py` | 地图压缩：当前节点与地图前沿，每个前沿节点带可达地图的程序（`compress_map`、`map_relations`） |
 | `representation.py` | 一帧的观察（`Observation`、`observation`）：实体、字段、引用、程序、地图前沿；编码契约 `ENCODING_VERSION`；清缓存 `forget` |
 | `vocabulary.py` | 冻结词表（`Table`、`Vocabulary`）与名称登记（`names_from_frames`） |
 | `rules.py` | 规则文本：本地化模板的渲染与切词 |
-| `batch.py` | 观察 → 批（字段张量、引用、程序分组与去重、关系边、动作位置） |
+| `batch.py` | 观察 → 批（字段张量、引用、程序分组与去重 `program_items`、关系边、动作位置）；采样用的 `TableBatch`；`collate(tensors=False)` 把字段留成行（`Rows`，带全部行的宽度），由采样进程只给要发的行建张量 |
 
 ## 公开字段
 
-`clean_frame` 保留重放与路由元数据，只把白名单里的公开字段交给模型（`clean_public`）；候选的语义走同一条清洗路径。描述里显示的变量随描述公开：清洗 `stats` 时保留规则文本引用的变量（`rules.variables`）。抽牌、弃牌、消耗堆的公开顺序只通过关系表达，不保留原生数组下标。
+`clean_frame` 保留重放与路由元数据，只把白名单里的公开字段交给模型（`clean_public`）；候选的语义走同一条清洗路径。`public` 与 `legal` 由清洗重建，只有其余字段深拷贝，键序与原帧相同：这两块是帧的大头，拷了也是丢掉。描述里显示的变量随描述公开：清洗 `stats` 时保留规则文本引用的变量（`rules.variables`）。抽牌、弃牌、消耗堆的公开顺序只通过关系表达，不保留原生数组下标。
 
 ## 规则文本
 
@@ -36,7 +36,9 @@
 
 ## 批打包
 
-解析结果按内容缓存：同一实体的字段行按内容共享，规则文本按内容与公开值缓存。一个批内解析结果与实体绑定都相同的程序只编码一次，并按节点数分组。`batch.py` 按节点数的 2 的幂分组，训练直接用；采样在 `main/play/wire.py` 的 `unpack` 里把这些组并成两组（不超过 4 个节点的与其余的，`GROUPED`），因为采样的前向受解释器限制，每少一组就少一轮循环。两种分组只差数值噪声。
+解析结果按内容缓存：同一实体的字段行按内容共享（键是实体的 `repr`，键按原顺序；`fields_of` 自己排序，键序不同的同一实体只是多一次未命中），规则文本按内容与公开值缓存。`observation(frame, cleaned=True)` 给 `clean_frame` 洗过的帧用（采样进程）：清洗是幂等的，所以不再洗一遍，只复制观察会写的部分（实体列表与实体，显示变量写进的 `named`、`stats`）；训练读分片时照常再洗，两条路的观察逐项相同。一个批内解析结果与实体绑定都相同的程序只编码一次，并按节点数分组。`batch.py` 按节点数的 2 的幂分组，训练直接用；采样只编码采集进程的编码表里还没有的程序，`main/play/wire.py` 的 `unpack` 把它们并成两组（不超过 64 个节点的与其余的，`GROUPED`），因为采样的前向受解释器限制，每少一组就少一轮循环。两种分组只差数值噪声。
+
+字段行（`FieldRow`）与程序（`Effect`）各带一个按内容取的 64 位摘要（`row_digest`、`Effect.digest`，第一次用时算，存在对象上），采样进程用它判断一个实体或程序这一轮是否已经发给编码表（见 [play](play.md#采样进程分工)）。摘要只看网络读到的东西：字段的名字、符号与数值，程序的节点与边；实体的引用不在其中，程序的绑定另算。
 
 ## 已知的坑
 

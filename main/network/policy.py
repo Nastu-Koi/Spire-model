@@ -5,6 +5,7 @@ multi-select progress is part of that observation, so sessions only cache the
 encoding of an unchanged frame and enforce fresh state versions.
 """
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -24,6 +25,9 @@ class Choice:
     base_log_prob: torch.Tensor | float | None = None  # at temperature 1
     explored: bool = False  # drawn among the candidates the caller restricted it to, not from the policy
     forked: bool = False  # the candidate of the rank the caller named, not a draw from the policy
+    # Every legal candidate's log-probability at the temperature it was drawn at, in the
+    # frame's order: the distribution it was drawn from (or would have been, explored or forked).
+    log_probs: list[float] | None = None
 
 
 class SessionPolicy:
@@ -221,17 +225,19 @@ class Decisions(Packed):
             self.rank = torch.full((len(self.masks),), -1, dtype=torch.long)
 
 
-def prepare_decisions(vocabulary, frames, restrict=None, rank=None):
+def prepare_decisions(vocabulary, frames, restrict=None, rank=None, *, observe=observation, tensors=True):
     """Pack one decision of each frame; returns their observations beside the pack.
     Every frame must offer a choice: a forced action has nothing to score. `restrict`,
     one entry per frame, names the candidates an exploring decision is drawn among
     (`choose_batch`); None for a decision drawn from the whole distribution. `rank`,
-    one entry per frame, the place of the candidate a forking decision takes."""
+    one entry per frame, the place of the candidate a forking decision takes.
+    `observe` parses a frame, as `prepare_replay`'s does. Without `tensors` the batch's
+    fields are left as rows (`collate`) for a sampling process's `wire.pack`."""
     restrict = [None] * len(frames) if restrict is None else list(restrict)
     rank = [None] * len(frames) if rank is None else list(rank)
     observations, masks, explore = [], [], []
     for frame, allowed, place in zip(frames, restrict, rank):
-        obs = observation(frame)
+        obs = observe(frame)
         candidates = {candidate["candidate_ref"]: candidate["decoder_slot_ref"] for candidate in frame["legal"]["candidates"]}
         legal = set(candidates.values())
         if not legal <= set(obs.slot_refs):
@@ -245,7 +251,7 @@ def prepare_decisions(vocabulary, frames, restrict=None, rank=None):
         explore.append([slot in among for slot in obs.slot_refs])
     width = max(map(len, masks))
     return observations, Decisions(
-        collate(observations, vocabulary),
+        collate(observations, vocabulary, tensors=tensors),
         torch.tensor([mask + [False] * (width - len(mask)) for mask in masks]),
         torch.tensor([mask + [False] * (width - len(mask)) for mask in explore]),
         torch.tensor([-1 if place is None else place for place in rank], dtype=torch.long),
@@ -261,12 +267,16 @@ class Replay(Packed):
     labels: torch.Tensor  # [decisions] chosen slot
     owners: torch.Tensor  # [decisions] macro-action of each decision
     first: torch.Tensor  # [macros] first decision of each macro-action
+    # [decisions, actions] the log-probabilities each decision was drawn with, −inf off
+    # its legal slots, where every decision kept them (`Choice.log_probs`); else None.
+    reference: torch.Tensor | None = None
 
 
 def prepare_replay(vocabulary, list_of_steps, *, pad_to=None, observe=observation):
     """Pack policy decisions; forced and controller steps carry no label.
-    `observe` parses a frame: a caller that has parsed the frames passes its results."""
-    owners, observations, masks, labels, first = [], [], [], [], []
+    `observe` parses a frame: a caller that has parsed the frames passes its results.
+    Where every decision kept the distribution it was drawn from, it is packed too."""
+    owners, observations, masks, labels, first, drawn = [], [], [], [], [], []
     for macro, steps in enumerate(list_of_steps):
         segment = None
         for step in steps:
@@ -292,6 +302,13 @@ def prepare_replay(vocabulary, list_of_steps, *, pad_to=None, observe=observatio
             observations.append(obs)
             masks.append([slot in legal for slot in obs.slot_refs])
             labels.append(obs.slot_refs.index(refs[step["candidate_ref"]]["decoder_slot_ref"]))
+            if drawn is not None and "log_probs" in step:
+                row = [-math.inf] * len(obs.slot_refs)
+                for candidate, log_prob in zip(candidates, step["log_probs"], strict=True):
+                    row[obs.slot_refs.index(candidate["decoder_slot_ref"])] = log_prob
+                drawn.append(row)
+            else:
+                drawn = None
         if len(first) == macro:
             raise ProtocolError("Macros without policy decisions are not training samples")
     width = max(map(len, masks))
@@ -301,6 +318,7 @@ def prepare_replay(vocabulary, list_of_steps, *, pad_to=None, observe=observatio
         torch.tensor(labels),
         torch.tensor(owners),
         torch.tensor(first),
+        None if drawn is None else torch.tensor([row + [-math.inf] * (width - len(row)) for row in drawn]),
     )
 
 

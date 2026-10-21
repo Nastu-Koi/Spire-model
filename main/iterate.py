@@ -53,7 +53,7 @@ from main.env.seeds import split_group
 from main.learn import batches, grpo
 from main.learn.advantage import FILE as ADVANTAGES
 from main.learn.groups import KIND as GROUPS, advantages as group_advantages
-from main.play import groups as act_groups
+from main.play import digests, groups as act_groups
 from main.play.groups import group_rounds, groups_summary, sample_groups
 from main.network.checkpoint import archive_checkpoint
 from main.network.config import LearningRates, TrainConfig
@@ -62,7 +62,7 @@ from main.play.evaluation import evaluate_runs
 from main.learn.history import TrainingHistory
 from main.learn.trainer import Learner
 from main.env.protocol import CHARACTERS, ProtocolError
-from main.play.rollout import PRECISIONS, SUMMARY_RUNS, RolloutRunner, collect_round, exploration_rates
+from main.play.rollout import PRECISIONS, SUMMARY_RUNS, RolloutRunner, collect_round, exploration_rates, policy_digest
 from main.play.sampling import Samplers
 from main.env.seeds import validate_evaluation_seeds
 
@@ -122,6 +122,10 @@ class Settings:
     # draws one of its USE_POTION candidates instead of a sample from the policy
     # (`RolloutRunner`, `rollout.exploration_rates`): a number, a list or a mapping.
     explore_potions: object = 0.0
+    # The ascension window a round's groups are played in, [lowest, highest]: each
+    # (character, seed) group at one of its ascensions (`round_ascensions`); at the
+    # checkpoint's when None. The evaluations stay at the checkpoint's.
+    ascensions: list | None = None
 
     def __post_init__(self):
         if self.runs_per_character < 1 or self.evaluate_every < 1:
@@ -154,6 +158,11 @@ class Settings:
         if self.wave_shares is not None:
             self.wave_shares = [float(share) for share in self.wave_shares]
             batches.wave_shares(dict.fromkeys(names, 1), self.wave_shares)
+        if self.ascensions is not None:
+            window = list(self.ascensions)
+            if len(window) != 2 or not all(type(a) is int for a in window) or not 0 <= window[0] <= window[1] <= 10:
+                raise ValueError("The ascension window is two integers, lowest and highest, from 0 to 10")
+            self.ascensions = window
 
     def group_shares(self, macros):
         """The shares of an update's batch, `macros` being each wave's priced
@@ -191,6 +200,22 @@ def round_seeds(root, iteration, count, excluded=()):
                 chosen.append(seed)
         seeds[character] = chosen
     return seeds
+
+
+def round_ascensions(root, iteration, seeds, window):
+    """The ascension of each (character, seed) group of a round, in `window` [lowest,
+    highest]: each character's seeds take the window's ascensions in turn from a start
+    derived from the root, the iteration and the character, so that every ascension
+    has as many of a character's groups as another, give or take one, the same each
+    time the round is asked for."""
+    lowest, highest = window
+    width = highest - lowest + 1
+    levels = {}
+    for character in CHARACTERS:
+        start = int(hashlib.sha256(f"{root}:{iteration}:{character}:ascension".encode()).hexdigest(), 16) % width
+        levels[character] = {str(seed): lowest + (start + place) % width
+                             for place, seed in enumerate(seeds.get(character, []))}
+    return levels
 
 
 def _stop(*_):
@@ -261,18 +286,21 @@ def accumulation(settings, config):
     return settings.batch // config.logical_batch_size
 
 
-def play_round(samplers, runner, seeds, directory, settings, output):
+def play_round(samplers, runner, seeds, directory, settings, output, ascensions=None):
     """A round of act groups on `seeds` into `directory` (`main.play.groups`), by the
-    sampling processes `samplers` (a context manager). A round cut off on these seeds
-    goes on from the wave it was in; one on other seeds is set aside. Returns the summary."""
+    sampling processes `samplers` (a context manager), each group at its ascension in
+    `ascensions` when given. A round cut off on these seeds and ascensions goes on from
+    the wave it was in; one on others is set aside. Returns the summary."""
     directory = Path(directory)
-    listed = directory / "metadata" / "seeds.json"
-    if directory.exists() and not (listed.is_file() and json.loads(listed.read_text()) == seeds):
+    listed, levels = directory / "metadata" / "seeds.json", directory / "metadata" / "ascensions.json"
+    same = (listed.is_file() and json.loads(listed.read_text()) == seeds
+            and (json.loads(levels.read_text()) if levels.is_file() else None) == ascensions)
+    if directory.exists() and not same:
         set_aside(output, directory)
     with samplers as pool:
         return sample_groups(pool, runner, seeds, directory, n=settings.group_n, m=settings.group_m,
                              boundaries=settings.boundaries, bosses=settings.bosses,
-                             fork_depth=settings.fork_depth, resume=True)
+                             fork_depth=settings.fork_depth, ascensions=ascensions, resume=True)
 
 
 def round_result(summary, directory, settings):
@@ -295,6 +323,7 @@ def round_result(summary, directory, settings):
         decisions={wave: sum(summary[wave]["phases"].values()) for wave in waves},
         explored={wave: summary[wave].get("explored", 0) for wave in waves},
         forked={wave: summary[wave].get("forked", 0) for wave in waves},
+        by_ascension={wave: summary[wave].get("by_ascension") for wave in waves},
         collector={wave: summary[wave].get("collector") for wave in waves},
         policy_version=summary["policy_version"],
         policy_digest=summary["policy_digest"], temperature=summary["temperature"], seconds=summary["seconds"])
@@ -469,6 +498,16 @@ class Driver:
         write_json(self.output / "seeds" / f"iteration-{iteration:04d}.json", seeds)
         return seeds
 
+    def round_ascensions(self, iteration, seeds):
+        """The ascension of each group of an iteration's round (`round_ascensions`),
+        written under `seeds/`; None without a window."""
+        settings = self.settings
+        if settings.ascensions is None:
+            return None
+        levels = round_ascensions(settings.seed_root, iteration, seeds, settings.ascensions)
+        write_json(self.output / "seeds" / f"iteration-{iteration:04d}-ascensions.json", levels)
+        return levels
+
     def sample(self, iteration):
         """A round of act groups (`main.play.groups`) on seeds of the iteration's own:
         `runs_per_character` seeds of each character, `group_n` segments from each,
@@ -478,7 +517,7 @@ class Driver:
         if summary is None:
             seeds = self.round_seeds(iteration)
             summary = play_round(self.samplers(settings.workers), self.sampler(iteration), seeds, directory,
-                                 settings, self.output)
+                                 settings, self.output, self.round_ascensions(iteration, seeds))
             self.release()
         return round_result(summary, directory, settings)
 
@@ -491,7 +530,7 @@ class Driver:
             **{key: head["stats"][key] for key in ("groups", "return_mean", "between_share", "uniform_groups")},
             tree_share=head["stats"]["tree"]["share"], branching_share=head["stats"]["tree"]["branching_share"],
             r2_within=head["stats"]["baseline"]["r2_within"], explored=head["stats"].get("explored"),
-            forked=head["stats"].get("forked"))
+            forked=head["stats"].get("forked"), by_ascension=head["stats"].get("by_ascension"))
             for wave, head in written.items()}
 
     @staticmethod
@@ -542,7 +581,7 @@ class Driver:
             if summary["iteration"] > iteration:
                 continue
             for wave in summary["waves"]:
-                for name in ("accepted", act_groups.SAVES, "index.jsonl.gz", ADVANTAGES):
+                for name in ("accepted", act_groups.SAVES, "index.jsonl.gz", ADVANTAGES, digests.FILE):
                     freed += self.remove(directory / wave / name)
         freed += self.prune_archives(iteration)
         freed += self.remove(self.output / "interrupted")
@@ -559,7 +598,8 @@ class Driver:
             if not archived.exists():
                 archive_checkpoint(current, archived)
             return applied["update"]
-        waves = {wave: directory / wave for wave in groups_summary(directory)["waves"]}
+        summary = groups_summary(directory)
+        waves = {wave: directory / wave for wave in summary["waves"]}
         macros = batches.priced_macros(waves)
         accumulate = accumulation(settings, learner.config)
         # The pass in logical batches: every wave seen once, or the steps asked for.
@@ -573,6 +613,12 @@ class Driver:
         # stretch of `reference_every` iterations started from.
         anchored = self.reference(iteration)
         reference = grpo.Reference.load(anchored, self.device)
+        # The reference played the round: its distributions are the ones the decisions
+        # were drawn from, kept as they were sampled, and it need not run again.
+        recorded = bool(summary.get("distributions")) and policy_digest(reference.model) == summary["policy_digest"]
+        if recorded:
+            reference = grpo.Reference.recorded()
+            self.release()
         metrics = grpo.group_update(
             learner, waves, reference, clip=settings.clip, kl=settings.kl, updates=updates,
             window_shards=settings.window_shards, weight_cap=settings.weight_cap, shares=shares,
@@ -591,8 +637,9 @@ class Driver:
             waves=done["waves"], grad_norm=metrics.get("grad_norm"), seconds=round(time.monotonic() - started, 1),
             wait_seconds=round(metrics["wait_seconds"], 1),
             wait_share=round(metrics["wait_seconds"] / max(metrics["duration_seconds"], 1e-9), 4),
+            shapes=metrics["shapes"],
             clip=done["clip"], kl=done["kl"], phase_weights=done["phase_weights"], seen=done["seen"],
-            reference=str(anchored))
+            reference=str(anchored), reference_recorded=recorded)
         seeds = set().union(*(RunShards(path).seeds for path in waves.values()))
         learner.save(current, dict(
             runtime=self.runtime, iteration=iteration, update=result, advantage=GROUPS,
@@ -648,6 +695,9 @@ class Driver:
             accuracy=update["accuracy"], entropy=update.get("entropy"),
             ratio_mean=seen["ratio_mean"], clip_fraction=seen["clip_fraction"], kl=seen["kl"],
             zero_share=seen["zero_share"], update_wait_share=update["wait_share"],
+            # Where the pass's drift had taken the explored decisions when each was seen (`grpo.Clipped`).
+            **{key: seen.get(key) for key in ("explored", "explored_up_log_ratio", "explored_down_log_ratio",
+                                              "explored_outside_clip", "explored_beyond")},
             **{f"{wave}_loss": update["losses"].get(wave) for wave in waves},
             **{f"{wave}_zero_share": update["waves"][wave]["zero_share"] for wave in waves})
         if evaluation:

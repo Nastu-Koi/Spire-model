@@ -5,11 +5,11 @@
 | 模块 | 内容 |
 | --- | --- |
 | `index.py` | 分片写入（`ShardWriter`）、索引行（`index_row`）、`reindex`（`rebuild_index`） |
-| `shards.py` | 对局校验（`validate_run`）、`audit`（`audit_files`）、内存数据集（`load_runs`）、`RunShards`（多目录读成一个数据集）、样本与权重（`samples`、`group_weights`）、留出（`held_out`）、按难度与 `--combat-from` 取子集、微批切分（`microbatches`） |
+| `shards.py` | 对局校验（`validate_run`）、`audit`（`audit_files`）、内存数据集（`load_runs`）、`RunShards`（多目录读成一个数据集；`read` 一次读进整片，`runs` 逐局交出）、样本与权重（`samples`、`group_weights`）、留出（`held_out`）、按难度与 `--combat-from` 取子集、微批切分（`microbatches`） |
 
 ## 格式
 
-一个分片目录是 gzip 分片加索引：`accepted/*.jsonl.gz` 每局（或每个样本组）一行、各为一个 gzip 成员；`index.jsonl.gz` 每局一行：`run_id`、`seed`、`split_group`、角色、难度、各阶段可训练宏动作数、来源 `source`、契约哈希、分片与行号；采样轮另记 `ROLLOUT_FIELDS`（`policy_version`、`policy_digest`、`iteration`、`victory`，所在组 `group`，结局 `outcome`，是否含探索步 `explored`、分叉步 `forked`）。没有 `source` 的索引行读作示范，带策略字段的读作采样。`summary.json` 是导入或采样轮的契约。
+一个分片目录是 gzip 分片加索引：`accepted/*.jsonl.gz` 每局（或每个样本组）一行、各为一个 gzip 成员；`index.jsonl.gz` 每局一行：`run_id`、`seed`、`split_group`、角色、难度、各阶段可训练宏动作数、来源 `source`、契约哈希、分片与行号；采样轮另记 `ROLLOUT_FIELDS`（`policy_version`、`policy_digest`、`iteration`、`victory`，所在组 `group`，结局 `outcome`，是否含探索步 `explored`、分叉步 `forked`，每个有选择的决策是否记下了采样分布 `distributions`）。没有 `source` 的索引行读作示范，带策略字段的读作采样。`summary.json` 是导入或采样轮的契约。
 
 索引的计数按当前控制规则过滤：只数主策略的可训练宏动作。加载时拒绝旧控制版本的索引，读分片时复核计数与来源。
 

@@ -2,6 +2,7 @@
 ascension, fights taken from other directories, and indexes rebuilt."""
 
 import gzip
+import inspect
 import json
 from collections import Counter
 
@@ -102,6 +103,21 @@ def test_several_directories_are_read_together_as_one_data_set(tmp_path):
     learner = learner_for(everything)
     metrics = learner.bootstrap(shards, epochs=1, window_shards=1, include_held_out=True)
     assert metrics[0]["weight"] == pytest.approx(1.0) and metrics[0]["samples"] == 10
+
+
+def test_shards_are_read_a_run_at_a_time(tmp_path):
+    groups = [rows(f"d{i}", f"d{i}") for i in range(3)]
+    write_rows(tmp_path / "demo.jsonl.gz", groups)
+    import_samples(tmp_path / "demo.jsonl.gz", tmp_path / "demo", shard_samples=len(groups[0]) * 2)
+    shards = RunShards(tmp_path / "demo")
+    names = [name for window in shards.window_names(shards=8) for name in window]
+    runs = shards.runs(names)
+    # A generator: one decoded run in hand at a time, as `read` gives them all.
+    assert inspect.isgenerator(runs)
+    assert [run["run_id"] for run in runs] == [run["run_id"] for run in shards.read(names)] != []
+    # A part of the data reads its own runs of the shards and skips the rest.
+    part = RunShards(tmp_path / "demo", shards.rows[1:2])
+    assert [run["run_id"] for run in part.runs(names)] == [shards.rows[1]["run_id"]]
 
 
 def test_group_weights_share_a_group_equally_whatever_the_source():

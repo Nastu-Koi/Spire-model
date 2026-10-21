@@ -166,8 +166,9 @@ def parser():
     x.add_argument(
         "--workers",
         type=int,
-        default=1,
-        help="Concurrent engine processes sharing batched GPU inference",
+        default=64,
+        help="Concurrent engine processes sharing batched GPU inference; 64, the fastest "
+             "on the training machine, by default (about 280 MB of memory each)",
     )
     x.add_argument(
         "--processes",
@@ -199,7 +200,8 @@ def parser():
     x.add_argument("--seed-root", default="iterate", help="What every round's seeds are derived from")
     x.add_argument("--exclude-seeds", nargs="*", default=[],
                    help="Seed files (evaluation and test sets) no round may be played on")
-    x.add_argument("--workers", type=int, default=1, help="Engines of a sampled round")
+    x.add_argument("--workers", type=int, default=64,
+                   help="Engines of a sampled round; 64, the fastest on the training machine, by default")
     x.add_argument("--processes", type=int, help="Sampling processes; one per engine by default")
     x.add_argument("--max-steps", type=int, default=10000)
     x.add_argument("--engine-root")
@@ -211,6 +213,10 @@ def parser():
     x.add_argument("--group-n", type=int, default=8, help="Segments from each seed in the first wave")
     x.add_argument("--group-m", type=int, nargs="+", default=[8],
                    help="Segments from each save, one number or one for each later wave")
+    x.add_argument("--ascensions", type=int, nargs=2, metavar=("LOWEST", "HIGHEST"),
+                   help="Play each (character, seed) group of a round at one ascension of this window, "
+                        "the window's ascensions taking turns; the checkpoint's without it. Evaluations "
+                        "stay at the checkpoint's")
     x.add_argument("--fork-depth", type=int, default=0,
                    help="Decisions with a choice at the start of every segment at which its group parts in "
                         "two, half taking the policy's most likely candidate and half its second; 0 forks none")

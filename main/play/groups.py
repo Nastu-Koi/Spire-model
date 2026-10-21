@@ -9,7 +9,9 @@ wave plays from the continue save a segment of the wave before wrote at the cut:
 an act the run goes on from the map, at a boss fight it enters the fight again
 (`rollout.RolloutRunner.run`). A group is the segments played from one start, `n`
 from each (character, seed) in the first wave and `m` from each save in the later
-ones; its mean return is the baseline each segment is measured against. A segment of
+ones; its mean return is the baseline each segment is measured against. A group is
+at one ascension: a first-wave group at its seed's when the round is given ascensions
+(`sample_groups(..., ascensions=)`), a later one at its save's. A segment of
 a wave with a cut plays to the cut, where the engine's save is taken, or to the run's
 end before it; one of the last wave plays to the end. The groups of a wave are those
 of every segment of the wave before that reached the cut, so that segment's return
@@ -30,12 +32,13 @@ import gzip
 import json
 import shutil
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from main.data.index import INDEX, ShardWriter, index_row
 from main.data.shards import RunShards
 from main.env.protocol import CHARACTERS
+from main.play import digests
 from main.play.rollout import SEGMENTS, write_run
 
 FORMAT = "act-groups-v2"
@@ -94,31 +97,35 @@ def forked(number, size, depth):
     return dict(fork=dict(index=number, size=size, depth=depth)) if depth else {}
 
 
-def start_jobs(seeds, n, wave, stop, fork_depth=0):
+def start_jobs(seeds, n, wave, stop, fork_depth=0, ascensions=None):
     """The jobs of the first wave: each seed of each character `n` times, to the cut
     `stop` (`cuts`; None plays to the end), each segment forking at its first
-    `fork_depth` decisions with a choice by its place in the group."""
+    `fork_depth` decisions with a choice by its place in the group. `ascensions`
+    (character → seed → ascension) gives every segment of a seed's group its seed's
+    ascension; without it the segments are at the runner's."""
     jobs = []
     for character in CHARACTERS:
         for seed in seeds.get(character, []):
             group = f"{character}:{seed}:{wave}"
+            level = {} if ascensions is None else dict(ascension=ascensions[character][str(seed)])
             for number in range(n):
                 jobs.append((character, dict(seed=str(seed), run_id=f"{group}-{number}", group=group,
-                                             **until(stop), **forked(number, n, fork_depth)), None))
+                                             **until(stop), **forked(number, n, fork_depth), **level), None))
     return jobs
 
 
 def resume_jobs(rows, m, wave, stop, fork_depth=0):
     """The jobs of a later wave: `m` segments from each save row (`save_rows`) of the
     wave before, each to the cut `stop` or, with None, to the run's end, forking as
-    `start_jobs` says."""
+    `start_jobs` says, at the ascension the save was written at."""
     jobs = []
     for row in rows:
         group = f"{row['run_id']}:{wave}"
+        level = {} if row.get("ascension") is None else dict(ascension=row["ascension"])
         for number in range(m):
             jobs.append((row["character"], dict(seed=row["seed"], run_id=f"{group}-{number}", group=group,
                                                 resume=row["path"], **until(stop),
-                                                **forked(number, m, fork_depth)), None))
+                                                **forked(number, m, fork_depth), **level), None))
     return jobs
 
 
@@ -134,7 +141,8 @@ def write_save(directory, run, save):
     with gzip.open(path, "wt", encoding="utf-8") as stream:
         json.dump(save, stream, separators=(",", ":"))
     return dict(run_id=run["run_id"], group=run["group"], character=run["character"], seed=run["seed"],
-                at=save["at"], act=run.get("reached_act"), boss=run.get("reached_boss"), path=str(path))
+                ascension=run.get("ascension"), at=save["at"], act=run.get("reached_act"),
+                boss=run.get("reached_boss"), path=str(path))
 
 
 def read_save(path):
@@ -151,8 +159,8 @@ def save_rows(directory, wave):
 
 
 class WaveWriter:
-    """The files of one wave: the shards and index of its finished segments, the
-    quarantine of the rest, and the counts of its summary."""
+    """The files of one wave: the shards and index of its finished segments, their
+    digest (`digests`), the quarantine of the rest, and the counts of its summary."""
 
     def __init__(self, directory, shard_samples=2000, *, resume=False):
         """With `resume`, the segments a cut-off wave finished stand (`done` names
@@ -160,18 +168,26 @@ class WaveWriter:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.shards = ShardWriter(self.directory, shard_samples, flush=True, resume=resume)
+        # Gone on with, a wave's digest keeps the lines of the segments that stand.
+        self.digests = (self.directory / digests.FILE).open("ab" if resume else "wb")
         self.outcomes, self.failed, self.phases = Counter(), Counter(), Counter()
         self.groups = set()
+        # Each ascension's finished segments and their outcomes.
+        self.ascensions = defaultdict(Counter)
         self.written = self.stored_steps = self.explored = self.forked = 0
+        # The segments whose decisions kept the distributions they were drawn from.
+        self.recorded = 0
         self.done = {row["run_id"] for row in self.shards.rows}
         self.resumed = len(self.shards.rows)
         for row in self.shards.rows:
             self.outcomes[row["outcome"]] += 1
             self.phases.update(row["phases"])
             self.groups.add(row["group"])
+            self.ascensions[row.get("ascension")][row["outcome"]] += 1
             self.written += 1
             self.explored += row.get("explored") or 0
             self.forked += row.get("forked") or 0
+            self.recorded += bool(row.get("distributions"))
         # The contracts of the rows found, from one of their runs each.
         for row in self.shards.rows:
             if row["contract"] not in self.shards.contracts:
@@ -187,26 +203,38 @@ class WaveWriter:
             self.failed[run.get("error") or run["status"]] += 1
             return False
         self.shards.write(run["member"], index_row(run, phases=run["phases"]), run["stored_steps"], run["contract"])
+        # After the shard and its index: a digest line is never of a segment the index lacks.
+        if run.get("digest") is not None:
+            self.digests.write(run["digest"])
+            self.digests.flush()
         self.outcomes[run["outcome"]] += 1
         self.phases.update(run["phases"])
         self.groups.add(run["group"])
+        self.ascensions[run.get("ascension")][run["outcome"]] += 1
         self.written += 1
         self.stored_steps += run["stored_steps"]
         self.explored += run.get("explored") or 0
         self.forked += run.get("forked") or 0
+        self.recorded += bool(run.get("distributions"))
         return True
+
+    def close_files(self):
+        self.shards.close()
+        self.digests.close()
 
     def close(self, wave, stop, jobs, seconds, collector=None):
         """`stop` is the wave's cut (`cuts`; None for the last wave); `collector` the
         collecting process's account of the wave (`Samplers.timing`), if any."""
-        self.shards.close()
+        self.close_files()
         summary = dict(kind="act_groups_wave", format=FORMAT, wave=wave,
                        until_act=stop[1] if stop and stop[0] == "act" else None,
                        until_boss=stop[1] if stop and stop[0] == "boss" else None,
                        until=None if stop is None else list(stop), segments=len(jobs),
                        written=self.written, resumed=self.resumed, groups=len(self.groups),
                        outcomes=dict(self.outcomes), failed=dict(self.failed), phases=dict(sorted(self.phases.items())),
-                       explored=self.explored, forked=self.forked,
+                       explored=self.explored, forked=self.forked, distributions=self.recorded == self.written,
+                       by_ascension={str(level): dict(written=sum(counts.values()), outcomes=dict(counts))
+                                     for level, counts in sorted(self.ascensions.items(), key=lambda x: str(x[0]))},
                        stored_steps=self.stored_steps, shards=len(self.shards.shards), contracts=self.shards.contracts,
                        seconds=round(seconds, 1), collector=collector)
         _write_summary(self.directory, summary)
@@ -242,7 +270,7 @@ def set_aside(directory):
 
 
 def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BOUNDARIES, bosses=(),
-                  fork_depth=0, shard_samples=2000, on_run=None, resume=False):
+                  fork_depth=0, ascensions=None, shard_samples=2000, on_run=None, resume=False):
     """Sample one round of act groups into `directory`: the first wave over `seeds`
     (per character), then a wave over the saves of each wave before; the cuts are the
     first decisions of the `boundaries` acts and of the `bosses` acts' boss fights
@@ -254,7 +282,9 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
     finished waves stand, the wave under way keeps what it finished and plays the
     rest; a wave left without an index is set aside and played again. With
     `fork_depth` the segments of every group part at their first decisions with a
-    choice, half by half (`rollout.fork_ranks`)."""
+    choice, half by half (`rollout.fork_ranks`). With `ascensions` (character → seed →
+    ascension) every group is played at its seed's ascension, its later waves at the
+    ascension their saves were written at."""
     stops = [*cuts(boundaries, bosses), None]
     names = [wave_name(None), *(wave_name(cut) for cut in stops[:-1])]
     later = per_wave(m, len(names) - 1)
@@ -268,11 +298,13 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
         raise FileExistsError("Act groups directory already holds a round; choose a new one")
     directory.mkdir(parents=True, exist_ok=True)
     write_run(directory / "metadata" / "seeds.json", seeds)
+    if ascensions is not None:
+        write_run(directory / "metadata" / "ascensions.json", ascensions)
     started = time.monotonic()
 
     summaries, saves, rows = {}, {}, []
     for level, (wave, stop) in enumerate(zip(names, stops)):
-        jobs = (start_jobs(seeds, n, wave, stop, fork_depth) if level == 0
+        jobs = (start_jobs(seeds, n, wave, stop, fork_depth, ascensions) if level == 0
                 else resume_jobs(rows, later[level - 1], wave, stop, fork_depth))
         finished = wave_summary(directory / wave) if resume else None
         if finished is not None and finished["wave"] == wave and finished["segments"] == len(jobs) \
@@ -311,7 +343,7 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
             # not finished.
             if listing is not None:
                 listing.close()
-            writer.shards.close()
+            writer.close_files()
         collector = getattr(samplers, "timing", None) if pending else None
         summaries[wave] = writer.close(wave, stop, jobs, time.monotonic() - begun, collector)
         if stop is not None:
@@ -323,7 +355,10 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
         n=n, m=later, fork_depth=fork_depth,
         boundaries=[int(act) for act in boundaries], bosses=[int(act) for act in bosses],
         cuts=[list(cut) for cut in stops[:-1]], waves=names, seeds="metadata/seeds.json",
+        ascensions=None if ascensions is None else "metadata/ascensions.json",
         groups=sum(len(seeds.get(c, [])) for c in CHARACTERS), saves=saves,
+        # Every decision of the round kept the distribution it was drawn from (`WaveWriter`).
+        distributions=all(summaries[wave].get("distributions") for wave in names),
         **summaries, seconds=round(time.monotonic() - started, 1))
     _write_summary(directory, summary)
     return summary

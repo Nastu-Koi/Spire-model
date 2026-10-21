@@ -19,7 +19,8 @@ INDEX = "index.jsonl.gz"
 HEADER = dict(kind="policy_index", control_version=CONTROL_VERSION)
 # What the index says of a sampled run beyond its identity: its policy, its
 # iteration, its group and how it ended, for the advantages and the reports.
-ROLLOUT_FIELDS = ("policy_version", "policy_digest", "iteration", "victory", "group", "outcome", "explored", "forked")
+ROLLOUT_FIELDS = ("policy_version", "policy_digest", "iteration", "victory", "group", "outcome", "explored", "forked",
+                  "distributions")
 # Level 6 packs runs within a few percent of level 9 in a third of the time.
 COMPRESSION = 6
 

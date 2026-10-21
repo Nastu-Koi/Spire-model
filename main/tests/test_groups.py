@@ -1,11 +1,19 @@
 """Act groups: segments of runs cut at the boundary acts and gone on from the saves
 there, sampled wave by wave (`main.play.groups`)."""
 
+import json
+from collections import Counter
+
 import pytest
+import torch
 
 from main.data.index import read_index
 from main.data.shards import RunShards, validate_run
+from main.env.control import policy_macros
 from main.env.protocol import CHARACTERS, ProtocolError
+from main.learn.groups import advantages, read_waves
+from main.network.policy import prepare_replay
+from main.play import digests
 from main.play.groups import cuts, groups_summary, per_wave, resume_jobs, sample_groups, save_rows, start_jobs, waves
 from main.play.rollout import RolloutRunner, stand
 from main.play.sampling import Samplers
@@ -55,6 +63,28 @@ def test_a_segment_stops_at_the_act_and_the_next_goes_on_from_its_save():
     assert stand(frames(last)[0]) == (3, 1, None) and all(stand(frame)[0] == 3 for frame in frames(last))
     assert "save" not in last
     validate_run(last, on_policy=True)
+
+
+def test_a_segment_is_played_at_its_own_ascension_and_goes_on_at_its_saves():
+    policy = learner()
+    played = runner(policy)  # the runner's own ascension is 0
+    first = played.run(engine(), "Ironclad", "seed", until_act=2, run_id="Ironclad:seed:act1-0",
+                       group="Ironclad:seed:act1", ascension=5)
+    assert first["ascension"] == 5 and all(frame["contract"]["fixed_ascension"] == 5 for frame in frames(first))
+    validate_run(first, on_policy=True)
+    second = played.run(engine(), "Ironclad", "seed", resume=first["save"], until_act=3, ascension=5,
+                        run_id="Ironclad:seed:act1-0:act2-0", group="Ironclad:seed:act1-0:act2")
+    assert second["ascension"] == 5 and all(frame["contract"]["fixed_ascension"] == 5 for frame in frames(second))
+    validate_run(second, on_policy=True)
+    # A save goes on at the ascension it was written at, not at another one asked for.
+    other = played.run(engine(), "Ironclad", "seed", resume=first["save"], until_act=3, ascension=3,
+                       run_id="Ironclad:seed:act1-0:act2-1", group="Ironclad:seed:act1-0:act2")
+    assert other["status"] == "error" and "ascension" in other["error"]
+    with pytest.raises(ValueError, match="Ascension"):
+        played.run(engine(), "Ironclad", "seed", until_act=2, ascension=11, run_id="x", group="x")
+    # Without one the run is at the runner's.
+    plain = played.run(engine(), "Ironclad", "seed", until_act=2, run_id="Ironclad:seed:act1-1", group="Ironclad:seed:act1")
+    assert plain["ascension"] == 0
 
 
 def test_a_segment_stops_at_the_boss_fight_and_the_next_enters_it_again():
@@ -185,6 +215,32 @@ def test_act_groups_sample_the_waves_in_turn_and_keep_the_chains_they_won(tmp_pa
 
 
 
+def test_a_round_plays_each_group_at_its_seeds_ascension_and_its_later_waves_at_their_saves(tmp_path):
+    policy = learner()
+    seeds = {character: [f"{character}-a", f"{character}-b"] for character in CHARACTERS}
+    ascensions = {character: {f"{character}-a": 0, f"{character}-b": 4} for character in CHARACTERS}
+    directory = tmp_path / "groups"
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        summary = sample_groups(pool, runner(policy), seeds, directory, n=2, m=[1, 1], boundaries=BOUNDARIES,
+                                ascensions=ascensions)
+    assert summary["ascensions"] == "metadata/ascensions.json"
+    assert json.loads((directory / "metadata/ascensions.json").read_text()) == ascensions
+    for wave in summary["waves"]:
+        rows = list(read_index(directory / wave))
+        # Every segment is at its root seed's ascension, a later wave's through its save.
+        assert all(row["ascension"] == ascensions[row["character"]][row["seed"]] for row in rows)
+        counted = summary[wave]["by_ascension"]
+        assert {level: entry["written"] for level, entry in counted.items()} == Counter(str(r["ascension"]) for r in rows)
+        assert sum(sum(entry["outcomes"].values()) for entry in counted.values()) == summary[wave]["written"]
+    assert all(row["ascension"] == ascensions[row["character"]][row["seed"]]
+               for wave in ("act1", "act2") for row in save_rows(directory, wave))
+    # The advantages count each ascension's groups apart.
+    for wave, head in advantages(directory, processes=1).items():
+        levels = head["stats"]["by_ascension"]
+        assert set(levels) == {"0", "4"} and sum(entry["groups"] for entry in levels.values()) == head["stats"]["groups"]
+        assert all(entry["segments"] > 0 and entry["return_mean"] is not None for entry in levels.values())
+
+
 def test_a_round_cut_off_goes_on_from_the_wave_it_was_in(tmp_path):
     import gzip
     import json
@@ -224,6 +280,12 @@ def test_a_round_cut_off_goes_on_from_the_wave_it_was_in(tmp_path):
         for run in window_:
             validate_run(run)
     assert groups_summary(directory)["act3"]["written"] == 40
+    assert again["act3"]["distributions"] and again["distributions"]
+    # The digest goes on too: a segment played again is its later line.
+    digested = read_waves(directory, ["act3"], processes=1)
+    (directory / "act3" / digests.FILE).rename(tmp_path / "act3.digest")
+    assert read_waves(directory, ["act3"], processes=1) == digested
+    (tmp_path / "act3.digest").rename(directory / "act3" / digests.FILE)
 
     # A wave left without an index is set aside and played again.
     (directory / "summary.json").unlink()
@@ -234,6 +296,35 @@ def test_a_round_cut_off_goes_on_from_the_wave_it_was_in(tmp_path):
                               resume=True)
     assert again["act3"]["resumed"] == 0 and again["act3"]["written"] == 40
     assert (directory / "interrupted" / "act3.0").is_dir() and len(list(read_index(directory / "act3"))) == 40
+
+
+def test_a_segment_keeps_the_distribution_each_of_its_decisions_was_drawn_from(tmp_path):
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        summary = sample_groups(pool, runner(policy), seeds, tmp_path / "groups", n=2, m=[2, 2],
+                                boundaries=BOUNDARIES)
+    assert summary["distributions"] and all(summary[wave]["distributions"] for wave in summary["waves"])
+    shards = RunShards(tmp_path / "groups" / "act2")
+    macros = [macro for window in shards.windows(shards=8) for run in window for macro in policy_macros(run)]
+    for macro in macros:
+        for step in macro["steps"]:
+            candidates = step["frame"]["legal"]["candidates"]
+            if step["forced"]:
+                assert "log_probs" not in step
+                continue
+            # Every candidate's log-probability at the temperature it was drawn at: the
+            # chosen one's is what the macro-action's own sums.
+            assert len(step["log_probs"]) == len(candidates)
+            chosen = [c["candidate_ref"] for c in candidates].index(step["candidate_ref"])
+            if len(macro["steps"]) == 1:
+                assert step["log_probs"][chosen] == pytest.approx(macro["old_log_prob"], abs=1e-5)
+    # Replayed, they are the distributions the policy gives the same decisions again.
+    prepared = prepare_replay(policy.vocabulary, [macro["steps"] for macro in macros])
+    with torch.no_grad():
+        again = policy.model.decision_log_probs(prepared, [macro["temperature"] for macro in macros])
+    assert torch.equal(torch.isinf(prepared.reference), ~prepared.masks)
+    assert (prepared.reference - again)[prepared.masks].abs().max() < 1e-4
 
 
 def test_a_wave_cut_off_leaves_no_summary_and_is_gone_on_with(tmp_path):
