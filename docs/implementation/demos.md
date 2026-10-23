@@ -1,6 +1,9 @@
 # demos：示范数据（摘要锚点与导入）
 
-示范只用于 BC 起步（[architecture](../architecture.md#示范数据)）。`spire_codex_data/` 从 Spire Codex 公开的 `v0.111.0 / 单人 / 标准 / 胜利` 对局里生成独立监督样本。唯一的生成方法是**摘要锚点**：只用对局摘要（`.run`）逐节点重建状态，每个决策在原生引擎里从对应的节点边界单独开始。操作回放只用来审计来源和核对结果，不参与生成。
+示范只用于 BC 起步（[architecture](../architecture.md#示范数据)）。`spire_codex_data/` 生成独立监督样本，来源有两种：
+
+- **摘要锚点**：从 Spire Codex 公开的 `v0.111.0 / 单人 / 标准 / 胜利` 对局里，只用对局摘要（`.run`）逐节点重建状态，每个决策在原生引擎里从对应的节点边界单独开始。操作回放只用来审计来源和核对结果，不参与生成。本文除最后一节外都讲这一种。
+- **入场存档的战斗**：求解器重打策略在幕组采样里打过的战斗，从这场战斗的入场存档进入（见[下文](#入场存档的战斗)）。
 
 流程：`fetch` 下载 → `sources` 筛选来源 → `anchor run` 生成 → `anchor export` 导出 → `python -m main import-independent` 导入（`main/demos/independent.py`）；`anchor_audit` 和 `map_ambiguity` 用回放核对。Steam 录制另由 `main/demos/recorder/` 导入（见 [steam](steam.md)）。
 
@@ -15,6 +18,7 @@
 | `rewards.py` | 奖励能否归到奖励界面、领取了什么，以及对应的隔离码 |
 | `shop_sequence.py` | 商店：商店随机流的位置、格位与购买顺序搜索 |
 | `anchor_audit.py`、`map_ambiguity.py` | 用回放核对样本；路线唯一性的测量 |
+| `entry_battles.py` | 入场存档的战斗：求解、复验、汇总与导出 |
 
 | 版本 | 当前值 |
 | --- | --- |
@@ -23,6 +27,7 @@
 | 局外生成 | `summary-anchor-samples-v3` |
 | 战斗、领奖、拿牌、用药生成 | `summary-battle-refresh-v1`、`summary-claim-v1`、`summary-pick-v1`、`summary-potion-v1` |
 | 持久状态规则 | `anchor-state-v1` |
+| 入场存档的战斗、进入契约 | `entry-battle-v1`、`fight-resume-v1` |
 | 摘要锚点导入 | `independent-import-v6` |
 | Steam 录制格式与导入 | `sts2-run-recorder/v2`、`run-recorder-import-v6` |
 
@@ -95,7 +100,7 @@ python -m main import-independent data/anchors/independent-training.jsonl.gz --o
 
 导入后的格式、索引与复用见 [data](data.md)，BC 的命令见 [README](../../README.md)。
 
-战斗默认预算为普通和精英各 5000ms、Boss 20000ms（`--budget-ms`、`--elite-budget-ms`、`--boss-budget-ms`），指每次新搜索的上限，同一回合内复用已有方案。预算直接决定标签质量，并进入续跑身份：对按别的预算求出的锚点目录用默认值重跑 `--kinds battle` 会把全部战斗重新求解，要沿用就显式给出原预算。`--potion-costs 基础 较高 最高` 让求解器自己的药水策略按这三档价格（HP）搜索，不给就是它自己的 9 14 18；价格同样进入续跑身份；求解进程须认识 `potion_costs`（不认识的旧 worker 会不声不响地按原价搜索，所以每次搜索都核对回报的价格）。求解器按毫秒预算搜索，**生成战斗时应单独运行并固定并发数**。局外类型不搜索，不受机器负载影响。
+战斗默认预算为普通和精英各 5000ms、Boss 20000ms（`--budget-ms`、`--elite-budget-ms`、`--boss-budget-ms`），指每次新搜索的上限，同一回合内复用已有方案。预算直接决定标签质量，并进入续跑身份：对按别的预算求出的锚点目录用默认值重跑 `--kinds battle` 会把全部战斗重新求解，要沿用就显式给出原预算。`--potion-costs 基础 较高 最高` 让求解器自己的药水策略按这三档价格（HP）搜索，不给就是它自己的 9 14 18；价格同样进入续跑身份；求解进程须认识 `potion_costs`（不认识的旧 worker 会不声不响地按原价搜索，所以每次搜索都核对回报的价格）。`--final-boss-potion-costs 基础 较高 最高` 只用于整局最后一场战斗，并让那一场按完整 HP 比较（见 [solver](solver.md)），不给时那一场只为赢才用药；回报的 `final_boss_priced` 说明这次搜索按哪组价格，核对按它选，worker 不认识这个字段就拒绝。`--no-beam-portfolio` 让无药搜索每个束宽只跑一次，给用药搜索留出预算。两者同样进入续跑身份。求解器按毫秒预算搜索，**生成战斗时应单独运行并固定并发数**。局外类型不搜索，不受机器负载影响。
 
 默认并发：战斗和其余类型都是 16 局同时进行（`--workers` 同时覆盖两者），每局在自己的 Python 进程里处理：读、比对、写一局的样本行要几秒钟的 Python 时间，放在同一个解释器的线程里会互相等待。求解器的每次搜索是单线程的，按毫秒预算截断：并发越高吞吐越高，但每次搜索更浅。想让每次搜索更深，就调低并发或调高预算；并发超过物理核数只会让搜索更浅。局外类型每局启动一次引擎。一次命令分两轮：先跑除 `battle` 外的全部类型（含同样由求解器打的 `potion`，按这一轮的并发），再跑 `battle`。
 
@@ -221,3 +226,29 @@ SPIRE_CODEX_DATA_NATIVE_TESTS=1 python3 -m pytest spire_codex_data/tests -q   # 
 
 导入后做 BC 起步的两段（命令见 [README](../../README.md#bc-起步)）：第一段拟合全部难度；第二段 `--ascension 10 --combat-from <按更大预算另求的 A10 战斗目录>`，局外样本仍是第一段数据里 A10 的那部分。
 
+
+## 入场存档的战斗
+
+`entry_battles.py` 让求解器重打策略自己打过的战斗（[ADR 0001](../adr/0001-separate-combat-training.md) 的战斗示范）。来源是幕组采样记下的[入场存档](env.md#入场存档)（`iterate --fight-entries`，格式见 [play](play.md#幕组)）；打哪些战斗由一份 `selection.json` 给出：`fights` 每项带 `id`、入场存档的 `path`（相对于 selection 所在目录或它的某一级上级目录）、`character`、`seed`、`ascension`、`kind`、`act`、`floor`；`extra` 同样格式，只打、只汇总、不导出。幕组写的入场存档只有 `at`、`save`、`fight`，所属对局（角色、种子、难度）取 selection 这一行的。
+
+- **进入**：两个原生进程都用 `resume_fight` 按存档进入（契约 `initialization=fight-resume-v1`），卡组、遗物与计数按存档原样恢复，不像锚点那样从字段重建。入场存档记的是进这个房间时的状态，重进时开战效果只发生一次，敌人的随机 HP 与开局手牌也与原战斗相同，求解器打的就是策略打过的那一场（见 [env](env.md#入场存档)）。引擎有 `RoomEntrySave` 之前写的入场存档记的是战斗第一个决策时的状态：重进会把开战对整局状态的效果再叠加一次（Blood Vial 多回血，Royal Poison 多扣 4 HP，Maw Bank、Seal of Gold 多改金币，Petrified Toad 多一瓶药，计数遗物多走一步），敌人的随机 HP 与开局手牌重抽；这类存档要用现在的引擎重新采集。
+- **求解与复验**：同 `battle` 锚点（`anchor.play_battle`）：一个进程里求解器打，另一个逐步重放。同一局（角色、种子）的几场战斗按幕、层顺序共用这两个进程，`--workers` 局同时进行（默认 16）。
+- **设置**：药价 7/9/11（`--potion-costs`），整局最后一场战斗 1/1/1 并按完整 HP 比较（`--final-boss-potion-costs`）；预算与 `anchor run` 相同（普通、精英 5000ms，Boss 20000ms）；无药搜索默认不开束宽组合（`--beam-portfolio` 打开）；腰带有药时把一半预算留给用药层（`--potion-reserve`，默认 0.5，见 [solver](solver.md#smart-用药)）。开局的选牌（赌博筹码、烤火手套、工具箱）由求解器搜索（[solver](solver.md#回合准备选牌)）。设置、生成版本与四个 DLL 的摘要进入续跑身份，一致且战斗名单相同的局直接沿用。
+- **输出**：`runs/<角色>-<种子>.json` 是每场的报告（`status`、`outcome`、`entry_hp`／`exit_hp`、`potions_used`、`setup_choice`：开局选牌拿了几张、由谁选，`seconds`），`samples/<角色>-<种子>.jsonl.gz` 是每场的样本行（胜负都留），`summary.json` 按种类汇总（失败原因、胜负、每场耗时与用药、开局选牌的张数分布，`extra` 单列）。一场出错只记这一场失败；一局在开打前就出错时，这局的每场都记为失败、报告不带续跑身份，再跑同一命令时重打。
+- **导出**：`export` 写 `independent-training.jsonl.gz` 与 `export-summary.json`，只导出 `fights` 里求解器打赢、且有真正决策的战斗；打输的、`extra` 的和全是单候选或控制器步骤的分别计数。样本 `anchor_kind=entry_battle`、`label_source=combat_solver`、`source_integrity=sampled_rollout`、`map_position=entry_save`，没有公开历史前缀。
+
+```bash
+python -m spire_codex_data.entry_battles run --selection <selection.json> --output <目录>
+python -m spire_codex_data.entry_battles export --output <目录>     # independent-training.jsonl.gz
+python -m main import-independent <目录>/independent-training.jsonl.gz --output <数据目录>
+```
+
+求解器按毫秒预算搜索，与 `anchor run` 一样要单独运行、固定并发数，不与采样或训练同时跑。
+
+### 逐轮的战斗示范
+
+BC 阶段每轮从这一轮幕组打过的战斗里挑一批交给求解器（[ADR 0001](../adr/0001-separate-combat-training.md)）。挑选在 `main/play/demo_picks.py`（[play](play.md#战斗示范的挑选)），求解与导入在 `main/demos/rounds.py`：
+
+- `solve_round(<轮目录>/demos)`：读挑选写下的 `selection.json`，以子进程跑 `entry_battles run`（`--workers`，默认 16）与 `export`，再用 `import_samples` 把导出导入成 `demos/imported/`，更新从这里读这一轮的战斗示范。求解器的报告、样本与导出在 `demos/solved/`。
+- 续跑：`imported/summary.json` 已在就直接沿用，不再求解；否则重跑两条命令（`entry_battles` 沿用已求完的局）。没导完的 `imported/` 删掉重导。
+- 返回数据目录、求解器的 `summary.json`，以及导入的组数、决策步数、宏动作数和隔离数。

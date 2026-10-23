@@ -12,7 +12,7 @@
 
 返回 `decision_frame`，含 `contract`、`boundary`、`routing`、`public`、`legal.candidates` 和 `events`。
 
-当前观察版本为 `public-state-v6`，`contract.public_history_version` 为 `public-history-v1`。`public.memory` 包含系统由公开事件维护的历史事实；牌位的 owner 引用对应当前抽牌堆卡牌，只有已知位置生成 `known_draw_before` 关系。概率字段包含 value／known／applicable，读档缺前缀不是初始概率。问号房的两种商店条件分布须结合上一地图点商店事实和所选节点的后继使用。机制与重置规则见 [输入设计](../../docs/architecture.md#输入与公开信息)。旧帧仍可作 BC，但不能用于新输入版本的采样训练；历史公开状态哈希须按原观察版本核对。
+当前观察版本为 `public-state-v7`，`contract.public_history_version` 为 `public-history-v1`。`public.memory` 包含系统由公开事件维护的历史事实；牌位的 owner 引用对应当前抽牌堆卡牌，只有已知位置生成 `known_draw_before` 关系。概率字段包含 value／known／applicable，读档缺前缀不是初始概率。问号房的两种商店条件分布须结合上一地图点商店事实和所选节点的后继使用。机制与重置规则见 [输入设计](../../docs/architecture.md#输入与公开信息)。旧帧仍可作 BC，但不能用于新输入版本的采样训练；历史公开状态哈希须按原观察版本核对。
 
 从候选中选择引用，原样带回版本：
 
@@ -42,9 +42,9 @@
 - `content_info`：只读，参数 `ids`。返回商店规则读取的静态属性：卡牌的类型、稀有度、是否无色，遗物的稀有度和能否进商店，药水的稀有度。不需要对局。
 - `anchor_room`：安装后只能调用一次，进入节点的房间并停在第一个决策。`room.type` 为 `combat`（`encounter`）、`rest_site`、`card_reward`（`cards`，按序列化卡牌给出）、`map`（节点之后的路线选择）、`ancient`（`event` 和 `options`：进入该远古之民事件，把它自己抽出的选项换成记录的选项，顺序不变）、`shop`（`cards`：五个角色卡牌格位各自记录的牌，只取它们的稀有度；`relics`：三个遗物格位记录的遗物）、`event`（`event`：按游戏对这一局的生成进入该事件，不改动任何选项）或 `rewards`（`gold`、`potions`、`relics`、`cards`：一个只含这些奖励的奖励界面，按游戏列出奖励的顺序，不生成任何内容；`gold` 是界面上显示的金币数）。商店的其余库存和全部价格由游戏用存档里的商店随机流照常抽出，引擎不核对也不修正，结果是否等于记录由调用方从帧里判断。`card_reward` 按给定的卡牌原样发放：记录里的候选已经包含玩家当时看到的全部改动，不再让遗物改一遍。
 - 之后任何 `enter_room`、`set_player`、`load_save` 等调试命令照常使 `training_ready` 失效。
-- `write_continue_save`：参数 `path`（绝对路径）。把当前对局写成游戏的续局存档，返回 `save_result`；不影响候选句柄与训练资格；在房间里时写下的是进房之前的状态。幕组的幕开头存档和 Boss 入场存档都由它写下（`main/env/saves.py`）。
+- `write_continue_save`：参数 `path`（绝对路径）。把当前对局写成游戏的续局存档，返回 `save_result`；不影响候选句柄与训练资格；在房间里时写下的是进房之前的状态。战斗进行中写的是进这个战斗房间时的整局状态（`RoomEntrySave`），开战效果与战斗的随机数都不在其中；战斗结束后、其它房间与事件引发的战斗里写的是当时的状态，节点同样退回。幕组的幕开头存档和 Boss 入场存档都由它写下（`main/env/saves.py`）。
 - `resume_save`：参数 `save`（在地图上写下的续局存档，如 `write_continue_save` 在一幕第一个选图决策处写的）。加载存档、静默重装玩家状态，不加节点、不进房间，运行标为训练可用，契约的 `initialization` 为 `act-resume-v1`；返回 `resume_installed`（`act`、`act_floor`、`visited`），之后 `advance_to_boundary` 发布选图决策。存档不在地图上（序列化的房间不是 `MapRoom`）时报错。
-- `resume_fight`：参数 `save`（在一场战斗第一个决策处由 `write_continue_save` 写下的存档，引擎已回滚到进房之前）、`encounter`（`ENCOUNTER.X` 或 `X`）、`act_floor`、`map_point_type`（`boss`／`monster`／`elite`），可选 `second_boss`。加载存档、静默重装玩家状态，把该类型的节点记为已访问（Boss 取本幕 Boss 节点，其它取同类型里最接近该楼层的节点）、设楼层，运行标为训练可用，契约的 `initialization` 为 `fight-resume-v1`，然后进入该遭遇；回复就是战斗的第一个决策帧。存档不在地图上时报错。
+- `resume_fight`：参数 `save`（在一场战斗第一个决策处由 `write_continue_save` 写下的存档，即进这个房间时的状态）、`encounter`（`ENCOUNTER.X` 或 `X`）、`act_floor`、`map_point_type`（`boss`／`monster`／`elite`），可选 `second_boss`。加载存档、静默重装玩家状态，把该类型的节点记为已访问（Boss 取本幕 Boss 节点，其它取同类型里最接近该楼层的节点）、设楼层，运行标为训练可用，契约的 `initialization` 为 `fight-resume-v1`，然后进入该遭遇；回复就是战斗的第一个决策帧，与原战斗的第一个决策帧相同（公开历史里上一个节点是否商店除外，加载的对局里未知），开战效果只发生一次。存档不在地图上时报错。
 
 `anchor_room` 还支持 `treasure`：`relic` 是记录的单件遗物，`gold_roll` 是待核对的开箱原始金币结果（42～52）。入场钩子和宝箱抑制照常执行，未开箱不公开遗物；开箱只条件化该宝箱的一次原始金币抽取，仍推进随机流，再执行原生难度折算、金币修饰和取得效果。调用方须枚举并核对末状态与公开序列，不能把任意指定结果当成历史证据。此约束绑定当前锚点宝箱，不影响普通对局或其它房间。
 
@@ -69,7 +69,7 @@
 
 ## buffered 选择与模型缓存
 
-`SELECT_ONE` 只编辑前缀；`FINISH_SELECTION` 一次提交。模型读取 operation、来源／去向、min/max、remaining_required、已选引用和结束／取消权限。来源未知明确标记 unknown。排序语义不能从通用选择接口证明时保守保存顺序；只有调用方证明唯一无序结果时才合并强制完成。
+`SELECT_ONE` 只编辑前缀；`FINISH_SELECTION` 一次提交。模型读取 operation、来源／去向、min/max、remaining_required、已选引用和结束／取消权限。从牌堆选时来源是那个牌堆；生成的候选（三选一等）来源未知，明确标记 unknown。出牌引出的选牌，触发牌在出牌区里可见。排序语义不能从通用选择接口证明时保守保存顺序；只有调用方证明唯一无序结果时才合并强制完成。
 
 同一会话的 `base_public_version/action_bank_version` 与固定公开 `decoder_bank` 不变，逐步 `legal.candidates` 决定 mask。每次选择改变决策版本与选择修订。新信息揭示、新会话、模型更新或公开内容变化使缓存失效。
 
@@ -79,7 +79,7 @@
 
 ## 公开信息
 
-`RunSimulator.PublicState.cs` 用白名单发布玩家资源、完整公开牌堆、当前敌人／召唤物、意图图标与显示伤害、状态层数、遗物、药水、充能球、地图 DAG 和当前阶段选项。卡牌保留内容、费用、升级、类型、关键词、公开基础动态值、附魔及负面修改类型。事件和营火选项导出当前显示模板引用的变量，作为归属该选项的 `displayed_variable`：数值带 `amount`；内容名带 `names`，值是它所指的卡牌、遗物、药水或附魔的内容 ID（名字正好是其中一个内容的标题时才导出）。发布事件帧时先把事件变量填进选项的标题和描述，与游戏的选项按钮在显示时所做的相同；模板取自随引擎加载的英文本地化数据。不输出整个事件内部变量集合。
+`RunSimulator.PublicState.cs` 用白名单发布玩家资源、完整公开牌堆（含出牌区：正在结算的牌，zone `play`，有序，只在非空时发布）、当前敌人／召唤物、意图图标与显示伤害、状态层数、遗物、药水、充能球、地图 DAG 和当前阶段选项。卡牌保留内容、费用、升级、类型、关键词、公开基础动态值、附魔及负面修改类型。事件和营火选项导出当前显示模板引用的变量，作为归属该选项的 `displayed_variable`：数值带 `amount`；内容名带 `names`，值是它所指的卡牌、遗物、药水或附魔的内容 ID（名字正好是其中一个内容的标题时才导出）。发布事件帧时先把事件变量填进选项的标题和描述，与游戏的选项按钮在显示时所做的相同；模板取自随引擎加载的英文本地化数据。不输出整个事件内部变量集合。
 
 手牌与充能球保留有公开意义的顺序。牌组、抽牌／弃牌／消耗堆按公开卡牌属性排序，模型按无序多重集合处理，保留实例与重复数量；不输出隐藏原始位置、引擎分配 ID、seed、RNG 或怪物内部移动状态名。路由引用只用于对象关联，不作为嵌入数值。
 

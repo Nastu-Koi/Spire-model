@@ -1,7 +1,7 @@
 # 各波等份额的旧默认
 
 - **时间**：2026-10-16 随幕组的裁剪目标成为默认；2026-10-17 改正
-- **来源**：`.scratch/joint-training/issues/13-wave-shares.md`；`.scratch/joint-training/issues/08-grpo-update.md`（Comments“四项候选改动的核查”）
+- **来源**：`.scratch/joint-training/issues/update-settings.md`（13）；`.scratch/joint-training/issues/act-groups-grpo.md`（08 的 Comments“四项候选改动的核查”）
 - **状态**：被修正的旧默认。改为按各波决策数定份额是按机理的修正，两种份额之间没有做过配对评估，效果未定。
 
 ## 动机

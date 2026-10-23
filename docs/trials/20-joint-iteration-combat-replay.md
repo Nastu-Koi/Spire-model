@@ -1,7 +1,7 @@
 # 联合迭代、战斗从入场存档重打与通关轨迹窗口
 
 - **时间**：路线修订（战斗重打）2026-10-14，只改文档；联合迭代 2026-10-14 立项，10-15 实现、试跑、正式启动并暂停；续打到幕末的草案 2026-10-15 当天被取代；代码 2026-10-17 删除（joint-training 09；通关轨迹窗口在 16 再删）。
-- **来源**：`.scratch/a0-training-baseline/issues/26-route-revision-combat-replay.md`、`24-relic-counter-stage.md`（2026-10-14 条）；`.scratch/joint-training/spec.md`、`issues/03-joint-iteration.md`、`07-group-baseline-replay.md`、`09-remove-critic.md`、`16-remove-awr.md`。
+- **来源**：`.scratch/a0-training-baseline/issues/26-route-revision-combat-replay.md`、`24-relic-counter-stage.md`（2026-10-14 条）；`.scratch/joint-training/spec.md`、`issues/critic-line.md`（03、07b、09）、`issues/act-groups-grpo.md`（16）。
 - **状态**：被否决。联合迭代两次迭代都因 critic 没过门槛跳过更新，策略一直是 BC v12；暂停后改走幕组，代码已删。
 
 ## 动机

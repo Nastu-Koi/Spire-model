@@ -42,6 +42,7 @@ from main.env import clock
 from main.env.processes import end, end_with, release_memory
 from main.encoding.representation import forget, observation
 from main.play import digests
+from main.play.fights import handed_records
 from main.play.rollout import FULL_RUNS, RolloutRunner, packed_line, play, precision_context
 from main.play.evaluation import climb
 from main.play.wire import Sent, pack, tables, unpack
@@ -77,7 +78,9 @@ class _Waiting:
                     return Choice(candidates[0]["candidate_ref"])
                 result = Future()
                 with clock.timed("choice_wait"):
-                    requests.put((job, frame, temperature, restrict, rank if sample else None, result))
+                    # Not sampling, the decision takes the most likely action, even in a
+                    # round that samples the rest (`RolloutRunner.greedy_fights`).
+                    requests.put((job, frame, temperature, restrict, rank if sample else None, not sample, result))
                     return result.result()
 
         return Remote()
@@ -96,7 +99,7 @@ class _Waiting:
                 break
         observations, messages = [], []
         laps = clock.Laps()
-        for job, frame, temperature, restrict, rank, _ in waiting:
+        for job, frame, temperature, restrict, rank, _, _ in waiting:
             # Fields become tensors in `pack`, of what it sends alone.
             (obs,), decisions = prepare_decisions(self.vocabulary, [frame], restrict=[restrict], rank=[rank],
                                                   observe=_observe, tensors=False)
@@ -108,8 +111,14 @@ class _Waiting:
         laps("sending")
         chosen, drawn = self.connection.recv()
         laps("collector_wait")
-        for number, ((_, frame, _, restrict, rank, result), obs, (slot, log_prob, base)) in enumerate(
+        for number, ((_, frame, _, restrict, rank, greedy, result), obs, (slot, log_prob, base)) in enumerate(
                 zip(waiting, observations, chosen)):
+            if greedy and drawn is not None:
+                # A decision not drawn in a round that samples, sent at temperature 1: the
+                # most likely slot of the distribution the pass returned for it, the first
+                # of equals as a greedy pass's `argmax` takes it, in place of the draw.
+                slot = int(drawn[number].argmax())
+                log_prob = base = float(drawn[number, slot])
             slot = obs.slot_refs[int(slot)]
             candidates = frame["legal"]["candidates"]
             if drawn is None:
@@ -168,9 +177,13 @@ def _handed(run, layout):
     # A segment's continue save goes to the collecting process beside the run, not in
     # the shard line it makes.
     save = run.pop("save", None)
+    # So do its fights' records and entry saves (`fights`), the saves compressed here.
+    records = run.pop("fight_records", None)
     handed = _without_frames(run)
     if save is not None:
         handed["save"] = save
+    if records is not None:
+        handed["fight_records"] = handed_records(records)
     if not layout["trajectory"]:
         handed.update(_shard_line(run))
     return handed
@@ -433,7 +446,7 @@ class Samplers:
         self._tables = tables(self.model, len(self.samplers))
         settings = {name: getattr(runner, name) for name in (
             "precision", "version", "max_steps", "timeout", "ascension", "claim_rewards",
-            "temperatures", "explore_potions", "iteration")}
+            "temperatures", "explore_potions", "greedy_fights", "iteration")}
         for connection in self.connections:
             connection.send((settings, runner.digest, jobs, sample, layout))
         active = dict(enumerate(self.connections))
@@ -466,9 +479,9 @@ class Samplers:
                             completed += 1
                             if on_run:
                                 on_run(job, run)
-                            # The shard line went to `on_run`'s writer; a round of
-                            # thousands of segments is not held here whole.
-                            summaries[job] = {key: v for key, v in run.items() if key != "member"}
+                            # The shard line and the fights' saves went to `on_run`'s
+                            # writer; a round of thousands of segments is not held here whole.
+                            summaries[job] = {key: v for key, v in run.items() if key not in ("member", "fight_records")}
                         elif kind == "error":
                             raise RuntimeError("Sampling process failed:\n" + value)
                         else:

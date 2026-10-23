@@ -1,7 +1,7 @@
 # 采样与更新并行的重叠模式
 
 - **时间**：2026-10-17（13:24 加入，16:59 删除）
-- **来源**：`.scratch/joint-training/issues/20-overlap-sampling-update.md`；提交 `f8bbe24`、`dacfd3f`（加入与启动修复）、`e4530a9`（删除，含 `docs/architecture.md` 的删改）
+- **来源**：`.scratch/joint-training/issues/throughput.md`（20）；提交 `f8bbe24`、`dacfd3f`（加入与启动修复）、`e4530a9`（删除，含 `docs/architecture.md` 的删改）
 - **状态**：被删除。第一次真实迭代就把主机内存压到看门狗线边缘、显存被两进程占满，更新步慢十倍。用户此后不再考虑以内存换时间的并行方案。
 
 ## 动机

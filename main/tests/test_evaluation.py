@@ -319,6 +319,14 @@ def test_held_out_nll_is_reported_by_character_and_phase(tmp_path, capsys):
     assert report["equal_group_nll_per_macro"] == pytest.approx(
         sum(g["nll_per_macro"] for g in report["groups"].values()) / len(report["groups"]))
     assert "a0" not in report and report["policy_version"] == 1
+    # A data set kept out of training whole (the solver's fights of the fight evaluation
+    # set) is scored on every seed group.
+    assert main(["heldout-nll", "--data", str(data), "--checkpoint", str(tmp_path / "checkpoints/bc" / "current"),
+                 "--all-groups"]) == 0
+    whole = json.loads(capsys.readouterr().out)
+    every = [demonstration(c, seed, 4, 2) for c in CHARACTERS for seed in ("kept", held_out_seed("held"))]
+    assert whole["held_out"] == {"fraction": 1.0, **extent(every), "of": extent(every)}
+    assert whole["all"]["macros"] == extent(every)["macros"]
 
 
 def test_nll_tables_follow_the_training_weighting():

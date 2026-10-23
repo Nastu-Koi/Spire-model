@@ -1107,7 +1107,7 @@ internal sealed class Snapshot
 				draw = playerCombatState.DrawPile.Cards.Select(Card).ToArray(),
 				discard = playerCombatState.DiscardPile.Cards.Select(Card).ToArray(),
 				exhaust = playerCombatState.ExhaustPile.Cards.Select(Card).ToArray(),
-				play = Value(Read(playerCombatState, "PlayPile")),
+				play = playerCombatState.PlayPile.Cards.Select(Card).ToArray(),
 				orbs = Value(Read(playerCombatState.OrbQueue, "Orbs")),
 				orb_slots = Read(playerCombatState.OrbQueue, "Capacity")
 			}),

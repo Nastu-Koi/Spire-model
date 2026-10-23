@@ -74,13 +74,19 @@ internal static class PotionCosts
         }
     }
 
-    // The prices of a request: `potion_costs` is [base, elevated, high], in HP.
-    internal static void Set(JsonElement request)
+    // The prices a request names in `field`: [base, elevated, high], in HP; the solver's own without it.
+    // A price of 0 is refused: MaximumSmartPotionUses divides by the base price.
+    internal static int[] Read(JsonElement request, string field)
     {
-        int[] costs = request.TryGetProperty("potion_costs", out var value)
+        int[] costs = request.TryGetProperty(field, out var value)
             ? value.EnumerateArray().Select(cost => cost.GetInt32()).ToArray() : Native;
         if (costs.Length != 3 || costs[0] < 1 || costs[0] > costs[1] || costs[1] > costs[2] || costs[2] > 100)
-            throw new ArgumentException("potion_costs must be three prices in HP, from 1 to 100 and not decreasing");
+            throw new ArgumentException(field + " must be three prices in HP, from 1 to 100 and not decreasing");
+        return costs;
+    }
+
+    internal static void Set(int[] costs)
+    {
         (Base, Elevated, High) = (costs[0], costs[1], costs[2]);
     }
 }

@@ -23,9 +23,12 @@ saves written as they arrive. A round that was cut off goes on from where it sto
 (`sample_groups(..., resume=True)`): the waves that finished stand, the wave under
 way keeps the segments it finished and plays the rest. Each wave is written as a data directory of its own
 (`act1/`, `act2/`, ...): shards and an index of the finished segments, every frame
-kept (fights included), a `summary.json`. A segment that did not finish is counted and
+kept (fights included, unless they are greedy), a `summary.json`; with fight entries, the records of the
+segments' fights and their entry saves (`main/play/fights.py`). A segment that did not finish is counted and
 set aside under `quarantine/`; its group is smaller, the round goes on. Segments are
-named by their group: `<character>:<seed>:act1` and `<parent segment>:<wave>`.
+named by their group: `<character>:<seed>:act1` and `<parent segment>:<wave>`. A
+round's fight groups (`main/play/fight_groups.py`) are written beside its waves in a
+directory of their own, by `WaveWriter` as well; they are not one of its `waves`.
 """
 
 import gzip
@@ -39,6 +42,7 @@ from main.data.index import INDEX, ShardWriter, index_row
 from main.data.shards import RunShards
 from main.env.protocol import CHARACTERS
 from main.play import digests
+from main.play.fights import FightWriter
 from main.play.rollout import SEGMENTS, write_run
 
 FORMAT = "act-groups-v2"
@@ -160,9 +164,10 @@ def save_rows(directory, wave):
 
 class WaveWriter:
     """The files of one wave: the shards and index of its finished segments, their
-    digest (`digests`), the quarantine of the rest, and the counts of its summary."""
+    digest (`digests`), the quarantine of the rest, and the counts of its summary;
+    with `fight_entries`, the records and entry saves of their fights (`fights`)."""
 
-    def __init__(self, directory, shard_samples=2000, *, resume=False):
+    def __init__(self, directory, shard_samples=2000, *, resume=False, fight_entries=False):
         """With `resume`, the segments a cut-off wave finished stand (`done` names
         them) and the rest are written after them."""
         self.directory = Path(directory)
@@ -193,9 +198,12 @@ class WaveWriter:
             if row["contract"] not in self.shards.contracts:
                 run = RunShards(self.directory, [row]).read([row["shard"]])[0]
                 self.shards.contracts[row["contract"]] = run["contract"]
+        self.fights = FightWriter(self.directory, self.done if resume else None) if fight_entries else None
 
     def add(self, run):
-        """A segment as its sampling process handed it over (`sampling._handed`)."""
+        """A segment as its sampling process handed it over (`sampling._handed`). Its
+        fights' records are written once the segment is: a finished segment's only."""
+        records = run.pop("fight_records", None)
         if run["status"] != "complete":
             directory = self.directory / "quarantine"
             directory.mkdir(exist_ok=True)
@@ -207,6 +215,8 @@ class WaveWriter:
         if run.get("digest") is not None:
             self.digests.write(run["digest"])
             self.digests.flush()
+        if self.fights is not None and records is not None:
+            self.fights.add(records)
         self.outcomes[run["outcome"]] += 1
         self.phases.update(run["phases"])
         self.groups.add(run["group"])
@@ -221,6 +231,17 @@ class WaveWriter:
     def close_files(self):
         self.shards.close()
         self.digests.close()
+        if self.fights is not None:
+            self.fights.close()
+
+    def tally(self):
+        """What a wave's summary counts of the segments it wrote."""
+        return dict(written=self.written, resumed=self.resumed, groups=len(self.groups),
+                    outcomes=dict(self.outcomes), failed=dict(self.failed), phases=dict(sorted(self.phases.items())),
+                    explored=self.explored, forked=self.forked, distributions=self.recorded == self.written,
+                    by_ascension={str(level): dict(written=sum(counts.values()), outcomes=dict(counts))
+                                  for level, counts in sorted(self.ascensions.items(), key=lambda x: str(x[0]))},
+                    stored_steps=self.stored_steps, shards=len(self.shards.shards), contracts=self.shards.contracts)
 
     def close(self, wave, stop, jobs, seconds, collector=None):
         """`stop` is the wave's cut (`cuts`; None for the last wave); `collector` the
@@ -230,18 +251,14 @@ class WaveWriter:
                        until_act=stop[1] if stop and stop[0] == "act" else None,
                        until_boss=stop[1] if stop and stop[0] == "boss" else None,
                        until=None if stop is None else list(stop), segments=len(jobs),
-                       written=self.written, resumed=self.resumed, groups=len(self.groups),
-                       outcomes=dict(self.outcomes), failed=dict(self.failed), phases=dict(sorted(self.phases.items())),
-                       explored=self.explored, forked=self.forked, distributions=self.recorded == self.written,
-                       by_ascension={str(level): dict(written=sum(counts.values()), outcomes=dict(counts))
-                                     for level, counts in sorted(self.ascensions.items(), key=lambda x: str(x[0]))},
-                       stored_steps=self.stored_steps, shards=len(self.shards.shards), contracts=self.shards.contracts,
-                       seconds=round(seconds, 1), collector=collector)
-        _write_summary(self.directory, summary)
+                       **self.tally(), seconds=round(seconds, 1), collector=collector)
+        if self.fights is not None:
+            summary["fights"] = self.fights.summary()
+        write_summary(self.directory, summary)
         return summary
 
 
-def _write_summary(directory, summary):
+def write_summary(directory, summary):
     path = Path(directory) / "summary.json"
     stage = path.with_suffix(".tmp")
     stage.write_text(json.dumps(summary, ensure_ascii=False, allow_nan=False, indent=1) + "\n", encoding="utf-8")
@@ -270,13 +287,16 @@ def set_aside(directory):
 
 
 def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BOUNDARIES, bosses=(),
-                  fork_depth=0, ascensions=None, shard_samples=2000, on_run=None, resume=False):
+                  fork_depth=0, ascensions=None, shard_samples=2000, on_run=None, resume=False,
+                  fight_entries=False):
     """Sample one round of act groups into `directory`: the first wave over `seeds`
     (per character), then a wave over the saves of each wave before; the cuts are the
     first decisions of the `boundaries` acts and of the `bosses` acts' boss fights
     (`cuts`). The round is
     played by the engines of `samplers` (`sampling.Samplers`) at the runner's
-    temperatures. Returns the summary: the waves in order, each wave's own summary
+    temperatures; with its greedy fights (`RolloutRunner.greedy_fights`) the fights are
+    played by argmax and kept without frames, and no wave starts at a boss fight.
+    Returns the summary: the waves in order, each wave's own summary
     under its name, and the saves each wave wrote. A segment that did not finish is
     set aside, not written. With `resume`, a round cut off in `directory` goes on:
     finished waves stand, the wave under way keeps what it finished and plays the
@@ -284,7 +304,10 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
     `fork_depth` the segments of every group part at their first decisions with a
     choice, half by half (`rollout.fork_ranks`). With `ascensions` (character → seed →
     ascension) every group is played at its seed's ascension, its later waves at the
-    ascension their saves were written at."""
+    ascension their saves were written at. With `fight_entries` every wave also writes
+    the records of its segments' fights and the entry saves of those not begun by an
+    event (`fights`: `<wave>/fights.jsonl`, `<wave>/fights/`); the segments are played
+    as they are without."""
     stops = [*cuts(boundaries, bosses), None]
     names = [wave_name(None), *(wave_name(cut) for cut in stops[:-1])]
     later = per_wave(m, len(names) - 1)
@@ -292,6 +315,13 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
         raise ValueError("Act groups: at least one segment from each seed")
     if type(fork_depth) is not int or fork_depth < 0:
         raise ValueError("Act groups fork at a depth of no decisions or more")
+    if runner.greedy_fights and bosses:
+        # A boss wave starts inside the fight: every segment of its groups would play
+        # the fight alike, with nothing to compare until the next act.
+        raise ValueError("Greedy fights cut at no boss fight")
+    # With greedy fights a round keeps no frames of its fights: they are the policy's
+    # fixed play, and no update learns from them (`RolloutRunner.greedy_fights`).
+    segments = dict(SEGMENTS, combat_frames=False) if runner.greedy_fights else SEGMENTS
     directory = Path(directory)
     if groups_summary(directory) is not None or (
             not resume and directory.exists() and any(directory.iterdir())):
@@ -317,7 +347,7 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
         partial = resume and (directory / wave / INDEX).is_file()
         if (directory / wave).exists() and not partial:
             set_aside(directory / wave)
-        writer = WaveWriter(directory / wave, shard_samples, resume=partial)
+        writer = WaveWriter(directory / wave, shard_samples, resume=partial, fight_entries=fight_entries)
         begun, rows = time.monotonic(), (save_rows(directory, wave) if partial else [])
         rows = [row for row in rows if row["run_id"] in writer.done]
         pending = [job for job in jobs if job[1]["run_id"] not in writer.done]
@@ -337,7 +367,8 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
 
         try:
             if pending:
-                samplers.collect(runner, pending, sample=True, on_run=arrived, layout=SEGMENTS)
+                samplers.collect(runner, pending, sample=True, on_run=arrived,
+                                 layout=dict(segments, fight_entries=True) if fight_entries else segments)
         finally:
             # A wave cut off keeps readable shards and index, and no summary: it is
             # not finished.
@@ -351,7 +382,8 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
 
     summary = dict(
         kind="act_groups", format=FORMAT, iteration=runner.iteration, policy_version=runner.version,
-        policy_digest=runner.digest, temperature=dict(runner.temperatures), ascension=runner.ascension,
+        policy_digest=runner.digest, temperature=dict(runner.temperatures), greedy_fights=runner.greedy_fights,
+        ascension=runner.ascension,
         n=n, m=later, fork_depth=fork_depth,
         boundaries=[int(act) for act in boundaries], bosses=[int(act) for act in bosses],
         cuts=[list(cut) for cut in stops[:-1]], waves=names, seeds="metadata/seeds.json",
@@ -360,7 +392,10 @@ def sample_groups(samplers, runner, seeds, directory, *, n=N, m=M, boundaries=BO
         # Every decision of the round kept the distribution it was drawn from (`WaveWriter`).
         distributions=all(summaries[wave].get("distributions") for wave in names),
         **summaries, seconds=round(time.monotonic() - started, 1))
-    _write_summary(directory, summary)
+    if fight_entries:
+        # Each wave's summary says what its fights wrote (`fights`).
+        summary["fight_entries"] = True
+    write_summary(directory, summary)
     return summary
 
 

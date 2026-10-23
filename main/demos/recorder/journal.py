@@ -129,7 +129,7 @@ def convert_journal(path, *, bc_only=False, recorder_version=None):
         verify_teachers(decisions)
     contract = {
         "adapter_version": IMPORT_VERSION,
-        "observation_schema": "public-state-v6",
+        "observation_schema": "public-state-v7",
         "public_history_version": HISTORY_VERSION,
         "action_schema": "candidate-v0",
         "fixed_ascension": ascension,

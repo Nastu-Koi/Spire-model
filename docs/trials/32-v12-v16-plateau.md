@@ -1,7 +1,7 @@
 # v12–v16 串行五次迭代对 v11 不显著
 
 - **时间**：2026-10-17 16:59 启动，2026-10-18 00:51 完成（中间两次暂停）
-- **来源**：`.scratch/joint-training/issues/24-serial-v12-v16.md`；运行目录 `runs/grpo-20261017/train/v12-v16`，启动脚本与内存记录 `runs/grpo-20261017/launch/v12-v16.*`
+- **来源**：`.scratch/joint-training/issues/training-runs.md`（24）；运行目录 `runs/grpo-20261017/train/v12-v16`，启动脚本与内存记录 `runs/grpo-20261017/launch/v12-v16.*`
 - **状态**：没带来可辨的提升。v16 对 v11 150 对 142 胜（p = 0.57）。v16（内部 `policy_version` 29）仍作为后续运行的起点。
 
 ## 动机

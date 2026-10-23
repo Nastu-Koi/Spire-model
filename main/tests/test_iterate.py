@@ -14,19 +14,19 @@ from types import SimpleNamespace
 import pytest
 import torch._dynamo
 
-from main.learn import batches
+from main.learn import streams
 from main.learn.advantage import FILE
 from main.cli import main, parser
 from main.learn.history import TrainingHistory
 from main.learn.trainer import Learner
 from main.network.config import LearningRates
-from main.iterate import COMPILED_VARIANTS, Driver, Settings, canonical, round_ascensions, round_seeds, seeds_of
+from main.iterate import COMPILED_VARIANTS, Driver, Settings
+from main.env.seeds import canonical, round_ascensions, round_seeds, seeds_of, split_group
 from main.env.protocol import CHARACTERS, ProtocolError
 from main.play import digests
 from main.play.groups import groups_summary
 from main.tests import journeys
 from main.tests.journeys import Journey
-from main.env.seeds import split_group
 
 
 def test_a_rounds_seeds_are_its_own_and_avoid_the_seeds_kept_apart(tmp_path):
@@ -175,7 +175,7 @@ def test_the_command_line_runs_the_iterations(world, monkeypatch, capsys):
     arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "3"])
     assert (arguments.runs_per_character, arguments.evaluate_every, arguments.updates) == (200, 5, "round")
     assert (arguments.clip, arguments.kl) == (0.2, 0.01) and arguments.wave_shares is None
-    assert arguments.weight_cap == batches.WEIGHT_CAP == Settings(checkpoint="c").weight_cap
+    assert arguments.weight_cap == streams.WEIGHT_CAP == Settings(checkpoint="c").weight_cap
     monkeypatch.setattr(engine_module, "CliEngine", lambda root=None: chain())
     common = ["iterate", "--checkpoint", str(world.checkpoint), "--output", str(world.output),
               "--checkpoints", str(world.checkpoints), "--iterations", "1",
@@ -256,6 +256,7 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
     for wave, head in first["advantages"].items():
         assert head["runs"] > 0 and head["decisions"] > 0 and head["groups"] > 0 and head["r2_within"] is not None
     assert first["advantages"]["act3"]["groups"] == 20
+    assert all(head["dropped"] is None for head in first["advantages"].values())
     assert first["advantages"]["act2"]["advantage"]["n"] > 0
 
     # Updated with the clipped objective: the waves by their decisions; as many
@@ -380,6 +381,25 @@ def test_act_group_settings_resolve_their_defaults_and_refuse_what_cannot_be_run
     assert arguments.wave_shares == [1.0, 2.0, 7.0] and arguments.phase_weights == "even"
     plain_arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"])
     assert plain_arguments.wave_shares is None and plain_arguments.boundary_bosses == []
+
+
+def test_a_run_may_leave_the_uniform_groups_out_of_its_updates(world):
+    state = driver(world, eval_seeds=None, drop_uniform_groups=True).run(1)
+    entry = state["iterations"]["0"]
+    assert entry["settings"]["drop_uniform_groups"] is True
+    priced, update = entry["advantages"], entry["update"]
+    assert sum(head["dropped"]["groups"] for head in priced.values()) > 0
+    for wave, head in priced.items():
+        assert head["dropped"]["groups"] == head["uniform_groups"]
+        assert update["waves"][wave]["data"]["macros"] == head["decisions"]
+    # The shares and the pass are of the decisions kept.
+    decisions = sum(head["decisions"] for head in priced.values())
+    assert update["decisions"] == decisions and update["pass_updates"] == -(-decisions // 8)
+    assert update["shares"] == {wave: pytest.approx(head["decisions"] / decisions) for wave, head in priced.items()}
+    assert settings(world).drop_uniform_groups is False
+    common = ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]
+    assert parser().parse_args([*common, "--drop-uniform-groups"]).drop_uniform_groups is True
+    assert parser().parse_args(common).drop_uniform_groups is False
 
 
 def test_act_group_iterations_stop_once_the_policy_has_lost_its_entropy(world):
@@ -578,3 +598,30 @@ def test_the_potion_exploration_rate_is_a_setting_of_the_run(world):
     for wrong in (1.5, -0.1, [0.1, 0.2, 0.3, 0.4]):
         with pytest.raises(ValueError, match="exploration"):
             settings(world, eval_seeds=None, explore_potions=wrong)
+
+
+def test_greedy_fights_are_a_setting_of_the_run_and_its_updates_learn_nothing_of_the_fights(world):
+    state = driver(world, eval_seeds=None, greedy_fights=True, fork_depth=1).run(1)
+    entry = state["iterations"]["0"]
+    assert entry["settings"]["greedy_fights"] is True and entry["sample"]["greedy_fights"] is True
+    assert groups_summary(world.output / "groups/round-0")["greedy_fights"] is True
+    priced, update = entry["advantages"], entry["update"]
+    for wave, head in priced.items():
+        # The round's decisions are those outside the fights: no fight has an advantage,
+        # and the fights left out are counted.
+        assert entry["sample"]["decisions"][wave] == head["decisions"] > 0
+        assert head["fights"]["decisions"] == 0 and head["fights"]["excluded"] > 0
+        assert update["waves"][wave]["data"]["macros"] == head["decisions"]
+    # The shares, the pass and the loss's scale are of those decisions alone.
+    decisions = sum(head["decisions"] for head in priced.values())
+    assert update["decisions"] == decisions and update["pass_updates"] == -(-decisions // 8)
+    assert update["greedy_fights"] is True
+    # Without it every fight's decision is priced, as before.
+    assert settings(world).greedy_fights is False
+    for wrong in (dict(greedy_fights=True, explore_potions=0.1), dict(greedy_fights=True, bosses=[3]),
+                  dict(greedy_fights=1)):
+        with pytest.raises(ValueError, match="Greedy"):
+            settings(world, eval_seeds=None, **wrong)
+    common = ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]
+    assert parser().parse_args([*common, "--greedy-fights"]).greedy_fights is True
+    assert parser().parse_args(common).greedy_fights is False

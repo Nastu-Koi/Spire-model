@@ -8,6 +8,9 @@
 | `sampling.py` | 多进程采样（`Samplers`）：引擎与帧解析在采样进程里，采集进程只跑网络 |
 | `wire.py` | 打包好的决策的跨进程扁平格式；采样进程的发送记录（`Sent`）与编码表的行 |
 | `groups.py` | 幕组：按边界幕把一局切成几波，第一波从开局、之后每波从上一波的幕开头存档续打，各写成分片 |
+| `fights.py` | 每场战斗的入场存档与战况：段在对局里记（`FightLog`），每波写成 `fights.jsonl` 与 `fights/`（`FightWriter`） |
+| `fight_groups.py` | 战斗组：从一轮幕组记下的战斗里挑（`pick`），每场从入场存档续打几条、截在战斗结束，写成轮目录下的 `fight-groups/` |
+| `fight_eval.py` | 战斗评估集：从入场存档抽一批固定的战斗（`build_set`），策略 greedy 逐场打到战斗结束（`play_set`），每场的战况、打法与危急帧的用药概率；读求解器在同一批存档上打的结果（`solver_rows`） |
 | `digests.py` | 决策摘要：段交出时每个策略决策里幕组优势要用的东西（帧指纹 `frame_key`、状态 `where`），每波一个文件 |
 | `evaluation.py` | 评估报告、配对符号检验（`compare_evaluations`）、留出 NLL 的表格 |
 | `testing.py` | 合成引擎（`SyntheticEngine`，不是游戏模拟器）与合成示范，供测试和 `smoke` |
@@ -38,32 +41,113 @@
 
 用药探索（`iterate --explore-potions`，`RolloutRunner.explore_potions`，每种战斗一个率，`rollout.exploration_rates` 把一个数、两个数或按种类的映射整理成 normal／elite／boss 三个；设计见 [architecture 用药探索](../architecture.md#用药探索)）：采样进程在战斗里（`FightTracker` 判定，`FightTracker.kind` 给出这场战斗的种类）遇到带 USE_POTION 候选、且候选不少于两个的决策时，按该种类的率抽签决定是否探索；探索的决策把 USE_POTION 候选的槽位作为 `Decisions.explore` 掩码随决策打包过去（`wire` 的 `explore` 字段，与 `legal` 同形），采集进程的 `PolicyNetwork.choose` 只在这些槽位里按 π_T 的相对概率抽，返回的对数概率仍是整个合法分布下该动作的 π_T。对局里探索步带 `explored: true`，交给采集进程的摘要与分片索引行带 `explored` 计数，每波 `summary.json` 汇总为 `explored`。greedy 不探索；探索率 0 时打包多一个全零字段，其余逐位不变。
 
+greedy 战斗（`iterate --greedy-fights`，`RolloutRunner.greedy_fights`，默认关；设计见 [architecture 采样温度](../architecture.md#采样温度)）：采样的对局里，`FightTracker` 判定在战斗中的决策不抽样，取策略最可能的动作；战斗外照常按 `other_temperature` 抽。`temperature_for` 对这类决策返回 None，`run` 的 `choose` 改用 `sample=False`、温度 1 问策略。单进程路径就是 `choose_batch(sample=False)` 的 argmax。采样进程把它与其余决策一样以温度 1 打包（不加字段），采集进程这次前向照常抽一个槽位；采样进程收到返回的温度 1 分布后改取其中最大的槽位（相等时取第一个，与 greedy 前向的 `argmax` 相同），对数概率与 `base_log_prob` 都取该槽位在温度 1 下的值，采样分布照记。
+- 这些宏动作的 `temperature` 记 null：它们不是抽出来的。对局头记 `greedy_fights: true`（不开时没有这一项）。
+- 不做用药探索：与 `--explore-potions` 互斥，`RolloutRunner` 报错。也不算分叉步：分叉落在前 D 个战斗外有选择的决策上（见[幕组](#幕组)）。
+- 战斗只按 `FightTracker` 判定，与幕组里不留帧的判定相同。阶段为 `combat` 而追踪器不在战斗中的决策（只在引擎缺了遭遇事件时出现）仍按战斗温度抽。
+- 关闭时每个决策的问法（是否抽样、温度、探索、分叉）与没有这个开关时逐条相同。
+
 ## 采样对局的格式
 
 幕组的每一波是一个数据目录：与示范导入相同的分片加索引（见 [data](data.md)），目录布局见[幕组](#幕组)。
 
-对局（`source: "rollout"`）记每个策略宏动作的帧、完整候选、所选动作、`temperature`、`old_log_prob`、`base_log_prob`、阶段、奖励，采样时每个有选择的步另记 `log_probs`（采样分布：帧里每个合法候选在这一步温度下的对数概率，按候选顺序、6 位小数；探索步与分叉步也是策略自己的整个分布，`Choice.log_probs`）；段保留全部帧，战斗在内。`combat_frames=False` 时，内存里战斗中的宏动作只留 `phase`、`fight`（第几场）、`temperature`、`branches`、`decisions`、`old_log_prob`、`base_log_prob` 与 `reward`，不留帧；用它的只有 `SUMMARY_RUNS`，而它写文件时连宏动作也不写（见[评估报告](#评估报告)）。每局另记 `status`、`victory`、`ledger`、`climb`、seed、角色、难度、策略版本与摘要（`policy_version`、`policy_digest`）、`vocabulary_hash`、`numeric_backend`、`precision`、`sampling`、温度、`explore_potions`、`fork`、`iteration`、`fights`（胜、负、没打完的场数）。
+对局（`source: "rollout"`）记每个策略宏动作的帧、完整候选、所选动作、`temperature`、`old_log_prob`、`base_log_prob`、阶段、奖励，采样时每个有选择的步另记 `log_probs`（采样分布：帧里每个合法候选在这一步温度下的对数概率，按候选顺序、6 位小数；探索步与分叉步也是策略自己的整个分布，`Choice.log_probs`）；段保留全部帧，战斗在内（greedy 战斗的轮除外）。`combat_frames=False` 时，内存里战斗中的宏动作只留 `phase`、`fight`（第几场）、`temperature`、`branches`、`decisions`、`old_log_prob`、`base_log_prob` 与 `reward`，不留帧；用它的是 `SUMMARY_RUNS`（写文件时连宏动作也不写，见[评估报告](#评估报告)）与 greedy 战斗的幕组（战斗的宏动作照这样写进分片，见[幕组](#幕组)）。每局另记 `status`、`victory`、`ledger`、`climb`、seed、角色、难度、策略版本与摘要（`policy_version`、`policy_digest`）、`vocabulary_hash`、`numeric_backend`、`precision`、`sampling`、温度、`explore_potions`、`fork`、`greedy_fights`（只在开时）、`iteration`、`fights`（胜、负、没打完的场数）。
 
 一局没打完时 `status` 留 `unresolved`：引擎停在 `waiting` 边界超过 `RolloutRunner.timeout`（30 秒）记 `unresolved_wait_timeout`，步数到 `max_steps`（`--max-steps`，默认 10000）记 `unresolved_step_limit`；协议或进程错误时 `status` 为 `error`。
 
 采样进程一局内只保留压缩后的帧，一局结束把对局压成一行交给采集进程追加写出；采集进程不持有对局。不写对局文件的布局收尾时不再把帧解回对象：`rollout.packed_line` 把各帧压缩前的 JSON 文本逐个拼进分片行，读回与 `member(run)` 相同。帧的文本由 orjson 写出、读回（`rollout._pack`／`_unpack`）：与标准库的文本在浮点写法、非 ASCII 是否转义上不同，读出的值相同；读取进程读分片也用 orjson。原因：采样进程会一直占着它打过的最大一段的内存峰值，把帧解回对象会让这个峰值大很多。
 
-`packed_line` 为数各阶段的策略宏动作本来就要把每个宏动作第一步的帧解码一次，交出段的同时（`sampling._shard_line`）就在这份解码上记下这一段的**决策摘要**（`digests.py`）：每个策略宏动作一行（`digests.FIELDS`：宏动作序号、帧指纹 `frame_key`、所选候选、幕、层、HP、最大 HP、金币、卡组／遗物／药水数、是否战斗中、是否探索步／分叉步），连同 run_id、组、角色、结果、难度压成一个 gzip 成员随段交出。状态只记原始数，特征向量由优势那边算，换特征不必重采。帧里没有带幕与层的玩家实体时这一段不记摘要（`digest` 为 None），优势那边读分片、在那里报错。每决策多花约 0.35 ms（指纹 0.30），一轮约 440 CPU·秒，摊在几十个采样进程里。交出的摘要另带 `distributions`：这一段每个有选择的步是否都记了采样分布。
+`packed_line` 为数各阶段的策略宏动作本来就要把每个宏动作第一步的帧解码一次，交出段的同时（`sampling._shard_line`）就在这份解码上记下这一段的**决策摘要**（`digests.py`）：每个策略宏动作一行（`digests.FIELDS`：宏动作序号、帧指纹 `frame_key`、所选候选、幕、层、HP、最大 HP、金币、卡组／遗物／药水数、是否战斗中、是否探索步／分叉步），连同 run_id、组、角色、结果、难度，以及 `frameless`（这一段不留帧的宏动作数：greedy 战斗的战斗，它们没有摘要行，`digests.frameless`）压成一个 gzip 成员随段交出。状态只记原始数，特征向量由优势那边算，换特征不必重采。帧里没有带幕与层的玩家实体时这一段不记摘要（`digest` 为 None），优势那边读分片、在那里报错。每决策多花约 0.35 ms（指纹 0.30），一轮约 440 CPU·秒，摊在几十个采样进程里。交出的摘要另带 `distributions`：这一段每个有选择的步是否都记了采样分布。
 
 ## 幕组
 
 `main/play/groups.py`，设计见 [architecture](../architecture.md#训练路线)：
 
-- `RolloutRunner.run` 多了段的参数：`until_act` 让对局在该幕第一个决策处停下，`until_boss` 让它在该幕第一场 Boss 战的第一个决策处停下（二者只给一个）；这一帧不属于本段，引擎在那里写的续局存档随记录返回（`save`：`{"at": "act", "save": …}` 或 `{"at": "fight", "save": …, "fight": …}`，`fight` 是 `FightTracker` 对这场战斗的描述加楼层），`outcome` 为 `reached`，另记 `reached_act` 或 `reached_boss`；`resume` 给这样一份存档，对局从它续打：幕开头的经 `CliEngine.resume`（引擎 `resume_save`）回到地图，Boss 入场的经 `CliEngine.resume_fight`（引擎 `resume_fight`）重进那场战斗，`character`、`seed` 沿用存档那一局。终局时 `outcome` 为 `win`／`loss`。`run_id`、`group` 由调用方命名。`validate_run` 接受 `outcome=reached`、`victory=None` 的段。
+- `RolloutRunner.run` 多了段的参数：`until_act` 让对局在该幕第一个决策处停下，`until_boss` 让它在该幕第一场 Boss 战的第一个决策处停下（二者只给一个；截在战斗结束的 `until_fight_end` 见[战斗组](#战斗组)）；这一帧不属于本段，引擎在那里写的续局存档随记录返回（`save`：`{"at": "act", "save": …}` 或 `{"at": "fight", "save": …, "fight": …}`，`fight` 是 `FightTracker` 对这场战斗的描述加楼层），`outcome` 为 `reached`，另记 `reached_act` 或 `reached_boss`；`resume` 给这样一份存档，对局从它续打：幕开头的经 `CliEngine.resume`（引擎 `resume_save`）回到地图，Boss 入场的经 `CliEngine.resume_fight`（引擎 `resume_fight`）重进那场战斗，`character`、`seed` 沿用存档那一局。终局时 `outcome` 为 `win`／`loss`。`run_id`、`group` 由调用方命名。`validate_run` 接受 `outcome=reached`、`victory=None` 的段。
 - 波：切点（`cuts(boundaries, bosses)`：边界幕的幕开头，默认第二、第三幕；`bosses` 幕的 Boss 入场，Boss k 排在第 k+1 幕开头之前）把一局切成几波，每波按起点命名（`waves`：`act1`、`act2`、`act3`，Boss 入场起的 `boss3`）。第一波的任务是每个（角色，种子）`n` 条，打到第一个切点；之后每波是上一波每份存档 `m` 条（`m` 一个数或每波一个），打到下一个切点，最后一波打到终局。到达切点的段各写一份存档到 `<波>/saves/<run_id>.json.gz`，行记在 `<波>/saves.jsonl`（`at` 为 `act` 或 `fight`，`act`／`boss` 记到达的幕）；续打的任务只带存档路径，采样进程自己读（`play(..., segment=True)`，布局 `rollout.SEGMENTS`）。组名 `<角色>:<种子>:act1` 与 `<父段>:<波>`，段名是组名加序号，所以从段名能一路回溯到开局。
-- 分叉（`sample_groups(fork_depth=D)`）：每个任务带 `fork`（段在组里的序号、组大小、深度），`RolloutRunner.run(fork=)` 让采样的段在前 D 个有选择的决策上不抽样，按 `rollout.fork_ranks` 取名次：序号 j 的段在第 d 步取 ⌊j·2^(d+1)/组大小⌋ mod 2，0 是策略最可能的候选、1 是第二可能的，深度截到 log₂ 组大小。名次随决策打包过去（`Decisions.rank`，`wire` 的 `rank` 字段，每决策一个数，−1 为抽样），`PolicyNetwork.choose` 按合法槽位的对数概率降序取该名次的槽位，返回的对数概率仍是整个分布下的 π_T；单进程路径 `choose_batch(rank=)` 相同。分叉的决策不再做用药探索。步记 `forked: true`，对局头记 `fork`，摘要与索引行带 `forked` 计数，每波 summary 汇总为 `forked`；greedy 不分叉。
-- 难度（`sample_groups(ascensions=)`，角色 → 种子 → 难度，`iterate.round_ascensions` 给出）：第一波的任务带 `ascension`，`RolloutRunner.run(ascension=)` 按它开局、核对帧契约的 `fixed_ascension` 并记进对局（不给时用 runner 自己的）；续局从存档进，引擎沿用存档的难度，与任务所带的不符时这条段报错。存档行带 `ascension`，`resume_jobs` 照抄，所以同一组、同一条链同难度。轮目录的 `metadata/ascensions.json` 记分配，轮 summary 的 `ascensions` 指向它；每波 summary 的 `by_ascension` 按难度记写出的段数与结果。每局的难度本来就在对局记录与索引行里（`RunShards.at_ascension` 按难度筛）。
-- 存储：每波一个分片加索引加 `summary.json` 的数据目录，段保留全部帧（含战斗），索引行多了 `group`、`outcome`、`distributions`。`WaveWriter` 每写完一段的分片行与索引行，就把它的决策摘要追加进这一波的 `decisions.jsonl.gz`（各段一个 gzip 成员，连起来读是一个 gzip 文件；一轮约 50 MB），续跑时接着追加，同一段出现两次以后一行为准；先写分片与索引，摘要里不会有索引没有的段。每波 summary 与轮 summary 的 `distributions` 说这一波（全轮）的每段是否都记了采样分布。没完成的段写到 `quarantine/` 并计数，不让整轮失败（组变小）。轮的 `summary.json`（`kind=act_groups`，`format=act-groups-v2`）记切点（`boundaries`、`bosses`、`cuts`）、波的顺序、各波的段数、结果、各阶段宏动作数、写出的存档数、耗时；每波的 summary（`kind=act_groups_wave`，同一 `format`）记它的切点（`until`、`until_act`、`until_boss`）、任务数（`segments`）、写出数（`written`）与按原因计的失败数（`failed`）。
+- 分叉（`sample_groups(fork_depth=D)`）：每个任务带 `fork`（段在组里的序号、组大小、深度），`RolloutRunner.run(fork=)` 让采样的段在前 D 个有选择的决策上不抽样，按 `rollout.fork_ranks` 取名次：序号 j 的段在第 d 步取 ⌊j·2^(d+1)/组大小⌋ mod 2，0 是策略最可能的候选、1 是第二可能的，深度截到 log₂ 组大小。名次随决策打包过去（`Decisions.rank`，`wire` 的 `rank` 字段，每决策一个数，−1 为抽样），`PolicyNetwork.choose` 按合法槽位的对数概率降序取该名次的槽位，返回的对数概率仍是整个分布下的 π_T；单进程路径 `choose_batch(rank=)` 相同。分叉的决策不再做用药探索。步记 `forked: true`，对局头记 `fork`，摘要与索引行带 `forked` 计数，每波 summary 汇总为 `forked`；greedy 不分叉。greedy 战斗时战斗里的决策不算在这 D 个里（`run` 只数 `temperature_for` 不为 None 的有选择的决策），分叉落在战斗外。
+- 难度（`sample_groups(ascensions=)`，角色 → 种子 → 难度，`env.seeds.round_ascensions` 给出）：第一波的任务带 `ascension`，`RolloutRunner.run(ascension=)` 按它开局、核对帧契约的 `fixed_ascension` 并记进对局（不给时用 runner 自己的）；续局从存档进，引擎沿用存档的难度，与任务所带的不符时这条段报错。存档行带 `ascension`，`resume_jobs` 照抄，所以同一组、同一条链同难度。轮目录的 `metadata/ascensions.json` 记分配，轮 summary 的 `ascensions` 指向它；每波 summary 的 `by_ascension` 按难度记写出的段数与结果。每局的难度本来就在对局记录与索引行里（`RunShards.at_ascension` 按难度筛）。
+- 存储：每波一个分片加索引加 `summary.json` 的数据目录，段保留全部帧（含战斗），索引行多了 `group`、`outcome`、`distributions`。
+- greedy 战斗（runner 的 `greedy_fights`）：`sample_groups` 用 `dict(SEGMENTS, combat_frames=False)`，战斗的宏动作照[采样对局的格式](#采样对局的格式)只留计数与对数概率、不留帧。`control.policy_macros` 不把它们算作策略宏动作：不进索引行与 summary 的 `phases`，不是训练样本，也没有决策摘要行（摘要行的 `frameless` 数它们），所以幕组的优势与更新都只有战斗外的决策（见 [learn 幕组的优势](learn.md#幕组的优势)）。分片随之小得多（战斗约占宏动作的七成）。轮 summary 记 `greedy_fights`。给了 Boss 切点（`bosses`）时 `sample_groups` 报错：Boss 波从战斗开头起，一组的段把这场战斗打得一样，到下一幕开头之前没有可比的东西。`WaveWriter` 每写完一段的分片行与索引行，就把它的决策摘要追加进这一波的 `decisions.jsonl.gz`（各段一个 gzip 成员，连起来读是一个 gzip 文件；一轮约 50 MB），续跑时接着追加，同一段出现两次以后一行为准；先写分片与索引，摘要里不会有索引没有的段。每波 summary 与轮 summary 的 `distributions` 说这一波（全轮）的每段是否都记了采样分布。没完成的段写到 `quarantine/` 并计数，不让整轮失败（组变小）。轮的 `summary.json`（`kind=act_groups`，`format=act-groups-v2`）记切点（`boundaries`、`bosses`、`cuts`）、波的顺序、各波的段数、结果、各阶段宏动作数、写出的存档数、耗时；每波的 summary（`kind=act_groups_wave`，同一 `format`）记它的切点（`until`、`until_act`、`until_boss`）、任务数（`segments`）、写出数（`written`）与按原因计的失败数（`failed`）。
 - 续跑：`sample_groups(..., resume=True)` 让被打断的轮从所在的波继续：有 `summary.json`、且其 `segments` 等于这一波的任务数、`written` 加失败数也等于任务数的波原样沿用，有索引没有 summary 的波保留已完成的段（`ShardWriter(resume=True)` 在索引后追加、新分片接着编号，契约从已有的段里读回）只打剩下的任务，没有索引的波移到轮目录的 `interrupted/` 下重打；波的 summary 多一项 `resumed`。
+- 战况与入场存档（`sample_groups(fight_entries=True)`，`iterate --fight-entries`，默认关；`fights.py`）：段在对局里用 `FightLog` 跟着 `FightTracker` 记它打的每场战斗。战斗第一个决策开一条记录，不是事件引发的战斗当场让引擎写[入场存档](env.md#入场存档)（与 Boss 切点同一格式 `{"at": "fight", "save": …, "fight": …}`，`fight` 带楼层，`resume_fight` 可重进；采样进程的计时名 `fight_entry_save`）；战后第一个决策（段停在幕开头切点时就是那一帧）关上记录，取这一帧玩家的 HP 与最大生命；对局在战斗中结束时按终局关上。对局记录多一项 `fight_records`；采样进程交出段时把它从对局里拿出、存档压成 gzip（`fight_entry_packing`），不进分片行，也不留在 `Samplers.collect` 返回的摘要里。采集进程的 `WaveWriter` 在段写进分片与索引之后，把每条写成 `<波>/fights.jsonl` 的一行、存档写成 `<波>/fights/<run_id>-<NNN>.json.gz`（`groups.read_save` 可读，`:` 换成 `-`）；没完成的段不写。
+  - 一行（`fights.ROW`）：`fight`（段内第几场，`FightTracker` 的编号）、`kind`（`normal`／`elite`／`boss`）、`act`、`floor`、`encounter`、`second_boss`、`from_event`；`entry_hp`、`entry_max_hp`（战斗第一个决策）、`exit_hp`、`exit_max_hp`（战后第一个决策，战后回血遗物已生效）、`last_hp`、`last_max_hp`（战斗最后一个决策）；`potions_used`（策略执行的 USE_POTION 所指药水实体的 `content_id`，如 `POTION.FIRE_POTION`，按使用顺序；控制器步骤与复活不算）；`opening_selection`（这场第一次出牌、用药或结束回合之前，策略在不止一个候选里做过选择：赌博筹码弃牌、烤火手套、开局 N 选 1 一类）；`died`；`decisions`（这场战斗的决策帧数，含单候选与控制器步骤）；`run_id`、`group`、`character`、`seed`、`ascension`；`path`（入场存档，事件战斗为 null）。
+  - 帧给不出的：引擎的终局帧没有实体，最终 Boss 打赢后整局结束，`exit_hp`、`exit_max_hp` 为 null，`last_hp` 是这场最后一个决策时的值；死在战斗里时 `exit_hp` 为 0，`exit_max_hp` 取最后一个决策的值。引擎只发 `encounter_started`、`encounter_completed`、`run_completed`、`candidate_executed` 四种事件，自己的死亡事件在所有防死效果都放弃之后才发，防死（瓶中精灵、蜥蜴尾巴）不发事件，所以认不出复活，复活只体现在这场结束时的 HP 上。除此之外每场都有 `exit_hp`、`exit_max_hp`。
+  - 开关不改段的打法：写存档不动引擎的状态与随机数。在 torch 的确定性算法下，同种子整局 greedy（FP32、每次前向一个决策）开与关的决策摘要逐条相同；不开确定性算法时 GPU 上近乎并列的决策会翻转，同一设置跑两次也一样。
+  - 每波 summary 多 `fights`（`records`、按种类的 `kinds`、`died`、`saves`、`save_bytes`、采集进程的 `write_seconds`），轮 summary 多 `fight_entries: true`；关着时两者都没有。续跑时已完成段的行留着，`fights.fight_rows` 读一波的行，同一（段，场次）以后一行为准。
+  - 量：段平均约 6.5 场，存档每份约 8 KB；按 v54 一轮约 6,500 段算，约 4 万份、300 多 MB。引擎写一份约 2–8 ms，采样进程压缩每段约 5 ms，采集进程写文件每份约 0.06 ms。迭代驱动在这次迭代的清理步删掉各波的 `fights/` 与 `fights.jsonl`。
 - 每个宏动作除采样温度下的 `old_log_prob`（裁剪目标的比值分母）外还记 `base_log_prob`（同一动作在温度 1 下的对数概率之和），`model.choose` 一并返回，只作记录与核对，训练不用。
 - 采集进程只保留每条段的摘要，分片行（`member`）交给写入方后不再持有（`Samplers._collect`），否则采集进程的内存随一轮的段数涨。
-- 存档的来源：每幕第一个决策是第 0 层的选图，引擎的 `write_continue_save` 在地图房间直接序列化；`resume_save` 在 `load_save` 之上同步玩家状态、标训练可用（契约 `initialization=act-resume-v1`）、不加节点。Boss 入场的存档在战斗第一个决策处写，引擎回滚到进房之前的状态（与[入场存档](env.md#入场存档)相同）；`resume_fight`（`saves.fight_resume_command`：存档、遭遇、楼层、节点类型）加载后把 Boss 节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入该遭遇，回复就是战斗的第一个决策帧。重进的战斗没有公开历史前缀，与幕开头续打一样。
+- 存档的来源：每幕第一个决策是第 0 层的选图，引擎的 `write_continue_save` 在地图房间直接序列化；`resume_save` 在 `load_save` 之上同步玩家状态、标训练可用（契约 `initialization=act-resume-v1`）、不加节点。Boss 入场的存档在战斗第一个决策处写，引擎写的是进这个房间时的状态（与[入场存档](env.md#入场存档)相同）；`resume_fight`（`saves.fight_resume_command`：存档、遭遇、楼层、节点类型）加载后把 Boss 节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入该遭遇，回复就是战斗的第一个决策帧。重进的战斗没有公开历史前缀，与幕开头续打一样。
 - 代价：三级链每个种子的段数随到达率成倍增长，n、m 按预算定。
+
+## 战斗组
+
+`main/play/fight_groups.py`，设计见 [ADR 0001](../adr/0001-separate-combat-training.md)：一轮幕组的各波（greedy 战斗、记下战况与入场存档）打完之后，从它们记下的战斗里挑一批，每场从入场存档续打 K 条、截在这场战斗结束（`iterate --fight-groups N`，见 [learn 迭代驱动](learn.md#迭代驱动)）。这一波的优势由迭代驱动的优势步另算（[learn 战斗组的优势](learn.md#战斗组的优势)），更新时与幕组各波同批学（[learn 混合批](learn.md#混合批)）。
+
+- **截在战斗结束**（`RolloutRunner.run(until_fight_end=True)`，任务键同名，`play()` 照传）：只接受从入场存档起的段（`resume` 的 `at` 为 `fight`），不与 `until_act`、`until_boss` 同给，否则报错。第一个决策所属的战斗就是本段的战斗（它必须是这场战斗的第一个决策，否则这条段记协议错误）；之后在第一个不属于这场战斗的决策处停下：战后第一个决策，或另一场战斗的第一个决策——十阶第三幕的两个 Boss 之间可能没有别的决策，所以不只判"不在战斗里"。这个决策不属于本段，不写存档，`outcome` 为 `reached`、`victory` 为 null；对局在战斗中结束时照常是 `win`／`loss`。段头的 `segment` 多 `until_fight_end: true`（不给时没有这一项）。greedy（`sample=False`）同样可用。
+- **战况**：这类段总是记下它这场战斗的战况（`fight_records`，一条），不再写入场存档（`FightLog(saves=False)`；同时给 `fight_entries` 也不写）：它续打的就是那份存档。停下之前 `FightLog.passed` 在停下的决策上取战后 HP 与最大生命（`exit_hp`、`exit_max_hp`）。从入场存档进的对局，`FightTracker` 从这场战斗开始计数、没见过本幕第一个 Boss，所以第一场战斗的 `second_boss` 取存档 `fight` 里记的值（所有从入场存档续打的段都这样）。
+- **挑选**（`pick`）：候选是这一轮各波 `fights.jsonl` 的全部行（`candidates`，按波、段、场次排序），去掉事件战斗（`path` 为 null）。场数 N 按普通、精英、Boss 3:4:4 分（`quotas`：各取整数部分，余下的按余数从大到小逐场补，余数相同按普通、精英、Boss 的顺序；N = 450 时 123／164／163）。每类配额的 `priority` 份额（默认一半，四舍五入取整）按优先级挑：死亡在前，再按战斗代价从高到低；其余从这一类剩下的战斗里均匀不放回地抽。某类不够配额时有多少取多少、记为短缺，不从别类补。代价由调用方给（`cost(row)`，迭代驱动用 `iterate.fight_cost`：[learn 战斗代价](learn.md#战斗代价)的固定药价 `costs.FIXED`），play 不依赖 learn。随机数按 `key`（迭代驱动给 `<seed-root>:<迭代>`）与种类定种：先按它打乱一类的候选，再按优先级稳定排序，所以同优先级的战斗也按这次抽签取，同一轮重挑结果相同。账（`picks`）：候选行数 `fights`、事件战斗数 `events`、挑出数 `picked`，每类的 `fights`（可挑的场数）、`died`、`quota`、`priority`、`uniform`、`short`，以及短缺的类 `short`。
+- **任务**（`jobs`）：每场 `size` 条（默认 8），组名 `<来源段>:fight<场次>`，段名是组名加序号；`resume` 是入场存档的路径，难度照抄来源行；分叉深度（`fork_depth`）按段在组里的序号在开头几个有选择的决策上分叉，与幕组相同。
+- **采样**（`sample_fight_groups`）：用这一轮 runner 的副本（`RolloutRunner.variant(greedy_fights=False, explore_potions=…)`：同一份模型、词表与权重摘要，只换这两项），战斗决策按检查点的战斗温度抽，留全部帧（布局 `rollout.SEGMENTS`），用药探索率是战斗组自己的（幕组的 greedy 战斗不探索）。做法是换一个 runner，不按任务或布局覆盖：采样进程每次 `collect` 都按传来的 runner 的设置新建 `RolloutRunner`，换 runner 不用改采样进程与任务格式；greedy 与否、探索率本来就是"策略在这一波怎么打"的设置，照常记在对局与 summary 里。
+- **存储**：轮目录的 `fight-groups/`，与幕组各波并列，格式同一波幕组（`groups.WaveWriter`）：分片加索引、`decisions.jsonl.gz`、`fights.jsonl`（每条段一行战况，`path` 为 null，不建 `fights/`）、`quarantine/`、`summary.json`（`kind=fight_groups_wave`，`format=fight-groups-v1`：`plan`（N、K、优先份额、分叉深度、`key`、温度、探索率、权重摘要）、`picks`、`segments`、`written`、`outcomes`、`failed`、`phases`、`explored`、`forked`、`fights`、`seconds`、`collector` 等）。开打之前先写 `picks.json`（`plan`、账、挑中的每一行，行多 `wave`、`cost`、`reason`）。它不在轮 summary 的 `waves` 里，幕组的优势、更新与份额都不读它（它的优势另算，见 learn）；轮 summary 多 `fight_groups`（这一波的 summary）。
+- **续跑**：`fight-groups/summary.json` 的 `plan` 与这次相同就原样沿用；`picks.json` 的 `plan` 相同且有索引时，保留已完成的段、只打剩下的；否则把目录移到轮目录的 `interrupted/` 下重挑重打。
+- **续打确定**：同一份存档、动作序列相同的段，战况逐项相同（引擎在动作给定时确定，见 [env 入场存档](env.md#入场存档)）。
+- **量**（v54-drop-uniform 第 15 轮，bf16，16 引擎，A0–A5，44 场 × 8 条，3:4:4）：352 段 22 秒，网络决策 11,346 个（每段 32 个），511 决策/秒；每段的决策帧普通约 19、精英约 29、Boss 约 50。分片带全部战斗帧，约 130 KB／段。按同样的配比外推前置测量的规模（450 场 × 8 条）：约 11.6 万个决策，16 引擎约 4 分钟，64 引擎按第三幕续打的吞吐（约 1,000–1,300 决策/秒）约 1.5–2 分钟；分片约 0.5 GB。
+
+## 战斗示范的挑选
+
+`main/play/demo_picks.py`：BC 阶段每轮从这一轮幕组各波的战况里挑 `count` 场（默认 2,000）交给求解器，求解与导入见 [demos 逐轮的战斗示范](demos.md#逐轮的战斗示范)。
+
+- **配额**：候选是各波 `fights.jsonl` 的全部行（`fight_groups.candidates`），去掉事件战斗；按普通、精英、Boss 3:4:4 分场数（`fight_groups.quotas`），某类不够就记为短缺，不从别类补。
+- **自然频率**：幕组让一局的后几幕有更多段（第一幕每组 n 段，每段再续 m 段），第三幕的战斗约占池子七成。一场战斗的权重是它所在的局（角色与种子）在这一波的段数的倒数（`natural_weights`，段数按这一波战况里出现的段计），相当于每局每幕计一次；类内按权重不放回地抽（每行取 u^(1/w) 的键，从大到小）。
+- **开局选择优先**：`opening_selection` 为真的战斗（赌博筹码、烤火手套、开局 N 选 1 一类）先按同样的权重抽，最多占 `opening`（默认 20%）的场数，并且不超过各自种类的配额；其余配额再从这一类剩下的战斗里抽。
+- **种子**：随机数按 `key`（驱动给 `<seed-root>:<迭代>`）与种类定，同一轮重挑结果相同。
+- **输出**：`write_selection` 写 `<轮目录>/demos/selection.json`：`fights` 每项带 `id`（`<段>-<场次>`）、入场存档的绝对路径、角色、种子、难度、种类、幕、层、遭遇、`second_boss`、`opening_selection`、波、权重与挑中原因（`opening`／`natural`），`extra` 为空；另有账（每类可挑场数、开局选择场数、配额、挑中数、短缺、按幕分布）。入场存档在这一轮的清理步删掉，求解要在那之前做完。
+
+## 战斗评估集
+
+`main/play/fight_eval.py`，用途见 [ADR 0001](../adr/0001-separate-combat-training.md)：一批固定的战斗入场存档，策略 greedy 逐场打一遍，比较检查点的战斗打法；求解器在同一批存档上打一遍作对照。代价与报表在 [learn 战斗评估报表](learn.md#战斗评估报表)，命令见 [README](../../README.md#战斗评估集)。
+
+- **抽取**（`build_set`，命令 `fight-set`）：来源是若干个入场存档目录，每份存档一个文件，文件名是战斗 id，存档旁带对局的 `character`、`seed`、`ascension`（`entry_battles` 也读这三项）；幕组轮写的存档（`<波>/fights/`）不带，`entry_fights` 按文件名从同一波的战况（目录旁的 `fights.jsonl`）补，补不上就报错。去掉事件战斗和 `--exclude` 列出的 selection 里 `fights`、`extra` 的战斗，`--count` 场按普通、精英、Boss 3:4:4 分（`fight_groups.quotas`），每类按 id 排序后用 `random.Random("<root>:<种类>")` 不放回均匀抽。来源与 root 相同，抽出的战斗相同；某类不够配额就报错。
+- **存放**：`data/<名字>/`，固定数据，不放在会被清理的轮目录里：
+  - `saves/<id>.json.gz`：存档的副本；
+  - `fights.json`：`format=fight-eval-v1`、root、配额、来源与排除的账，`fights` 是每场的 id、角色、种子、难度、种类、幕、楼层、遭遇、第二 Boss 与存档的相对路径。格式就是 `entry_battles` 的 selection（`extra` 为空），求解器直接读它；
+  - `seeds.json`：这些战斗所在对局的种子，按角色列，与评估种子文件同格式。采样必须避开它们：`iterate --exclude-seeds` 加上这个文件，与开发集、最终测试集一样。`fight-eval` 像 `evaluate` 一样核对它们不在检查点的训练种子里；
+  - `solver/`：求解器在这批存档上打的结果（`entry_battles run` 的输出目录），`fight-eval` 默认从这里读对照。
+  - `solver-demos/`：`solver/` 里赢下的战斗导出（`entry_battles export`）再导入（`import-independent`）成的数据目录，分片加索引，供在这批战斗上算求解器示范的 NLL；它的种子是评估集的，不能进训练数据。
+- **现有的集** `data/fight-eval-20261022/`：
+  - 来源是前置测量的 3,080 份入场存档（v54-drop-uniform 第 15 轮，A0–A5，战斗 greedy，`round_seeds("probe-fights-20261022", 0, 40)`，五角色各 40 局），在本地 `.scratch/training-plan/assets/probe-20261022/fight-saves/`；
+  - 去掉示范试点用过的 220 场（`.scratch/training-plan/assets/demo-pilot/selection.json`），按 root `fight-eval-20261022` 抽 440 场（120／160／160）；
+  - 涉及 161 个种子，与开发集、dev-b、最终测试集都不重叠；
+  - 试点把带赌博筹码的战斗多抽了 20 场作 `extra`，这些被排除在外，所以集里带赌博筹码的只有 3 场；
+  - 引擎改了公开字段或随机数消耗，存档就要重取（[env 入场存档](env.md#入场存档)）。
+- **打一遍**（`play_set`，命令 `fight-eval`）：
+  - 每场一个段任务（`jobs`）：`resume` 是存档，`until_fight_end`，难度取存档的，段名与组名都是战斗 id；
+  - `sample=False`，布局 `rollout.SEGMENTS`，留全部帧、交回分片行；引擎在采样进程里，与 `evaluate` 相同；
+  - 采集进程收到一段就解开分片行，取出决策序列、战况与打法，把危急帧的帧压缩存下；整轮打完再给危急帧打分。
+- **逐场行**（`fight_row`，字段 `ROW`）：
+  - 战斗的标识（`FIELDS`）与 `source`（policy 或 solver）；
+  - `status`、`outcome`（reached、win、loss）、`error`；
+  - `record`：战况里的 HP 与最大生命、`potions_used`、`opening_selection`、`died`、`decisions`（`fights.ROW` 的一部分）；
+  - `behavior`（见下）；
+  - `actions`：各决策的 `state_version` 与所选候选 `decoder_slot_ref` 的指纹，用来比较两次打法；
+  - `choices`：有选择的决策数。
+- **打法**（`behavior`，从决策序列取）：
+  - `held`：第一个决策时腰带里的药水；`used`：用掉的药水，按顺序；
+  - `setups`：[开局选择](../../CONTEXT.md)，即这场第一次出牌、用药或结束回合之前的多选。每个记来源遗物（`SETUP_SOURCES`：赌博筹码是从手牌选任意张，烤火手套是消耗 1 张，工具箱是从生成的牌里选 1 张；要持有该遗物、选择的形状也对得上，否则为 null）、操作、来源区、上下限、选了几张、选了哪几张；
+  - `selections`：其余的多选，记打开它的东西（`trigger`：紧挨着的前一个出的牌或用的药水的 content id；结束回合之后的为 `END_TURN`）、操作、来源区、上下限、选了几张；
+  - 多选按路由的 `selection_id` 分界。一个有选择的决策也没有的多选不算：对局本来就不记下没有选择的段，两边按同一规则数；
+  - `danger`：[危急帧](../../CONTEXT.md)，即有选择、候选里有 USE_POTION、玩家 HP 低于最大生命 30%（`DANGER`）的决策，记位置、HP 与这一步是否用了药。
+- **危急帧打分**（`score_danger`）：整轮打完后，危急帧每 64 个一批交给 `choose_batch`，每帧一个新会话（决策无状态，打分与对局时相同），在温度 1 下取全部候选的概率；USE_POTION 候选的概率之和是 `probability`，温度 T 下的 `tempered` 由这个分布按 p^(1/T) 归一化得到，T 取检查点的战斗温度。批的组成与对局时不同，概率的末位会有差别。
+- **求解器的行**（`solver_rows`）：读 `entry_battles run --selection data/<集>/fights.json --output <目录>` 写下的东西：`selection.json`；`runs/<run>.json`，每场的报告，赢的输的都在；`samples/<run>.jsonl.gz`，每场的全部决策行，`metadata.sample_group` 是战斗 id。
+  - 打不了的场（`execution_failed`）记 `status` 为 error；
+  - 入场 HP 取报告的，入场最大生命取第一个决策的；战后 HP 取报告的 `exit_hp`，输了记 0；
+  - 报告没有战后最大生命，用最后一个决策的代替。战后的最大生命变化（少见）因此记不到；
+  - `opening_selection` 按策略战况的同一规则从决策行算（`opening_selection`：第一次出牌、用药或结束回合之前，在不止一个候选里做过别的选择）；
+  - 只算属于这个集的战斗；求解器只打了其中一部分时，对照只在两边都打完的战斗上算。
+- **量**（v54-drop-uniform 第 15 轮，8 引擎）：440 场约 1.4 万个网络决策，FP32 约 63 秒、bf16 约 61 秒；危急帧约 1,200 个。
+- **确定性**：同一检查点 FP32 跑两次，440 场里有 12 场动作序列不同、4 场战况不同（没有一场死活不同）；bf16 对 FP32 有 30 场动作不同、12 场战况不同。这些都是多引擎合批下近似并列的决策翻转，续打本身是确定的。
 
 ## 评估报告
 

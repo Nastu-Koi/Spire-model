@@ -164,7 +164,10 @@ def load_model(path, device="cpu", *, allow_legacy_encoding=False):
         del shard
     if loaded != expected:
         raise ValueError("Checkpoint is missing model tensors")
-    vocabulary = Vocabulary.from_state(manifest["vocabulary"], config)
+    # Public schema symbols added since the checkpoint was saved take spare rows; every old
+    # ID stays. Every reader of the checkpoint (a resumed run, its KL reference, evaluation)
+    # expands it the same way, so they share one table and its digest.
+    vocabulary = Vocabulary.from_state(manifest["vocabulary"], config).expanded()
     return model, vocabulary, manifest
 
 

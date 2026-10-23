@@ -156,6 +156,11 @@ class PublicSnapshot:
                 ("exhaust", "exhaust_pile"),
             ):
                 self.pile(pcs.get(source, []), zone, ordered=source == "hand")
+            # A card being resolved, as the engine publishes it: only while there is one.
+            # Recordings made before the mod exported its cards have none.
+            played = [card for card in pcs.get("play") or [] if isinstance(card, dict) and card.get("id")]
+            if played:
+                self.pile(played, "play", ordered=True)
             for i, creature in enumerate(combat.get("enemies", [])):
                 self.creature(creature, "enemy", f"creature:{i + 1}")
             if player.get("osty"):

@@ -1,7 +1,7 @@
 # 操作事故与杂项踩坑
 
 - **时间**：2026-10-11 ~ 2026-10-18
-- **来源**：`.scratch/a0-training-baseline/issues/14-training-code-refactor.md`、`23-two-stage-bc.md`；`.scratch/joint-training/issues/01-repo-restructure.md`、`07-act-groups.md`、`08-grpo-update.md`、`11-sampling-memory.md`、`12-rates-file-with-profile-resume.md`、`19-boss-waves.md`、`20-overlap-sampling-update.md`、`24-serial-v12-v16.md`、`27-potion-exploration.md`、`28-loader-shm-leak.md`、`30-operator-level-speedups.md`
+- **来源**：`.scratch/a0-training-baseline/issues/14-training-code-refactor.md`、`23-two-stage-bc.md`；`.scratch/joint-training/issues/ops.md`（01）、`act-groups-grpo.md`（07、08）、`throughput.md`（11、20、28、30）、`update-settings.md`（12）、`sampling-settings.md`（19）、`training-runs.md`（24）、`potions.md`（27）
 - **状态**：事故与踩坑的记录，不是方法尝试。下列问题都已修复或写成操作规则；两处原因未查明（BC 进程组消失、训练进程被强杀后的共享文件）。
 
 ## 动机

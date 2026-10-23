@@ -1,7 +1,7 @@
 # 按种子分组的整局组基线与拒绝采样微调
 
 - **时间**：2026-10-15，测量 15:27–15:43，当天否决。
-- **来源**：`.scratch/joint-training/issues/06-seed-variance.md`；`07-act-groups.md`、`07-group-baseline-replay.md` 的“不采用”表。
+- **来源**：`.scratch/joint-training/issues/critic-line.md`（06）；`act-groups-grpo.md`（07）与 `critic-line.md`（07b）的“不采用”表。
 - **状态**：测量后否决，没有实现。
 
 ## 动机

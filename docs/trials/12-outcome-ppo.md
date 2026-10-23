@@ -1,7 +1,7 @@
 # 只给通关 ±1 的整局 PPO
 
 - **时间**：2026-10-10 用户把奖励改为只给通关 ±1，同日运行 `ppo-v3`、`ppo-v4`；当天 21:25 PPO 数据全部删除；2026-10-11 `8c50964` 先把 v1–v4 的代码状态作为基线提交，`66614f0` 删除整局 PPO 与价值头。
-- **来源**：`8c50964` 提交信息（“该路线在 20M 上未超过 BC”）；`4ffe8ca^:ARCHITECTURE.md`「策略改进」首段；`.scratch/a0-training-baseline/issues/14-training-code-refactor.md`、`26-route-revision-combat-replay.md`；`.scratch/joint-training/issues/06-seed-variance.md`、`07-act-groups.md`、`07-group-baseline-replay.md`。原始工单 `.scratch/a0-training-baseline/issues/12-ppo-baseline-run.md` 已删除，运行数字取自会话记忆。
+- **来源**：`8c50964` 提交信息（“该路线在 20M 上未超过 BC”）；`4ffe8ca^:ARCHITECTURE.md`「策略改进」首段；`.scratch/a0-training-baseline/issues/14-training-code-refactor.md`、`26-route-revision-combat-replay.md`；`.scratch/joint-training/issues/critic-line.md`（06、07b）、`act-groups-grpo.md`（07）。原始工单 `.scratch/a0-training-baseline/issues/12-ppo-baseline-run.md` 已删除，运行数字取自会话记忆。
 - **状态**：被删除；`outcome-v1` 奖励与按阶段的采样温度保留。
 
 ## 动机

@@ -1,7 +1,7 @@
 # 按 BC 学习率走的 GRPO 与几项被否决的小改
 
 - **时间**：2026-10-16
-- **来源**：`.scratch/joint-training/issues/08-grpo-update.md`（阶段 03 结果；Comments“四项候选改动的核查”，核查脚本在草稿目录 `an/uniform.py`）；`.scratch/joint-training/issues/10-learning-rate-config.md`；`.scratch/joint-training/issues/32-update-batch.md`（用户决定）
+- **来源**：`.scratch/joint-training/issues/act-groups-grpo.md`（08 的阶段 03 结果；Comments“四项候选改动的核查”，核查脚本在草稿目录 `an/uniform.py`）；`.scratch/joint-training/issues/update-settings.md`（10；32 的用户决定）
 - **状态**：被否决。按 BC 学习率的 GRPO 一轮内把策略推离起点并显著变差；之后核查的三项小改都不做。取代它的小步 GRPO（BC 十分之一的学习率、κ = 0.1）是现行做法。
 
 **版本号**：本文的 v13、v14、v15 是失败试跑 `iterate-v3` 检查点里的内部 `policy_version`，不是 GRPO vN。GRPO v0、v2 的内部版本也是 13、15，但它们是另一次运行（信号检验与 `iterate-v5`）的检查点。

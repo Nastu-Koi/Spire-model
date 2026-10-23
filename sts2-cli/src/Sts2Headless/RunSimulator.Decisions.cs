@@ -21,7 +21,7 @@ public partial class RunSimulator
     private static readonly Lazy<Dictionary<string, object?>> ProtocolContract = new(() => new()
     {
         ["adapter_version"] = "engine-candidates-v1",
-        ["observation_schema"] = "public-state-v6",
+        ["observation_schema"] = "public-state-v7",
         ["public_history_version"] = Spire.PublicHistory.OddsHistory.Version,
         ["action_schema"] = "candidate-v0",
         ["auto_advance_version"] = "pending-continuation-v0",

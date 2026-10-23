@@ -61,7 +61,7 @@ def settle(engine, frame):
         time.sleep(.01)
         frame = engine.send(dict(cmd='advance_to_boundary'))
     if frame.get('type') != 'decision_frame' or frame.get('boundary') == 'error':
-        raise ValueError(f'native_frame_error:{frame.get("error") or frame.get("message")}')
+        raise ValueError(f'native_frame_error:{frame.get("error") or frame.get("message")}{failure_detail(frame)}')
     validate_frame(frame)
     return frame
 
@@ -587,6 +587,55 @@ BUDGETS = dict(budget_ms=5000, elite_budget_ms=5000, boss_budget_ms=20000)
 WORKERS = dict(battle=16, choice=16)
 
 
+def solver_step(engine, frame, budget_ms, budgets, **options):
+    """One solver step at the budgets' prices, checked against the prices the search reports.
+
+    `budgets['potion_costs']`, when given, is what the solver's own policy asks a potion
+    to save, in HP: the base price and those of the two tiers it holds dearer (its own
+    are 9, 14 and 18). `budgets['final_boss_potion_costs']` replaces them in the run's
+    last fight, where the worker then also counts the HP potions save in full; without
+    it that fight spends potions only to win. A worker that does not know the prices
+    searches at its own and says so in no other way, so every search has to name the
+    prices it used. `budgets['beam_portfolio']` turns the solver's set of beam widths
+    for the potion-free search off or on (the worker's default is on).
+    `budgets['potion_reserve']` is the share of a search's budget the potion-free search
+    leaves to the potion layers when the belt holds a potion; every search names the time
+    it kept (0 without potions), which a worker that does not know the share does not."""
+    costs, final = budgets.get('potion_costs'), budgets.get('final_boss_potion_costs')
+    reserve = budgets.get('potion_reserve')
+    priced = dict(**({'potion_costs': costs} if costs else {}),
+                  **({'final_boss_potion_costs': final} if final else {}),
+                  **({'beam_portfolio': budgets['beam_portfolio']} if 'beam_portfolio' in budgets else {}),
+                  **({'potion_reserve': reserve} if reserve else {}))
+    reply = engine.step(frame, budget_ms=budget_ms, boss_budget_ms=budgets['boss_budget_ms'],
+                        reuse_turn_plan=True, **priced, **options)
+    search = reply.get('search')
+    if search is not None:
+        if final and 'final_boss_priced' not in search:
+            raise ValueError('solver_worker_without_final_boss_costs')
+        if reserve and 'potion_reserve_ms' not in search:
+            raise ValueError('solver_worker_without_potion_reserve')
+        expected = final if search.get('final_boss_priced') else costs
+        if expected and search.get('potion_costs') != list(expected):
+            raise ValueError('solver_worker_without_potion_costs')
+    return reply
+
+
+def failure_detail(reply):
+    """What a worker's error reply says beyond its message: the first inner exception (a
+    failed choice transaction reports only its id, not the mismatch or fault that failed it)
+    and the methods the innermost exception was thrown from."""
+    trace = str(reply.get('stack_trace') or '').splitlines()
+    inner = next((line.split('---> ', 1)[1].split(': ', 1)[-1].strip() for line in trace if '---> ' in line), None)
+    frames = [line.strip()[3:].split('(', 1)[0] for line in trace if line.strip().startswith('at ')][:3]
+    return (f' ({inner})' if inner else '') + (' @ ' + ' < '.join(frames) if frames else '')
+
+
+def solver_failure(reply):
+    """Why a solver step failed, from the worker's error reply."""
+    return 'solver_failed:' + str(reply.get('message') or reply.get('type')) + failure_detail(reply)
+
+
 def play_battle(shared, second, save, anchor, budgets):
     """The solver fights the battle on one process of the run; the other repeats it.
 
@@ -601,19 +650,12 @@ def play_battle(shared, second, save, anchor, budgets):
     one, a search that finds none is made again on the solver's own policy, and after
     the first potion the rest of the fight is the solver's own. The fight tells how many
     searches found no such route (`potion_refusals`); whether a potion was used is in
-    its records.
-
-    `budgets['potion_costs']`, when given, is what the solver's own policy asks a potion
-    to save, in HP: the base price and those of the two tiers it holds dearer (its own
-    are 9, 14 and 18). A worker that does not know them searches at its own prices and
-    says so in no other way, so every search has to name the prices it used."""
+    its records. Prices and the beam portfolio come from `budgets` (see `solver_step`)."""
     records = []
     budget_ms = budgets['elite_budget_ms' if anchor['room_type'] == 'elite' else 'budget_ms']
     engine, frame = shared.enter(save, anchor)
     contract, entry_hp = deepcopy(frame['contract']), player(frame)['hp']
     forced = Counter(anchor.get('forced', []))
-    costs = budgets.get('potion_costs')
-    priced = dict(potion_costs=costs) if costs else {}
     required = anchor.get('potion_policy') == 'RequireAtLeastOne'
     owes_potion, refusals = required, 0
     while in_combat(engine, frame):
@@ -631,11 +673,7 @@ def play_battle(shared, second, save, anchor, budgets):
             potions = dict(potion_policy='Disabled', potion_directives=slots)
 
         def search(**options):
-            reply = engine.step(before, budget_ms=budget_ms, boss_budget_ms=budgets['boss_budget_ms'],
-                                reuse_turn_plan=True, **priced, **options)
-            if costs and reply.get('search') is not None and reply['search'].get('potion_costs') != list(costs):
-                raise ValueError('solver_worker_without_potion_costs')
-            return reply
+            return solver_step(engine, before, budget_ms, budgets, **options)
         reply = search(potions=True, potion_policy='RequireAtLeastOne') if owes_potion else search(**potions)
         if owes_potion and reply.get('type') not in ('solver_step', 'solver_selection_required'):
             refusals += 1
@@ -648,7 +686,7 @@ def play_battle(shared, second, save, anchor, budgets):
             frame = settle(engine, engine.send(execution_command(before, chosen['candidate_ref'])))
             actor = 'combat_selection_rule'
         else:
-            raise ValueError('solver_failed:' + str(reply.get('message') or reply.get('type')))
+            raise ValueError(solver_failure(reply))
         records.append(row(before, chosen, actor))
         if chosen['verb'] == 'USE_POTION':
             used = {e['ref']: e['content_id'] for e in before['public']['entities'] if e.get('entity_type') == 'potion'}
@@ -1470,6 +1508,12 @@ def main():
     parser.add_argument('--potion-costs', type=int, nargs=3, metavar=('BASE', 'ELEVATED', 'HIGH'),
                         help="HP a potion has to save for the solver's own policy to use it, by the solver's "
                              "three tiers; without it the solver searches at its own prices, 9 14 18")
+    parser.add_argument('--final-boss-potion-costs', type=int, nargs=3, metavar=('BASE', 'ELEVATED', 'HIGH'),
+                        help="Prices of the run's last fight, where the HP potions save then counts in full; "
+                             'without it the solver spends a potion there only to win')
+    parser.add_argument('--no-beam-portfolio', action='store_true',
+                        help='Search every width once instead of the beam portfolio, leaving more of the budget '
+                             "to the solver's potion searches")
     parser.add_argument('--solver-config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--reuse-battles', type=Path,
         help='Previous anchor directory: revalidate and refresh stored battle actions before searching again')
@@ -1489,6 +1533,10 @@ def main():
                        boss_budget_ms=args.boss_budget_ms)
         if args.potion_costs:
             budgets['potion_costs'] = args.potion_costs
+        if args.final_boss_potion_costs:
+            budgets['final_boss_potion_costs'] = args.final_boss_potion_costs
+        if args.no_beam_portfolio:
+            budgets['beam_portfolio'] = False
         # Choice kinds first, then battles, each at its own concurrency.
         passes = [([k for k in args.kinds if k != 'battle'], args.workers or WORKERS['choice']),
                   ([k for k in args.kinds if k == 'battle'], args.workers or WORKERS['battle'])]

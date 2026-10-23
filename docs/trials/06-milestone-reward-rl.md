@@ -1,7 +1,7 @@
 # 过幕积分奖励的 RL 与 PPO（每幕 1/2/3、act-progress 1/2/5）
 
 - **时间**：每过一幕给 1／2／3 的那次 RL 日期记录未留存（只见于用户 2026-10-15 的补充）；过幕积分 `act-progress-v2` 于 2026-10-06 接入；`ppo-v1`、`ppo-v2` 在 2026-10-10 运行；同日用户改为只给通关 ±1；整局 PPO 代码 2026-10-11 删除（`66614f0`），过幕积分等术语同日删除（`27e7f38`）。
-- **来源**：`.scratch/joint-training/issues/06-seed-variance.md`（2026-10-15 Comments）、`.scratch/joint-training/issues/07-act-groups.md`；`.scratch/a0-training-baseline/implementation-report.md`「首批」；`8c50964` 的提交信息与 `cf9a06e`、`8c50964` 时的 `ARCHITECTURE.md`「PPO」节；`e525af6` 删除的 PPO 节。`ppo-v1`／`ppo-v2` 的原始工单 `.scratch/a0-training-baseline/issues/12-ppo-baseline-run.md` 已删除，数字取自会话记忆。
+- **来源**：`.scratch/joint-training/issues/critic-line.md`（06 的 2026-10-15 Comments）、`.scratch/joint-training/issues/act-groups-grpo.md`（07）；`.scratch/a0-training-baseline/implementation-report.md`「首批」；`8c50964` 的提交信息与 `cf9a06e`、`8c50964` 时的 `ARCHITECTURE.md`「PPO」节；`e525af6` 删除的 PPO 节。`ppo-v1`／`ppo-v2` 的原始工单 `.scratch/a0-training-baseline/issues/12-ppo-baseline-run.md` 已删除，数字取自会话记忆。
 - **状态**：没带来提升；奖励被只给通关 ±1 取代，PPO 代码已删除。
 
 ## 动机

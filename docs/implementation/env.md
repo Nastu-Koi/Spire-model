@@ -8,7 +8,7 @@
 | `control.py`、`treasure_rule.py`、`crystal_rule.py` | 策略与控制器的分工、宝箱流程、水晶球规划器 |
 | `rewards.py` | 奖励账本：只在终局支付 ±1 |
 | `saves.py` | 续局存档（`continue_save`）、战斗重进命令、战斗边界与各场战斗的结局（`FightTracker`） |
-| `seeds.py` | `split_group`、`seed_group` 与留出划分的身份，评估种子的隔离检查 |
+| `seeds.py` | `split_group`、`seed_group` 与留出划分的身份，评估种子的隔离检查；采样轮的种子与难度分配（由种子根与轮号派生：`round_seeds`、`round_ascensions`）与要避开的种子（`excluded_seeds`） |
 | `public_history.py` | 公开历史契约的版本与 unknown 记忆 |
 | `engine.py`、`dotnet_runtime.py` | 无头引擎进程（`CliEngine`）与 .NET 运行时选择 |
 | `runtime.py`、`processes.py` | 资源设置与可复现性清单；随父进程结束的子进程、结束进程组、归还空闲堆内存 |
@@ -18,7 +18,7 @@
 
 | 契约 | 当前版本 |
 | --- | --- |
-| 原生公开观察 | `public-state-v6` |
+| 原生公开观察 | `public-state-v7` |
 | 公开历史 | `public-history-v1` |
 | 模型输入编码 | `public-encoding-v3`（`main/encoding/representation.py`） |
 | 策略／控制器分工及索引 | `public-control-v1` |
@@ -48,7 +48,9 @@
 
 ## 入场存档
 
-指定 `--boundary-bosses` 时，幕组在 Boss 入场切点（该幕第一场 Boss 战的第一个决策，`events` 带 `encounter_started`）让引擎 `write_continue_save` 到临时文件再读回（`saves.continue_save`）。在房间里时引擎存的是进房前的状态（节点从已访问坐标里退回、房间清空）；`anchor_state` 序列化的是已进房的状态，不能用。续打用一条命令 `resume_fight`（`saves.fight_resume_command(row)`：存档、遭遇、楼层、节点类型、是否第二 Boss），引擎加载后把节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入遭遇，回复就是战斗的第一个决策帧（`CliEngine.resume_fight`）。重进的战斗 HP、最大 HP、金币、幕、楼层、卡组、遗物、药水和敌人种类相同；敌人的随机 HP 与开局手牌由战斗自己的随机数重抽，所以重进是同一入场状态的另一次战斗，不是重放。在战斗开始时计数的遗物重进后可能少计一次。
+指定 `--boundary-bosses` 时，幕组在 Boss 入场切点（该幕第一场 Boss 战的第一个决策，`events` 带 `encounter_started`）让引擎 `write_continue_save` 到临时文件再读回（`saves.continue_save`）；指定 `--fight-entries` 时，每场不是事件引发的战斗都在第一个决策这样写一份（见 [play](play.md#幕组) 的战况与入场存档）。在房间里时引擎存的是进房前的状态（节点从已访问坐标里退回、房间清空；战斗中的存档见下段）；`anchor_state` 序列化的是已进房的状态，不能用。续打用一条命令 `resume_fight`（`saves.fight_resume_command(row)`：存档、遭遇、楼层、节点类型、是否第二 Boss），引擎加载后把节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入遭遇，回复就是战斗的第一个决策帧（`CliEngine.resume_fight`）。重进的战斗与原战斗开局相同：HP、最大 HP、金币、幕、楼层、卡组、遗物及其计数、药水、敌人和它们的随机 HP、开局手牌都一样，动作相同就逐帧相同，是重放；只有公开历史里“上一个节点有没有商店”在加载的对局里是未知。
+
+战斗进行中写的存档是进这个房间时的整局状态：`RoomEntrySave` 在 `RunManager.EnterRoom` 进战斗房间之前把整局序列化一份（游戏自己选图进房时也在进房之前存档，无头引擎不存），`write_continue_save` 在战斗进行中写这一份，再把节点退回。开战时对整局的改动（Blood Vial 与 Fake Blood Vial 第一回合回血、Royal Poison 扣血、Maw Bank 进房加金币、Petrified Toad 给药水、Ember Tea 与 Happy Flower 计数）和敌人 HP、洗牌所用的随机数都不在存档里，重进时各发生一次。加格挡、加能量、抽牌（Anchor、Lantern、Bag of Preparation 等）只作用于本场战斗，存档里本来就没有，每次进入各生效一次。战斗结束之后（奖励、战后选图）、其它房间、以及不经过 `EnterRoom` 的事件引发的战斗里，写的仍是当时的状态。序列化不消耗随机数、不改状态，每场战斗不到 1 ms。
 
 幕开头存档写在第 0 层的选图决策，用 `resume_save` 续打（`CliEngine.resume`），见 [play](play.md#幕组)。
 
@@ -62,7 +64,7 @@
 
 ## 资源设置
 
-`configure_runtime` 在每个命令开头执行：固定 PyTorch 线程数，关掉 TF32（矩阵乘与 cuDNN），使用 GPU 时把本进程的显存上限设为 min(80 GiB, 空闲显存 − 8 GiB)，余量不足 8 GiB 直接报错；返回 Python、PyTorch、CUDA、显卡等的可复现性清单，交给各命令。
+`configure_runtime` 在每个命令开头执行：固定 PyTorch 线程数，关掉 TF32（矩阵乘与 cuDNN），使用 GPU 时把本进程的显存上限设为 min(84 GiB, 空闲显存 − 8 GiB)（`gpu_budget`；训练机 95.6 GiB、桌面约占 2.7 GiB 时取到 84 GiB，8 GiB 余量留给桌面与本进程在分配器之外的显存），余量不足 8 GiB 直接报错；返回 Python、PyTorch、CUDA、显卡等的可复现性清单，交给各命令。
 
 `processes.end_with` 让工作进程在父进程消失时连同自己的进程组一起结束（父进程被杀不会做清理，否则读取进程会一直占着训练的显存与输出锁、采样进程占着引擎）；`end` 先对进程组发 SIGTERM、宽限后 SIGKILL；`release_memory` 调 `malloc_trim` 把 C 堆的空闲页还给系统，采样进程每次清掉解析缓存之后调用。
 
@@ -99,3 +101,4 @@ python public_history/tests/full_runs.py /absolute/Sts2Headless.dll /tmp/history
 
 - 改引擎公开字段或随机数消耗会让重放证据与夹具的状态哈希失效；字段变化可用 `combat_solver_cli/tests/native/refresh_hashes.py` 重写哈希，随机数消耗变化则只能重新捕获。
 - 引擎测试会重新编译 worker；有任务在跑时不要在主仓库编译。
+- `CardSelectCmd` 装了测试选牌器就跳过选牌的暂停信号（`SignalPlayerChoiceBegun`），而真实游戏的 `StartTurn` 靠这个信号在回合准备第一次选牌时先跑 `AfterSideTurnStart`（橙子面团生成牌、提灯给能量等），再回到准备里余下的遗物。引擎因此在带选择上下文的选牌里让测试选牌器暂时让位（`SelectionMetadata`），游戏走本地玩家的路径：发出暂停信号，再问本地选牌器，而本地选牌器就是同一个无头选牌器（`RunSimulator.InstallSelector`）。去掉它，回合准备的手牌与随机数消耗就会与真实游戏不同（烤火手套的消耗选牌时手里还没有橙子面团的牌，选择悖论的生成牌在 `CombatCardGeneration` 上差一次生成），求解器按真实游戏模拟的计划也对不上（[solver](solver.md#回合准备选牌)）。

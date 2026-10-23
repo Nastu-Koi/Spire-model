@@ -83,9 +83,16 @@ python -m main --device cuda bootstrap --data data/bootstrap data/a10-battles \
 - 训练命令（`bootstrap`、`iterate`）的检查点写进 `--checkpoints` 目录，默认是 `checkpoints/` 加 `--output` 在 `runs/` 下的相对路径（`--output runs/bc` 的检查点在 `checkpoints/bc/current`、`checkpoints/bc/epoch-NNNNNN/`）；`--output` 不在 `runs/` 下时必须给出。`runs/<运行>/` 只留运行记录。
 - 续训：`--checkpoint checkpoints/<运行>/current`；从任意轮次检查点续训到新目录；收尾衰减 `--decay-updates N`；做满固定更新数就停 `--max-updates N`。各启动方式见 [network](docs/implementation/network.md#检查点)。
 - 控制规则变了只需重建索引：`python -m main reindex --data <目录> [--listed-only] --workers 6`（[data](docs/implementation/data.md#数据复用)）。
-- 留出 NLL：`python -m main --device cuda heldout-nll --data <目录…> --checkpoint <检查点> [--ascension 10] [--combat-from …]`。
+- 留出 NLL：`python -m main --device cuda heldout-nll --data <目录…> --checkpoint <检查点> [--ascension 10] [--combat-from …] [--all-groups]`。默认只算留出的种子组；`--all-groups` 算全部种子组，用于整份都不进训练的数据，例如战斗评估集上求解器打的战斗（`data/fight-eval-20261022/solver-demos`）。
 
-示范的生成（下载、来源筛选、锚点、导出）见 [demos](docs/implementation/demos.md)。
+示范的生成（下载、来源筛选、锚点、导出）见 [demos](docs/implementation/demos.md)。求解器重打幕组采样打过的战斗、作战斗示范：
+
+```bash
+python -m spire_codex_data.entry_battles run --selection <selection.json> --output <目录>
+python -m spire_codex_data.entry_battles export --output <目录>
+```
+
+`selection.json` 的格式、默认药价与输出见 [demos](docs/implementation/demos.md#入场存档的战斗)。
 
 ## 采样与评估
 
@@ -98,6 +105,31 @@ python -m main compare runs/eval-x runs/eval-y --head 60      # 配对符号检�
 
 评估默认按检查点训练时的难度对局，`--ascension 10` 改在 A10 评估；`--claim-rewards` 让奖励界面上的金币、遗物和有空位的药水由固定控制器代领（示范数据按这个假设重建），默认不开，领奖是策略决策。`--workers` 是同时运行的引擎数（每个引擎配一个采样进程），默认 64（训练机上最快），内存不够时调小，资源见 [play](docs/implementation/play.md#采样进程分工)。报告的格式见 [play](docs/implementation/play.md#评估报告)。
 
+## 战斗评估集
+
+```bash
+# 抽一次，之后固定：普通、精英、Boss 3:4:4，类内均匀，--root 定随机数
+python -m main fight-set --sources <入场存档目录…> --exclude <示范用过的 selection.json…> \
+  --root fight-eval-20261022 --output data/fight-eval-20261022
+# 求解器在同一批存档上打一遍（按毫秒计时，不与采样或别的重任务并行）
+python -m spire_codex_data.entry_battles run --selection data/fight-eval-20261022/fights.json \
+  --output data/fight-eval-20261022/solver
+# 求解器的轨迹导出、导入成数据目录（在这批战斗上算示范的 NLL 用）
+python -m spire_codex_data.entry_battles export --output data/fight-eval-20261022/solver
+python -m main import-independent data/fight-eval-20261022/solver/independent-training.jsonl.gz \
+  --output data/fight-eval-20261022/solver-demos
+# 策略 greedy 逐场打到战斗结束，出报表；集里有 solver/ 时带上与求解器的对照
+python -m main --device cuda fight-eval --checkpoint <检查点> --fights data/fight-eval-20261022 \
+  --output runs/fight-eval-20261022/<名字> --precision fp32
+python -m main fight-compare runs/fight-eval-20261022/<a> [runs/fight-eval-20261022/<b>] [--solver <目录>] --text
+```
+
+- `fight-set` 的来源是入场存档目录（每份存档一个文件，带对局的角色、种子、难度；幕组轮的 `<波>/fights/` 不带，从同波的 `fights.jsonl` 补），去掉事件战斗和 `--exclude` 的 selection 里的战斗，默认 440 场。写出 `saves/`、`fights.json`（也是 `entry_battles` 的 selection）与 `seeds.json`。现有的集是 `data/fight-eval-20261022/`。
+- 集的种子不能拿去采样：`iterate --exclude-seeds` 要加上 `data/fight-eval-20261022/seeds.json`。
+- `fight-eval` 默认 8 个引擎（`--workers`），`--precision` 同 `evaluate`，`--per-kind N` 只打每类前 N 场作试跑，`--solver` 指定求解器结果的目录（默认是集里的 `solver/`）。输出目录写 `fights.jsonl`（逐场的战况、代价分项与打法）、`metadata.json`、`report.json`、`report.txt`。
+- 报表给分种类的平均代价（药价固定为 7／9／11，最终 Boss 1／1／1）、死亡率、每场用药数与用过药的场次占比、死时持药未用的场数（不算整局最后一场）、危急帧上的用药概率；有求解器结果时再给逐场的代价差与行为差异表（每种药水、每种开局选择、每种多选两边的频率）。`fight-compare` 不重打，从逐场行重出报表；给两个目录时逐场比较两次打法。
+- 格式与口径见 [play](docs/implementation/play.md#战斗评估集) 与 [learn](docs/implementation/learn.md#战斗评估报表)。
+
 ## 迭代
 
 ```bash
@@ -106,11 +138,11 @@ python -m main --device cuda iterate --kl 0.1 --learning-rates configs/learning-
   --output runs/iterate-v1 --iterations 6 --runs-per-character 25 \
   --boundary-acts 2 3 --boundary-bosses 3 --group-n 4 --group-m 4 6 4 --min-entropy 0.45 \
   --engine-root <引擎目录> \
-  --exclude-seeds <开发集与测试集种子文件…> \
+  --exclude-seeds <开发集、测试集与战斗评估集的种子文件…> \
   --eval-seeds <开发集种子文件> --eval-runs-per-character 100 --evaluate-every 2
 ```
 
-`--explore-potions p` 让采样时战斗里有药可用的决策以概率 p 改为用药（探索步，见 [architecture](docs/architecture.md#用药探索)），给两个数时分别是普通战和精英／Boss 战的率，三个数则按普通、精英、Boss；默认 0。重跑同一条命令即断点续跑：`--checkpoint` 与 `--seed-root` 是运行身份（记在输出目录的 `iterate.json`），不能换，其余参数可以改、从剩下的步骤生效。每次迭代：按切点分波采样幕组（`--boundary-acts` 幕开头、`--boundary-bosses` Boss 入场；`--runs-per-character` 是每角色的种子数，`--group-n`、`--group-m` 是每个起点的段数）、算各波的优势、一遍更新、按间隔评估、清理。一遍默认把每一波各看一次；`--wave-shares 1 1 1` 这类相对数改各波在批里的份额，份额就是该波在梯度里的占比。更新是裁剪目标（`--clip`、`--kl`），KL 的参考每 `--reference-every k` 次迭代换成当时的策略（默认 k 等于 `--evaluate-every`，0 则固定为 `--checkpoint`）。`--learning-rates <json>`（`bootstrap` 也收）给这次运行自己的四组学习率，不给时沿用检查点的。`--fork-depth 2` 让每段开头两个有选择的决策按段在组里的序号取策略排第一或第二的候选，组在那里对半分开（分叉步，见 [architecture](docs/architecture.md#幕组的回报与优势)）。`--ascensions 0 5` 让每个种子的组在 A0–A5 里分到一个难度（难度窗口，续局同难度），评估仍按检查点的难度。`--batch 2048` 让一个优化器步累加四个 512 的加载批（必须是 profile 逻辑批的整数倍），学习率不变；`--eval-precision fp32` 让评估关掉 bf16 autocast，采样不受影响。步骤、参数、存储与资源见 [learn](docs/implementation/learn.md#迭代驱动)。检查点直接写在 `checkpoints/<运行>/`（不入库，`checkpoints/INDEX.md` 记来源、内部版本与评估），清理步只留评估过的、待评估的和下一次更新的 KL 参考；`runs/<运行>/` 只留运行记录。不给 `--eval-seeds` 就不评估；`--min-entropy` 触发时驱动在这次迭代完成后停下。
+`--explore-potions p` 让采样时战斗里有药可用的决策以概率 p 改为用药（探索步，见 [architecture](docs/architecture.md#用药探索)），给两个数时分别是普通战和精英／Boss 战的率，三个数则按普通、精英、Boss；默认 0。重跑同一条命令即断点续跑：`--checkpoint` 与 `--seed-root` 是运行身份（记在输出目录的 `iterate.json`），不能换，其余参数可以改、从剩下的步骤生效。每次迭代：按切点分波采样幕组（`--boundary-acts` 幕开头、`--boundary-bosses` Boss 入场；`--runs-per-character` 是每角色的种子数，`--group-n`、`--group-m` 是每个起点的段数）、算各波的优势、一遍更新、按间隔评估、清理。一遍默认把每一波各看一次；`--wave-shares 1 1 1` 这类相对数改各波在批里的份额，份额就是该波在梯度里的占比。`--drop-uniform-groups` 让组内各段回报全相等的组（全组同结果的组）不进更新，份额与一遍的步数按剩下的决策数算。更新是裁剪目标（`--clip`、`--kl`），KL 的参考每 `--reference-every k` 次迭代换成当时的策略（默认 k 等于 `--evaluate-every`，0 则固定为 `--checkpoint`）。`--learning-rates <json>`（`bootstrap` 也收）给这次运行自己的四组学习率，不给时沿用检查点的。`--fork-depth 2` 让每段开头两个有选择的决策按段在组里的序号取策略排第一或第二的候选，组在那里对半分开（分叉步，见 [architecture](docs/architecture.md#幕组的回报与优势)）。`--ascensions 0 5` 让每个种子的组在 A0–A5 里分到一个难度（难度窗口，续局同难度），评估仍按检查点的难度。`--greedy-fights` 让采样时战斗内的决策取策略最可能的动作、只有局外决策按温度抽（greedy 战斗，见 [architecture](docs/architecture.md#采样温度)）：战斗不留帧，优势与更新只有局外决策，分叉落在局外；不能与非零的 `--explore-potions` 或 `--boundary-bosses` 同用，默认关。`--fight-entries` 让每波另写各段每场战斗的战况（`fights.jsonl`）与非事件战斗的入场存档（`fights/`），段的打法不变，这次迭代的清理步删除（见 [play](docs/implementation/play.md#幕组)）。`--fight-groups N`（默认 0，要求同时给 `--greedy-fights` 与 `--fight-entries`）在幕组各波之后采战斗组：从这一轮记下的非事件战斗里按普通、精英、Boss 3:4:4 挑 N 场，每类 `--fight-group-priority`（默认 0.5）的份额按死亡、战斗代价从高到低挑，其余均匀抽，某类不够时如实记下、不从别类补；每场从入场存档续打 `--fight-group-size`（默认 8）条、截在这场战斗结束，战斗按检查点的战斗温度抽、留全部帧，`--fight-group-explore-potions`（格式同 `--explore-potions`）与 `--fight-group-fork-depth` 是这一波自己的用药探索与分叉；写在轮目录的 `fight-groups/`，`sample` 记录与轮 summary 记挑选结果；优势步按固定药价由战况算它的优势（`advantages` 记录的 `fight-groups`，按战斗种类记组内诊断，`--drop-uniform-groups` 同样整组剔除，见 [learn](docs/implementation/learn.md#战斗组的优势)），更新时与幕组各波放进同一批（来源 `fight-groups`，同一裁剪目标与 KL，份额见 `--source-shares`）；这次迭代的清理步删掉它的分片、战况与优势（见 [play](docs/implementation/play.md#战斗组)）。`--combat-demos <目录…>` 让每次更新在同一批里另放这些示范目录的战斗（战斗示范：每个目录只取含战斗的样本组，连同战斗内的选牌，留出种子组也训），每个宏动作按 NLL 学、不算 KL；`--source-shares act-groups=1 combat-demos=1`（有战斗组时是 `fight-groups`）给各类来源在批里的相对份额（要列全这次更新有的来源），不给时按决策数（示范按目录里的战斗宏动作数）。一遍仍把局外各波各看一次，示范按份额取：多于目录里有的就整场重复，少就按种子根与迭代号可复现地抽一部分整场（见 [learn](docs/implementation/learn.md#混合批)）。示范目录只读，清理步不动它。`--round-demos N`（BC 阶段，默认 0，要求同时给 `--greedy-fights` 与 `--fight-entries`）让每轮在优势步之后从这一轮记下的非事件战斗里挑 N 场交给求解器：按普通、精英、Boss 3:4:4 分场数，类内按自然频率（每局每幕计一次）抽，开局是选择的战斗（赌博筹码一类）先抽、最多占 `--demo-opening`（默认 0.2）；求解器以 `--demo-workers`（默认 16，一个物理核一局）局并行，赢下的战斗导入成轮目录的 `demos/imported/`。更新学这一轮与之前共 `--demo-buffer`（默认 3）轮的示范（与 `--combat-demos` 并用时两者都学）；清理步删掉求解器的样本与导出，导入在不再被后面的更新读到时删掉，挑选清单与求解器的报告保留（见 [play](docs/implementation/play.md#战斗示范的挑选)、[demos](docs/implementation/demos.md#逐轮的战斗示范)）。求解按毫秒预算计时，这一步期间机器上不要跑别的重任务。`--batch 2048` 让一个优化器步累加四个 512 的加载批（必须是 profile 逻辑批的整数倍），学习率不变；`--eval-precision fp32` 让评估关掉 bf16 autocast，采样不受影响。步骤、参数、存储与资源见 [learn](docs/implementation/learn.md#迭代驱动)。检查点直接写在 `checkpoints/<运行>/`（不入库，`checkpoints/INDEX.md` 记来源、内部版本与评估），清理步只留评估过的、待评估的和下一次更新的 KL 参考；`runs/<运行>/` 只留运行记录。不给 `--eval-seeds` 就不评估；`--min-entropy` 触发时驱动在这次迭代完成后停下。
 
 ## 其它命令
 

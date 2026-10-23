@@ -24,7 +24,8 @@ thread when it forks. Packed tensors therefore cross process boundaries as named
 shared-memory files (torch's `file_system` strategy): the default descriptor
 passing serves every descriptor from a background thread of the sending process.
 Each feeder writes its messages to a pipe of its own, read by the trainer; a
-`multiprocessing.Queue` would write them from a thread too.
+`multiprocessing.Queue` would write them from a thread too. The files are registered
+with one manager process, the feeder server's (`feeder_server`).
 
 A named shared file is unlinked when every process that holds its tensor has let go.
 A producer that is ended (a pass that stops by its count of updates, as a round's does,
@@ -319,7 +320,8 @@ def _feeders():
     The server starts with the first stream and exits when this process does: it
     reads to the end of a pipe only this process writes to (`_forget_server`), and a
     feeder ends with it (`end_with`). Preloading this module spares each feeder the
-    imports."""
+    imports; preloading `feeder_server` starts the one shared-memory manager of the
+    server's feeders and packers."""
     server = forkserver._forkserver
     if server._forkserver_pid is not None:
         try:
@@ -331,7 +333,7 @@ def _feeders():
             _forget_server()
     context = multiprocessing.get_context("forkserver")
     # Never `__main__`, the default: `python -m main` runs its command at import.
-    context.set_forkserver_preload([__name__])
+    context.set_forkserver_preload([__name__, "main.learn.feeder_server"])
     return context
 
 

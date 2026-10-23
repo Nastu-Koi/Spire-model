@@ -5,13 +5,30 @@ One iteration, repeated (`python -m main iterate`):
 1. **Sample** a round of act groups with the current policy at its temperatures, on
    seeds of the iteration's own (`main/play/groups.py`): segments of runs cut at the
    boundary acts, several from each start, one wave per stretch, written under
-   `groups/round-N`.
+   `groups/round-N`. With `greedy_fights` the fights are played by argmax and kept
+   without frames: the round's decisions, and what the update learns from, are those
+   outside them. With `fight_groups` some of the fights the waves recorded
+   (`fight_entries`) are then played again from their entry saves, each several
+   times to the fight's end, drawn at the fight temperature (`main/play/fight_groups.py`):
+   a wave of their own beside the act waves, which the update does not learn from yet.
+   With `round_demos` (the BC phase) some of the fights the waves recorded are handed
+   to the solver after the advantages (`main/play/demo_picks.py`, `main/demos/rounds.py`):
+   its won fights, imported, are the round's combat demonstrations.
 2. **Value**: every wave's decisions get their advantages from their own groups
-   (`main/learn/groups.py`), returns passed back up the chain of waves.
+   (`main/learn/groups.py`), returns passed back up the chain of waves; with
+   `drop_uniform_groups` the groups whose segments all came to the same return are
+   left out of the update. The fight groups' decisions get theirs from their groups
+   too, each segment's return its fight's cost at `PRICES` (`main/learn/fight_groups.py`),
+   with the same leaving out.
 3. **Update**: one pass over the round, every logical batch drawing from each wave
    by its share (`batches.wave_shares`), with the clipped ratio and a KL to the
    reference policy (`grpo.group_update`): the starting checkpoint, renewed every
    `reference_every` iterations to the policy as it then stood (`Driver.reference`).
+   With `combat_demos` the same batches also hold the fights of those directories of
+   demonstrations, learned by their NLL with no KL (`main/learn/mixed.py`), at the
+   kinds' shares (`source_shares`, `batches.stream_shares`); the pass still sees every
+   wave once. With `round_demos` the demonstrations are those of the last `demo_buffer`
+   rounds (`Driver.demos`).
 4. **Evaluate** the policy greedily on fixed seeds every few iterations; the
    evaluation keeps each run's outcome, not its frames.
 5. **Clean up** what nothing reads any more: the round's frames, indexes and
@@ -26,6 +43,8 @@ left is moved under `interrupted/`, out of the way of its second attempt, and re
 at the iteration's cleanup.
 
     groups/round-N/            the rounds: a directory per wave; after the update only the summaries
+    groups/round-N/demos/      the fights handed to the solver, its reports and the import of its
+                               won fights, kept while a later update may read them (`demo_buffer`)
     evaluation/iteration-NNNN/ the evaluation after iteration N, with report.json
     seeds/                     the seeds of each round
     state.json                 what every iteration's steps came to
@@ -37,7 +56,6 @@ and in the checkpoints directory
 """
 
 import gc
-import hashlib
 import json
 import shutil
 import signal
@@ -48,12 +66,14 @@ from pathlib import Path
 
 import torch
 
-from main.env.seeds import split_group
+from main.env.seeds import excluded_seeds, round_ascensions, round_seeds
 
-from main.learn import batches, grpo
+from main.demos import rounds as demo_rounds
+from main.learn import batches, clipped, combat_demos, costs, grpo, mixed, streams
 from main.learn.advantage import FILE as ADVANTAGES
+from main.learn.fight_groups import advantages as fight_advantages
 from main.learn.groups import KIND as GROUPS, advantages as group_advantages
-from main.play import digests, groups as act_groups
+from main.play import demo_picks, digests, fight_groups as fight_waves, fights as fight_files, groups as act_groups
 from main.play.groups import group_rounds, groups_summary, sample_groups
 from main.network.checkpoint import archive_checkpoint
 from main.network.config import LearningRates, TrainConfig
@@ -96,7 +116,7 @@ class Settings:
     # Macro-actions of one optimizer step: a multiple of the profile's logical batch, whose
     # batches are accumulated into the step (`trainer.Learner.fit`); the logical batch when None.
     batch: int | None = None
-    weight_cap: float = batches.WEIGHT_CAP  # what a decision of a small group may weigh, in even shares; 0 for no cap
+    weight_cap: float = streams.WEIGHT_CAP  # what a decision of a small group may weigh, in even shares; 0 for no cap
     phase_weights: str = "group"  # how a wave's decisions share its weight: by (character, phase) group, or even
     window_shards: int = 8
     evaluate_every: int = 5
@@ -108,7 +128,11 @@ class Settings:
     eval_precision: str | None = None
     # The waves' relative shares of a batch, one per wave in order; by their decisions when None.
     wave_shares: list | None = None
-    # Stop once an update's mean policy entropy on its decisions falls below this.
+    # Leave out of the update the groups whose segments all came to the same return
+    # (`groups.wave_advantages`): the shares and the pass are then of the decisions kept.
+    drop_uniform_groups: bool = False
+    # Stop once an update's mean policy entropy on its act groups' decisions falls below this
+    # (`guarded_entropy`: the demonstrations a batch also holds are not the policy's choices).
     min_entropy: float | None = None
     # Every this many iterations the KL's reference becomes the policy of that moment
     # (the archive of the iteration before): the evaluation interval unless given, so
@@ -116,21 +140,78 @@ class Settings:
     reference_every: int | None = None
     # A JSON file of the rates this run's updates train at (`LearningRates`); the checkpoint's without it.
     learning_rates: str | None = None
-    clip: float = grpo.CLIP
-    kl: float = grpo.KL
+    clip: float = clipped.CLIP
+    kl: float = clipped.KL
     # The probability, by kind of fight, that a sampled decision which could use a potion
     # draws one of its USE_POTION candidates instead of a sample from the policy
     # (`RolloutRunner`, `rollout.exploration_rates`): a number, a list or a mapping.
     explore_potions: object = 0.0
+    # A round takes every decision inside a fight by argmax and draws only the rest
+    # (`RolloutRunner.greedy_fights`): the fights are the policy's fixed play, kept
+    # without frames, and the update learns from the decisions outside them alone.
+    # No potion exploration and no boss cuts go with it.
+    greedy_fights: bool = False
     # The ascension window a round's groups are played in, [lowest, highest]: each
     # (character, seed) group at one of its ascensions (`round_ascensions`); at the
     # checkpoint's when None. The evaluations stay at the checkpoint's.
     ascensions: list | None = None
+    # Every wave of a round also writes the records of its segments' fights and the entry
+    # saves of those not begun by an event (`main/play/fights.py`), removed at the cleanup.
+    fight_entries: bool = False
+    # After its act waves a round plays this many of the fights they recorded again, each
+    # `fight_group_size` times from its entry save to the fight's end (`fight_groups`):
+    # picked normal, elite and boss 3:4:4, a `fight_group_priority` share of each kind by
+    # deaths and cost and the rest evenly. Drawn at the fight temperature, every frame
+    # kept, with potion exploration and forks of their own. 0 plays none; it needs
+    # `greedy_fights` and `fight_entries`.
+    fight_groups: int = 0
+    fight_group_size: int = fight_waves.SIZE
+    fight_group_priority: float = fight_waves.PRIORITY
+    fight_group_fork_depth: int = 0
+    fight_group_explore_potions: object = 0.0
+    # Directories of combat demonstrations (imports of the solver's fights) whose fights
+    # every update learns beside the act groups, by their NLL (`combat_demos.fights`,
+    # `grpo.group_update`); None learns none. `Driver.demos` is what an iteration takes.
+    combat_demos: list | None = None
+    # The kinds of source's relative shares of an update's batch ({kind: number}, the
+    # kinds of `mixed.KINDS` the update has, every one of them): by their decisions
+    # when None (`batches.stream_shares`).
+    source_shares: dict | None = None
+    # The BC phase: after its advantages a round hands this many of the fights its waves
+    # recorded to the solver (`demo_picks.pick`: normal, elite and boss 3:4:4 at their
+    # natural frequency, the fights set up by a selection first up to `demo_opening` of
+    # them; `demos.rounds.solve_round` on `demo_workers` runs at once), and its update
+    # learns the solver's won fights of the last `demo_buffer` rounds beside the act
+    # groups (with `combat_demos`, if given). 0 hands none; it needs `greedy_fights` and
+    # `fight_entries`.
+    round_demos: int = 0
+    demo_buffer: int = 3
+    demo_opening: float = demo_picks.OPENING
+    demo_workers: int = demo_rounds.WORKERS
 
     def __post_init__(self):
         if self.runs_per_character < 1 or self.evaluate_every < 1:
             raise ValueError("Runs per character and the evaluation interval are positive")
         self.explore_potions = exploration_rates(self.explore_potions)
+        if type(self.greedy_fights) is not bool:
+            raise ValueError("Greedy fights are on or off")
+        if self.greedy_fights and any(self.explore_potions.values()):
+            raise ValueError("Greedy fights explore no potion use: their decisions are not drawn")
+        if self.greedy_fights and self.bosses:
+            raise ValueError("Greedy fights cut at no boss fight: the boss wave would play the fight alike")
+        self.fight_group_explore_potions = exploration_rates(self.fight_group_explore_potions)
+        if type(self.fight_groups) is not int or self.fight_groups < 0:
+            raise ValueError("Fight groups: a number of fights, 0 or more")
+        if self.fight_groups and not (self.greedy_fights and self.fight_entries):
+            raise ValueError("Fight groups are picked from the greedy fights a round recorded: they need "
+                             "greedy fights and fight entries")
+        if type(self.fight_group_size) is not int or self.fight_group_size < 2:
+            raise ValueError("A fight group has at least two segments")
+        priority = self.fight_group_priority
+        if isinstance(priority, bool) or not isinstance(priority, (int, float)) or not 0 <= priority <= 1:
+            raise ValueError("The share of the fights picked by priority is in [0, 1]")
+        if type(self.fight_group_fork_depth) is not int or self.fight_group_fork_depth < 0:
+            raise ValueError("Fight groups fork at a depth of no decisions or more")
         if self.learning_rates is not None:
             LearningRates.load(self.learning_rates)
         if not 0 < self.clip < 1 or self.kl < 0:
@@ -141,7 +222,7 @@ class Settings:
             raise ValueError("Updates per iteration: `round` or a positive number")
         if self.weight_cap and self.weight_cap < 1:
             raise ValueError("The cap on a sampled decision's weight is in even shares: at least one, or 0 for none")
-        if self.phase_weights not in batches.PHASE_WEIGHTS:
+        if self.phase_weights not in streams.PHASE_WEIGHTS:
             raise ValueError("Phase weights are `group` or `even`")
         if self.reference_every is None:
             self.reference_every = self.evaluate_every
@@ -158,64 +239,43 @@ class Settings:
         if self.wave_shares is not None:
             self.wave_shares = [float(share) for share in self.wave_shares]
             batches.wave_shares(dict.fromkeys(names, 1), self.wave_shares)
+        if self.combat_demos is not None:
+            self.combat_demos = [str(path) for path in self.combat_demos]
+            if not self.combat_demos:
+                raise ValueError("Combat demonstrations are at least one directory, or None")
+        if type(self.round_demos) is not int or self.round_demos < 0:
+            raise ValueError("Combat demonstrations by the round: a number of fights, 0 or more")
+        if self.round_demos and not (self.greedy_fights and self.fight_entries):
+            raise ValueError("A round's demonstrations are of the greedy fights it recorded: they need "
+                             "greedy fights and fight entries")
+        if type(self.demo_buffer) is not int or self.demo_buffer < 1:
+            raise ValueError("An update learns the demonstrations of one round or more")
+        opening = self.demo_opening
+        if isinstance(opening, bool) or not isinstance(opening, (int, float)) or not 0 <= opening <= 1:
+            raise ValueError("The share of the fights set up by a selection is in [0, 1]")
+        if type(self.demo_workers) is not int or self.demo_workers < 1:
+            raise ValueError("The solver fights at least one run at a time")
+        if self.source_shares is not None:
+            shares = dict(self.source_shares)
+            unknown = set(shares) - set(mixed.KINDS)
+            if unknown or not shares:
+                raise ValueError(f"The shares of the sources name kinds of {list(mixed.KINDS)}, not {sorted(unknown)}")
+            if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0
+                   for value in shares.values()):
+                raise ValueError("A source's share is a positive number")
+            self.source_shares = {kind: float(shares[kind]) for kind in mixed.KINDS if kind in shares}
         if self.ascensions is not None:
             window = list(self.ascensions)
             if len(window) != 2 or not all(type(a) is int for a in window) or not 0 <= window[0] <= window[1] <= 10:
                 raise ValueError("The ascension window is two integers, lowest and highest, from 0 to 10")
             self.ascensions = window
 
-    def group_shares(self, macros):
+    def group_shares(self, macros, others=None):
         """The shares of an update's batch, `macros` being each wave's priced
-        decisions: the waves by their decisions, or at `wave_shares` (`batches.wave_shares`)."""
-        return batches.wave_shares(macros, self.wave_shares)
-
-
-def canonical(seed):
-    """A seed as the game reads it: it takes O for 0 and I for 1."""
-    return str(seed).upper().replace("O", "0").replace("I", "1").strip()
-
-
-def seeds_of(path):
-    """The seeds a file names: a mapping of characters to seeds, as rounds and
-    evaluations are assigned them, or a plain list."""
-    data = json.loads(Path(path).read_text())
-    lists = data.values() if isinstance(data, dict) else [data]
-    return {str(seed) for seeds in lists for seed in seeds}
-
-
-def round_seeds(root, iteration, count, excluded=()):
-    """`count` seeds for each character, derived from the root and the iteration
-    number alone: the same round whenever it is asked for, a different one for every
-    iteration. A seed among `excluded` (as itself, in the game's reading, or as the
-    split group demonstrations are recorded under) is passed over."""
-    excluded = set(excluded) | {canonical(seed) for seed in excluded}
-    seeds, taken = {}, set()
-    for character in CHARACTERS:
-        chosen, number = [], 0
-        while len(chosen) < count:
-            seed = hashlib.sha256(f"{root}:{iteration}:{character}:{number}".encode()).hexdigest()[:16].upper()
-            number += 1
-            if seed not in taken and seed not in excluded and split_group(seed) not in excluded:
-                taken.add(seed)
-                chosen.append(seed)
-        seeds[character] = chosen
-    return seeds
-
-
-def round_ascensions(root, iteration, seeds, window):
-    """The ascension of each (character, seed) group of a round, in `window` [lowest,
-    highest]: each character's seeds take the window's ascensions in turn from a start
-    derived from the root, the iteration and the character, so that every ascension
-    has as many of a character's groups as another, give or take one, the same each
-    time the round is asked for."""
-    lowest, highest = window
-    width = highest - lowest + 1
-    levels = {}
-    for character in CHARACTERS:
-        start = int(hashlib.sha256(f"{root}:{iteration}:{character}:ascension".encode()).hexdigest(), 16) % width
-        levels[character] = {str(seed): lowest + (start + place) % width
-                             for place, seed in enumerate(seeds.get(character, []))}
-    return levels
+        decisions and `others` the decisions of the update's other kinds of source:
+        the kinds by their decisions or at `source_shares`, the waves by their
+        decisions or at `wave_shares` (`batches.stream_shares`)."""
+        return batches.stream_shares(macros, others, waves=self.wave_shares, sources=self.source_shares)
 
 
 def _stop(*_):
@@ -286,11 +346,24 @@ def accumulation(settings, config):
     return settings.batch // config.logical_batch_size
 
 
+# The prices a fight's cost is counted at: what a round's fight groups are picked by and
+# their segments' returns (`costs.Prices`, the solver's fixed prices).
+PRICES = costs.FIXED
+
+
+def fight_cost(fight):
+    """What a fight a round recorded cost, in HP, at `PRICES`: the order its fight
+    groups are picked by (`fight_groups.pick`)."""
+    return costs.cost(fight, PRICES).total
+
+
 def play_round(samplers, runner, seeds, directory, settings, output, ascensions=None):
     """A round of act groups on `seeds` into `directory` (`main.play.groups`), by the
     sampling processes `samplers` (a context manager), each group at its ascension in
-    `ascensions` when given. A round cut off on these seeds and ascensions goes on from
-    the wave it was in; one on others is set aside. Returns the summary."""
+    `ascensions` when given, and with `settings.fight_groups` its fight groups after it
+    (`fight_groups.sample_fight_groups`), played by the runner without greedy fights.
+    A round cut off on these seeds and ascensions goes on from the wave it was in; one
+    on others is set aside. Returns the summary."""
     directory = Path(directory)
     listed, levels = directory / "metadata" / "seeds.json", directory / "metadata" / "ascensions.json"
     same = (listed.is_file() and json.loads(listed.read_text()) == seeds
@@ -298,9 +371,20 @@ def play_round(samplers, runner, seeds, directory, settings, output, ascensions=
     if directory.exists() and not same:
         set_aside(output, directory)
     with samplers as pool:
-        return sample_groups(pool, runner, seeds, directory, n=settings.group_n, m=settings.group_m,
-                             boundaries=settings.boundaries, bosses=settings.bosses,
-                             fork_depth=settings.fork_depth, ascensions=ascensions, resume=True)
+        summary = groups_summary(directory)
+        if summary is None:
+            summary = sample_groups(pool, runner, seeds, directory, n=settings.group_n, m=settings.group_m,
+                                    boundaries=settings.boundaries, bosses=settings.bosses,
+                                    fork_depth=settings.fork_depth, ascensions=ascensions, resume=True,
+                                    fight_entries=settings.fight_entries)
+        if settings.fight_groups:
+            # Their fights drawn at the fight temperature, not greedy: that is what a group compares.
+            fights = runner.variant(greedy_fights=False, explore_potions=settings.fight_group_explore_potions)
+            summary = fight_waves.sample_fight_groups(
+                pool, fights, directory, settings.fight_groups, cost=fight_cost,
+                key=f"{settings.seed_root}:{runner.iteration}", size=settings.fight_group_size,
+                priority=settings.fight_group_priority, fork_depth=settings.fight_group_fork_depth)
+        return summary
 
 
 def round_result(summary, directory, settings):
@@ -326,7 +410,59 @@ def round_result(summary, directory, settings):
         by_ascension={wave: summary[wave].get("by_ascension") for wave in waves},
         collector={wave: summary[wave].get("collector") for wave in waves},
         policy_version=summary["policy_version"],
-        policy_digest=summary["policy_digest"], temperature=summary["temperature"], seconds=summary["seconds"])
+        policy_digest=summary["policy_digest"], temperature=summary["temperature"],
+        greedy_fights=summary.get("greedy_fights", False), seconds=summary["seconds"],
+        # With fight entries, what each wave's fights wrote (`fights.FightWriter.summary`).
+        **({"fights": {wave: summary[wave].get("fights") for wave in waves}} if summary.get("fight_entries") else {}),
+        **({"fight_groups": fight_groups_result(summary["fight_groups"], directory, settings)}
+           if summary.get("fight_groups") else {}))
+
+
+def fight_groups_result(wave, directory, settings):
+    """What the `sample` step records of a round's fight groups (`fight_groups`): the
+    pick (each kind's fights by priority and drawn evenly, the kinds short of their
+    quota) and how the segments came out."""
+    failed = sum(wave["failed"].values())
+    if failed > settings.quarantine * wave["segments"]:
+        raise ProtocolError(f"The fight groups of round {directory} finished {wave['written']} of "
+                            f"{wave['segments']} segments; inspect the quarantine of {fight_waves.WAVE}")
+    return dict(groups=wave["groups"], segments=wave["segments"], written=wave["written"], failed=failed,
+                outcomes=wave["outcomes"], picks=wave["picks"], decisions=sum(wave["phases"].values()),
+                explored=wave["explored"], forked=wave["forked"], fights=wave["fights"], seconds=wave["seconds"],
+                collector=wave["collector"])
+
+
+def fight_groups_advantages(head):
+    """What the `advantages` step records of a round's fight groups: the advantage
+    header (`fight_groups.advantages`) without its tree's counts, by kind of fight
+    the diagnostics of the groups."""
+    stats = head["stats"]
+    return dict(runs=head["runs"], decisions=head["decisions"], advantage=head["advantage"], prices=head["prices"],
+                **{key: stats[key] for key in ("groups", "return_mean", "between_share", "within_variance",
+                                               "uniform_groups")},
+                dropped=stats.get("dropped"), tree_share=stats["tree"]["share"],
+                branching_share=stats["tree"]["branching_share"], explored=stats["explored"], forked=stats["forked"],
+                kinds=stats["kinds"])
+
+
+# What an iteration's history keeps of every kind of source's report (`mixed.Mixed.means`).
+MIX_METRICS = ("samples", "loss", "entropy", "accuracy", "kl", "clip_fraction", "ratio_mean", "zero_share", "nll")
+
+
+def mix_metrics(update):
+    """The flat history entries of an update's report by kind of source, `<kind>_<entry>`
+    (`act_groups_kl`, `combat_demos_loss`, ...), and the repeats of its demonstrations."""
+    metrics = {f"{kind.replace('-', '_')}_{key}": report[key]
+               for kind, report in update.get("mix", {}).items() for key in MIX_METRICS if key in report}
+    if update.get("demos"):
+        metrics["combat_demos_repeats"] = update["demos"]["repeats"]
+    return metrics
+
+
+def guarded_entropy(update):
+    """The entropy `min_entropy` guards: the policy's on the act groups' decisions of an
+    update (`mix`), its entropy on the whole batch when the update has no kinds."""
+    return update.get("mix", {}).get(mixed.ACT, {}).get("entropy", update.get("entropy"))
 
 
 def evaluation_seeds(settings):
@@ -469,10 +605,8 @@ class Driver:
         """Seeds no round may be played on: the evaluations', the listed files', and
         what the policy was trained on."""
         settings = self.settings
-        seeds = set(map(str, getattr(self.learner, "checkpoint_metadata", {}).get("training_seeds", [])))
-        for path in [*settings.exclude_seeds, *([settings.eval_seeds] if settings.eval_seeds else [])]:
-            seeds |= seeds_of(path)
-        return seeds
+        return excluded_seeds([*settings.exclude_seeds, *([settings.eval_seeds] if settings.eval_seeds else [])],
+                              getattr(self.learner, "checkpoint_metadata", {}).get("training_seeds", []))
 
     def sampler(self, iteration=None, precision=None):
         """The runner of a round, or of an evaluation at `precision`."""
@@ -481,7 +615,8 @@ class Driver:
             learner.model, learner.vocabulary, precision=precision or learner.config.precision,
             version=learner.policy_version,
             max_steps=settings.max_steps, ascension=learner.config.ascension,
-            temperatures=learner.config.temperatures, explore_potions=settings.explore_potions, iteration=iteration)
+            temperatures=learner.config.temperatures, explore_potions=settings.explore_potions,
+            greedy_fights=settings.greedy_fights, iteration=iteration)
 
     def samplers(self, engines):
         """The sampling processes of a round of `engines` engines (`samplers_for`)."""
@@ -511,10 +646,10 @@ class Driver:
     def sample(self, iteration):
         """A round of act groups (`main.play.groups`) on seeds of the iteration's own:
         `runs_per_character` seeds of each character, `group_n` segments from each,
-        `group_m` from each save."""
+        `group_m` from each save; and its fight groups (`fight_groups`)."""
         settings, directory = self.settings, self.groups / f"round-{iteration}"
         summary = groups_summary(directory)
-        if summary is None:
+        if summary is None or (settings.fight_groups and not summary.get("fight_groups")):
             seeds = self.round_seeds(iteration)
             summary = play_round(self.samplers(settings.workers), self.sampler(iteration), seeds, directory,
                                  settings, self.output, self.round_ascensions(iteration, seeds))
@@ -523,15 +658,22 @@ class Driver:
 
     def advantages(self, iteration):
         """The advantages of every wave of the iteration's round of act groups, from
-        the groups themselves (`main.learn.groups`)."""
-        written = group_advantages(self.groups / f"round-{iteration}")
-        return {wave: dict(
+        the groups themselves (`main.learn.groups`), and of its fight groups, if it
+        has them (`main.learn.fight_groups`), under their wave's name."""
+        directory, drop = self.groups / f"round-{iteration}", self.settings.drop_uniform_groups
+        written = group_advantages(directory, drop_uniform=drop)
+        found = {wave: dict(
             runs=head["runs"], decisions=head["decisions"], advantage=head["advantage"],
             **{key: head["stats"][key] for key in ("groups", "return_mean", "between_share", "uniform_groups")},
+            dropped=head["stats"].get("dropped"),
             tree_share=head["stats"]["tree"]["share"], branching_share=head["stats"]["tree"]["branching_share"],
             r2_within=head["stats"]["baseline"]["r2_within"], explored=head["stats"].get("explored"),
-            forked=head["stats"].get("forked"), by_ascension=head["stats"].get("by_ascension"))
+            forked=head["stats"].get("forked"), fights=head["stats"].get("fights"),
+            by_ascension=head["stats"].get("by_ascension"))
             for wave, head in written.items()}
+        if groups_summary(directory).get("fight_groups"):
+            found[fight_waves.WAVE] = fight_groups_advantages(fight_advantages(directory, PRICES, drop_uniform=drop))
+        return found
 
     @staticmethod
     def remove(path):
@@ -572,24 +714,73 @@ class Driver:
 
     def cleanup(self, iteration):
         """Remove what nothing reads after this iteration's update: the shards, saves,
-        indexes and advantages of the rounds of act groups up to it (their summaries
-        and quarantines stay), the policy archives nothing refers to any more
-        (`prune_archives`), and what interrupted steps left under `interrupted/`."""
+        indexes and advantages of the rounds of act groups up to it, their fights'
+        records and entry saves, and their fight groups' shards, records, pick and
+        advantages (the summaries and quarantines stay), the policy archives nothing refers to any more
+        (`prune_archives`), and what interrupted steps left under `interrupted/`. Of a
+        round's demonstrations the solver's samples and export go once they are imported,
+        and the import once no later update takes it (`demo_buffer`); the pick and the
+        solver's reports stay."""
         freed = 0
         for directory in group_rounds(self.groups):
             summary = groups_summary(directory)
             if summary["iteration"] > iteration:
                 continue
-            for wave in summary["waves"]:
-                for name in ("accepted", act_groups.SAVES, "index.jsonl.gz", ADVANTAGES, digests.FILE):
+            demos = directory / demo_picks.DIRECTORY
+            for name in ("samples", demo_rounds.EXPORT):
+                freed += self.remove(demos / demo_rounds.SOLVED / name)
+            if summary["iteration"] <= iteration - self.settings.demo_buffer + 1:
+                freed += self.remove(demos / demo_rounds.IMPORTED)
+            # A round's fight groups are read last by its advantages step, before the cleanup.
+            for wave in [*summary["waves"], fight_waves.WAVE]:
+                for name in ("accepted", act_groups.SAVES, "index.jsonl.gz", ADVANTAGES, digests.FILE,
+                             fight_files.SAVES, fight_files.FILE, fight_waves.PICKS):
                     freed += self.remove(directory / wave / name)
         freed += self.prune_archives(iteration)
         freed += self.remove(self.output / "interrupted")
         return dict(freed_gb=round(freed / 2**30, 3))
 
+    def demos(self, iteration):
+        """The directories of combat demonstrations `iteration`'s update learns beside its
+        round: those of `Settings.combat_demos` and, with `round_demos`, the imports of
+        the solver's fights of this round and the `demo_buffer` − 1 before it; None for
+        none. An update draws its share of them with a key of its own (`demo_key`)."""
+        listed = list(self.settings.combat_demos or [])
+        if self.settings.round_demos:
+            for number in range(max(0, iteration - self.settings.demo_buffer + 1), iteration + 1):
+                solved = self.state["iterations"].get(str(number), {}).get("demos")
+                if solved:
+                    listed.append(solved["data"])
+        return listed or None
+
+    def solve_demos(self, iteration):
+        """Hand `round_demos` of the fights the iteration's round recorded to the solver
+        (`demo_picks.pick_round`, seeded by `demo_key`) and import its won fights
+        (`demo_rounds.solve_round`): the pick's account, what the solver and the import
+        came to, and the data directory. A pick already written stands."""
+        settings, directory = self.settings, self.groups / f"round-{iteration}"
+        target = directory / demo_picks.DIRECTORY
+        selection = target / demo_picks.SELECTION
+        if selection.is_file():
+            account = json.loads(selection.read_text(encoding="utf-8"))["account"]
+        else:
+            selection, account = demo_picks.pick_round(directory, groups_summary(directory)["waves"],
+                                                       settings.round_demos, self.demo_key(iteration),
+                                                       opening=settings.demo_opening)
+        started = time.monotonic()
+        found = demo_rounds.solve_round(target, workers=settings.demo_workers,
+                                        log=lambda line: self.say(dict(iteration=iteration, solver=line)))
+        return dict(found, selection=str(selection), account=account, seconds=round(time.monotonic() - started, 1))
+
+    def demo_key(self, iteration):
+        """What an iteration's draw of combat demonstrations is seeded by (`combat_demos.draw`)."""
+        return f"{self.settings.seed_root}:{iteration}"
+
     def update(self, iteration):
         """One pass over the iteration's round with the clipped objective
-        (`grpo.group_update`), the KL to the reference of `Driver.reference`."""
+        (`grpo.group_update`), the KL to the reference of `Driver.reference`: its act
+        waves, its fight groups if it has them (learned as its act waves are), and with
+        combat demonstrations (`demos`) their fights in the same batches, by their NLL."""
         settings, learner, directory = self.settings, self.learner, self.groups / f"round-{iteration}"
         current, archived = self.policy / "current", self.policy / f"iteration-{iteration:04d}"
         applied = getattr(learner, "checkpoint_metadata", {}) if self.resumed else {}
@@ -601,28 +792,36 @@ class Driver:
         summary = groups_summary(directory)
         waves = {wave: directory / wave for wave in summary["waves"]}
         macros = batches.priced_macros(waves)
+        fights = directory / fight_waves.WAVE if summary.get("fight_groups") else None
+        listed = self.demos(iteration)
+        demos = combat_demos.fights(listed) if listed else None
         accumulate = accumulation(settings, learner.config)
-        # The pass in logical batches: every wave seen once, or the steps asked for.
-        updates = (batches.pass_updates(macros, learner.config.logical_batch_size) if settings.updates == "round"
+        others = {**(batches.priced_macros({mixed.FIGHTS: fights}) if fights is not None else {}),
+                  **({mixed.DEMOS: demos.macros} if demos is not None else {})}
+        shares = settings.group_shares(macros, others or None)
+        # The pass in logical batches: every act wave seen once (their part of every batch
+        # is the whole of it without other sources), or the steps asked for.
+        act = sum(streams.sizes(learner.config.logical_batch_size, shares)[wave] for wave in waves)
+        updates = (batches.pass_updates(macros, act) if settings.updates == "round"
                    else int(settings.updates) * accumulate)
-        shares = settings.group_shares(macros)
         started = time.monotonic()
         told = lambda update: self.history.append_update(  # noqa: E731
             update, round=iteration, stage="groups", policy_version=learner.policy_version)
         # The KL is to the policy the iterations started from, or the one the current
         # stretch of `reference_every` iterations started from.
         anchored = self.reference(iteration)
-        reference = grpo.Reference.load(anchored, self.device)
+        reference = clipped.Reference.load(anchored, self.device)
         # The reference played the round: its distributions are the ones the decisions
         # were drawn from, kept as they were sampled, and it need not run again.
-        recorded = bool(summary.get("distributions")) and policy_digest(reference.model) == summary["policy_digest"]
+        recorded = (bool(summary.get("distributions")) and policy_digest(reference.model) == summary["policy_digest"]
+                    and (fights is None or bool(summary["fight_groups"].get("distributions"))))
         if recorded:
-            reference = grpo.Reference.recorded()
+            reference = clipped.Reference.recorded()
             self.release()
         metrics = grpo.group_update(
-            learner, waves, reference, clip=settings.clip, kl=settings.kl, updates=updates,
-            window_shards=settings.window_shards, weight_cap=settings.weight_cap, shares=shares,
-            phase_weights=settings.phase_weights, on_update=told, accumulate=accumulate)
+            learner, waves, reference, fights=fights, demos=demos, demo_key=self.demo_key(iteration), clip=settings.clip,
+            kl=settings.kl, updates=updates, window_shards=settings.window_shards, weight_cap=settings.weight_cap,
+            shares=shares, phase_weights=settings.phase_weights, on_update=told, accumulate=accumulate)
         del reference
         self.release()
         done = metrics["groups"]
@@ -639,7 +838,12 @@ class Driver:
             wait_share=round(metrics["wait_seconds"] / max(metrics["duration_seconds"], 1e-9), 4),
             shapes=metrics["shapes"],
             clip=done["clip"], kl=done["kl"], phase_weights=done["phase_weights"], seen=done["seen"],
-            reference=str(anchored), reference_recorded=recorded)
+            reference=str(anchored), reference_recorded=recorded,
+            # The round's fights were greedy: nothing of them was learned (`RolloutRunner.greedy_fights`).
+            greedy_fights=summary.get("greedy_fights", False),
+            # By kind of source (`mixed.KINDS`): its decisions, share, samples, loss, accuracy and KL.
+            mix=done["mix"], **({"fights": done["fights"]} if "fights" in done else {}),
+            **({"demos": done["demos"]} if "demos" in done else {}))
         seeds = set().union(*(RunShards(path).seeds for path in waves.values()))
         learner.save(current, dict(
             runtime=self.runtime, iteration=iteration, update=result, advantage=GROUPS,
@@ -675,6 +879,8 @@ class Driver:
         self.record(iteration, "settings", asdict(settings))
         sampled = self.step(iteration, "sample", self.sample)
         advantages = self.step(iteration, "advantages", self.advantages)
+        if settings.round_demos:
+            self.step(iteration, "demos", self.solve_demos)
         if "update" not in self.entry(iteration):
             self.begin(iteration, "update")
             self.record(iteration, "update", self.update(iteration))
@@ -695,18 +901,25 @@ class Driver:
             accuracy=update["accuracy"], entropy=update.get("entropy"),
             ratio_mean=seen["ratio_mean"], clip_fraction=seen["clip_fraction"], kl=seen["kl"],
             zero_share=seen["zero_share"], update_wait_share=update["wait_share"],
-            # Where the pass's drift had taken the explored decisions when each was seen (`grpo.Clipped`).
+            # Where the pass's drift had taken the explored decisions when each was seen (`clipped.Clipped`).
             **{key: seen.get(key) for key in ("explored", "explored_up_log_ratio", "explored_down_log_ratio",
                                               "explored_outside_clip", "explored_beyond")},
             **{f"{wave}_loss": update["losses"].get(wave) for wave in waves},
-            **{f"{wave}_zero_share": update["waves"][wave]["zero_share"] for wave in waves})
+            **{f"{wave}_zero_share": update["waves"][wave]["zero_share"] for wave in waves},
+            **mix_metrics(update))
+        solved = self.entry(iteration).get("demos")
+        if solved:
+            metrics.update(demo_fights=solved["account"]["picked"],
+                           demo_opening=sum(kind["opening"] for kind in solved["account"]["kinds"].values()),
+                           demo_runs=solved["imported"]["accepted_runs"], demo_macros=solved["imported"]["macros"],
+                           demo_seconds=solved["seconds"])
         if evaluation:
             metrics.update(eval_runs=evaluation["runs"], eval_win_rate=evaluation["win_rate"],
                            eval_mean_floor=evaluation["mean_floor"])
         self.history.append(iteration, metrics, policy_version=self.learner.policy_version,
                             duration_seconds=time.monotonic() - started)
         self.record(iteration, "complete", True)
-        entropy = update.get("entropy")
+        entropy = guarded_entropy(update)
         if settings.min_entropy is not None and entropy is not None and entropy < settings.min_entropy:
             raise Halt(f"Iteration {iteration}'s update left the policy's entropy at {entropy:.4f}, "
                        f"below {settings.min_entropy}")

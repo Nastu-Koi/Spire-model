@@ -68,12 +68,16 @@ internal static class Program
                 else
                 {
                     if (command is "start_run" or "load_save" or "enter_room" or "action" or "set_player"
-                        or "set_draw_order" or "execute_candidate" or "quit" or "enter_anchor" or "anchor_room") solver.Reset();
+                        or "set_draw_order" or "execute_candidate" or "quit" or "enter_anchor" or "anchor_room"
+                        or "resume_save" or "resume_fight") solver.Reset();
+                    // A resumed run goes on inside the command, a resumed fight begins there: the
+                    // solver's patches have to be in place before it (and again after, see below).
+                    if (command is "resume_save" or "resume_fight") solver.PrepareEngine();
                     // Starting another run replaces the simulator.
                     object[] arguments = { simulator, request };
                     response = handle.Invoke(null, arguments)!;
                     simulator = arguments[0];
-                    if (command is "start_run" or "load_save" or "enter_anchor") solver.PrepareEngine();
+                    if (command is "start_run" or "load_save" or "enter_anchor" or "resume_save" or "resume_fight") solver.PrepareEngine();
                     JsonElement result = JsonSerializer.SerializeToElement(response, Json);
                     if (result.TryGetProperty("type", out var type) && type.GetString() == "decision_frame")
                     {
@@ -81,7 +85,7 @@ internal static class Program
                         solver.ObserveBoundary(result);
                     }
                     else if (command is "start_run" or "load_save" or "enter_room" or "action" or "set_player" or "quit"
-                        or "enter_anchor" or "anchor_room") frame = null;
+                        or "enter_anchor" or "anchor_room" or "resume_save" or "resume_fight") frame = null;
                 }
             }
             catch (Exception exception)

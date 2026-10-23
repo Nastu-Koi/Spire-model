@@ -202,7 +202,7 @@ def live_frame(message, selected=()):
                 "fixed_ascension": ascension,
                 "training_ready": True,
                 "adapter_version": "steam-live-v1",
-                "observation_schema": "public-state-v6",
+                "observation_schema": "public-state-v7",
                 "public_history_version": HISTORY_VERSION,
                 "action_schema": "candidate-v0",
                 "selection_cancel": SELECTION_CANCEL,

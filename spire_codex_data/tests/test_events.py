@@ -194,7 +194,7 @@ def test_native_event_options_show_the_numbers_and_names_the_player_reads():
                 assert after['max_hp'] == player['max_hp'] + gain
             else:
                 assert sum(c['id'] == 'CARD.BYRDONIS_EGG' for c in after['deck']) == 1
-        assert frame['contract']['observation_schema'] == 'public-state-v6'
+        assert frame['contract']['observation_schema'] == 'public-state-v7'
 
 
 def test_native_event_is_generated_again_and_takes_the_recorded_choice():

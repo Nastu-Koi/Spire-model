@@ -1,7 +1,7 @@
 # 采样与更新的代码层提速
 
 - **时间**：2026-10-21
-- **来源**：`.scratch/joint-training/issues/42-sampling-training-code-audit.md`（承接工单 41）；探针原始输出在 `.scratch/joint-training/assets/42-timing-*.json`；探针脚本 `collector_timing.py`、`joint_update_timing.py`、`update_timing.py`（`.scratch/joint-training/scripts/`）
+- **来源**：`.scratch/joint-training/issues/throughput.md`（42，承接 41）；探针原始输出在 `.scratch/joint-training/assets/42-timing-*.json`；探针脚本 `collector_timing.py`、`joint_update_timing.py`、`update_timing.py`（`.scratch/joint-training/scripts/`）
 - **状态**：部分有效。采用的做法：采样进程只给新内容建字段张量，`clean_frame` 不再整帧深拷贝，观察不重洗已洗过的帧，实体字段缓存的键改用 `repr`，引擎关掉 .NET 的按剖析重编译与后台垃圾回收，热路径上的 JSON 换成 orjson。采用后，64 引擎续打第三幕从 952 提到 1,275 决策/秒（单次对比）。其余尝试见总表。
 
 ## 动机

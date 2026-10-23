@@ -2,6 +2,8 @@ using System.Reflection;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 
 namespace Sts2Headless;
 
@@ -22,21 +24,42 @@ internal sealed record SelectionMetadata(string Operation = "unknown", string So
         _installed = true;
     }
 
-    private static void Before(MethodBase __originalMethod, object[] __args, out SelectionMetadata? __state)
+    private sealed record State(SelectionMetadata? Previous, IDisposable? Restore);
+
+    private static void Before(MethodBase __originalMethod, object[] __args, out State __state)
     {
-        __state = Current.Value;
-        var previous = __state ?? new SelectionMetadata();
+        var previous = Current.Value ?? new SelectionMetadata();
+        // With a test selector installed the game skips a selection's pause signal, so a
+        // turn's setup ran to its end before the side's turn-start effects (D6C3). Where
+        // the selection has a choice context, the headless selector steps aside until the
+        // method first yields: the game then signals as it does for the local player,
+        // and answers through the local selector, which is the same headless selector.
+        __state = new(Current.Value,
+            CardSelectCmd.Selector is RunSimulator.HeadlessCardSelector && __args.OfType<PlayerChoiceContext>().Any()
+                ? CardSelectCmd.SuspendSelectorForTest() : null);
         var parameters = __originalMethod.GetParameters();
         var prefsIndex = Array.FindIndex(parameters, p => p.ParameterType == typeof(CardSelectorPrefs));
         CardSelectorPrefs? prefs = prefsIndex >= 0 ? (CardSelectorPrefs)__args[prefsIndex] : null;
+        var name = __originalMethod.Name;
+        // The same derivation as the Steam recorder's (steam_recorder/RunRecorder/SelectionMetadata.cs).
         string operation = prefs?.Prompt.LocEntryKey switch
         {
             "TO_TRANSFORM" => "transform", "TO_EXHAUST" => "exhaust", "TO_REMOVE" => "remove",
-            "TO_ENCHANT" => "enchant", "TO_DISCARD" => "discard", "TO_UPGRADE" => "upgrade",
-            _ => previous.Operation,
+            "TO_ENCHANT" => "enchant", "TO_DISCARD" => "discard",
+            "TO_UPGRADE" or "CHOOSE_CARD_UPGRADE_HEADER" => "upgrade",
+            _ => name switch
+            {
+                "FromHandForDiscard" => "discard",
+                "FromHandForUpgrade" or "FromDeckForUpgrade" => "upgrade",
+                "FromDeckForRemoval" => "remove",
+                "FromDeckForTransformation" => "transform",
+                "FromDeckForEnchantment" => "enchant",
+                _ => previous.Operation,
+            },
         };
-        var name = __originalMethod.Name;
-        string source = name.Contains("FromHand") ? "hand" : name.Contains("FromDeck") ? "deck" : previous.Source;
+        var pile = __args.OfType<CardPile>().FirstOrDefault();
+        string source = pile != null ? PileSource(pile.Type)
+            : name.Contains("FromHand") ? "hand" : name.Contains("FromDeck") ? "deck" : previous.Source;
         string destination = operation == "discard" ? "discard_pile" : operation == "exhaust" ? "exhaust_pile"
             : operation is "upgrade" or "enchant" ? source : operation == "remove" ? "removed" : "unknown";
         int? minimum = previous.Minimum;
@@ -48,5 +71,19 @@ internal sealed record SelectionMetadata(string Operation = "unknown", string So
         Current.Value = new(operation, source, destination, prefs?.Cancelable ?? previous.Cancelable, minimum);
     }
 
-    private static void After(SelectionMetadata? __state) => Current.Value = __state;
+    private static void After(State __state)
+    {
+        __state.Restore?.Dispose();
+        Current.Value = __state.Previous;
+    }
+
+    private static string PileSource(PileType pile) => pile switch
+    {
+        PileType.Hand => "hand",
+        PileType.Deck => "deck",
+        PileType.Draw => "draw_pile",
+        PileType.Discard => "discard_pile",
+        PileType.Exhaust => "exhaust_pile",
+        _ => "unknown",
+    };
 }

@@ -1,7 +1,7 @@
 # 学生状态上的求解器战斗标签续训
 
 - **时间**：实现 2026-10-11（`5cf933d`、`5d46ca8`、`658674f`）；正式运行 2026-10-14 16:21–20:43；同日判定无效，链路在 joint-training 01 中删除。
-- **来源**：`.scratch/a0-training-baseline/issues/16-student-combat-labels.md`、`22-solver-potion-costs.md`、`spec.md`；`db6648d:ARCHITECTURE.md`「策略改进」「批次整理与数据加载」；`.scratch/joint-training/issues/01-repo-restructure.md`。
+- **来源**：`.scratch/a0-training-baseline/issues/16-student-combat-labels.md`、`22-solver-potion-costs.md`、`spec.md`；`db6648d:ARCHITECTURE.md`「策略改进」「批次整理与数据加载」；`.scratch/joint-training/issues/ops.md`（01）。
 - **状态**：没带来提升（500 局通关 74 对 88，p = 0.235）；链路代码已删，此后不再用示范与求解器标签训练。
 
 ## 动机

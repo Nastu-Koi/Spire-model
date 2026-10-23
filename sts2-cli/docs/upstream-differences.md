@@ -44,6 +44,7 @@
 | `src/Sts2Headless/PendingOperation.cs` | 跨外部选择保持的后台操作 |
 | `src/Sts2Headless/InlineSynchronizationContext.cs` | 从 `RunSimulator.cs` 拆出并改为线程安全 |
 | `src/Sts2Headless/NativeContinuations.cs` | 跟踪游戏自己发起、无人持有的续延 |
+| `src/Sts2Headless/RoomEntrySave.cs` | 进战斗房间时的整局存档，供战斗中的续局存档使用 |
 | `src/Sts2Headless/SelectionSession.cs` | 多选过程的前缀缓冲与约束校验 |
 | `src/Sts2Headless/SelectionMetadata.cs` | 选牌的操作／来源／去向／可否取消 |
 | `src/Sts2Headless/HeadlessEventPresentation.cs` | 去掉无头环境缺失的音效、立绘、震屏调用 |
@@ -117,7 +118,7 @@
 上游没有对应物。要点：
 
 - **帧结构**：`decision_frame` 含 `contract`、`boundary`、`routing`、`public`、`legal.candidates`、`events`。`boundary` 为 `decision`、`waiting`、`terminal` 或 `error`。
-- **契约**：`adapter_version = engine-candidates-v1`、`observation_schema = public-state-v6`、`action_schema = candidate-v0`、`auto_advance_version = pending-continuation-v0`、`selection_cancel = combat-or-dead-end-v1`、`merchant_potion_prices = native-potion-price-v1`，以及游戏程序集和适配器程序集的 SHA-256、固定难度、`training_ready`。只有 `decision_protocol:true` 原生创建的 A0–A10 对局 `training_ready` 才为 true。
+- **契约**：`adapter_version = engine-candidates-v1`、`observation_schema = public-state-v7`、`action_schema = candidate-v0`、`auto_advance_version = pending-continuation-v0`、`selection_cancel = combat-or-dead-end-v1`、`merchant_potion_prices = native-potion-price-v1`，以及游戏程序集和适配器程序集的 SHA-256、固定难度、`training_ready`。只有 `decision_protocol:true` 原生创建的 A0–A10 对局 `training_ready` 才为 true。
 - **原子执行**：`DecisionGate` 核对决策 ID、状态版本、选择修订、候选引用，以及候选此刻是否仍然合法。通过后先作废句柄再执行，所以重复请求和过期请求不会二次结算；校验不通过时当前帧保持有效。拒绝码为 `stale_decision`、`stale_selection`、`unknown_candidate`、`candidate_no_longer_legal`。
 - **合法动作集合直接取自游戏**，不走上游 `DetectDecisionPoint` 的自动领奖和默认选择：
 
@@ -135,7 +136,8 @@
 | 卡包 | `SELECT_BUNDLE` | 待选卡包 |
 | 水晶球 | `DIVINE_CELL` | 全部未揭示格 × 两种工具 |
 
-- **多选过程**：`SELECT_ONE` 只编辑前缀，`FINISH_SELECTION` 一次提交，游戏效果在提交时才发生。帧里带 `selection_context`（操作、来源、去向、最少／最多、还需选几张、已选引用）和固定的 `decoder_bank`。选项按公开卡牌属性排序，不按引擎实例 ID 或牌堆内部顺序。
+- **多选过程**：`SELECT_ONE` 只编辑前缀，`FINISH_SELECTION` 一次提交，游戏效果在提交时才发生。帧里带 `selection_context`（操作、来源、去向、最少／最多、还需选几张、已选引用）和固定的 `decoder_bank`。操作与来源的推断与 Steam Mod 相同（`SelectionMetadata`）：提示词，没有时按方法名；从牌堆选时来源是那个牌堆。正在结算、引出这次选牌的牌在出牌区（zone `play`）。选项按公开卡牌属性排序，不按引擎实例 ID 或牌堆内部顺序。
+- **选牌的暂停信号**：上游把无头选牌器装成测试选牌器，游戏因此跳过选牌的暂停信号，回合准备里的选牌会让 side 开始效果推迟到准备结束。本仓库把同一个选牌器同时装成本地选牌器，并在带选择上下文的选牌里让测试选牌器暂时让位，游戏照真实对局发出暂停信号（见 [env](../../docs/implementation/env.md#已知的坑)）。
 - **取消**：非战斗阶段，原生的取消只是撤销打开选择的那个动作（营火锻造、商店删牌、删牌奖励），所以打开即承诺，不发布 `CANCEL`；只有战斗中，或既不能选也不能完成时才提供。
 - **等待与终局**：结算未到稳定边界时发布 `waiting`，由客户端再发 `advance_to_boundary`。HP 归零不等于死亡，要等原生 `Died` 事件或战斗失败才发布 `terminal`；3 秒内仍无法确认则报 `unconfirmed_terminal_outcome`。
 - **里程碑事件**（`RunSimulator.Milestones.cs`）：`encounter_started`、`encounter_completed`、`run_completed`、`candidate_executed`。事件只随一次响应交付，重复查询不会重复给出。
@@ -220,6 +222,7 @@
 | `HeadlessMerchantParity` | `MerchantPotionEntry.CalcCost` 里的 `TestMode.IsOff` 判断恒为真 |
 | `SelectionMetadata` | 包住 `CardSelectCmd.From*`，记录操作、来源、去向、可否取消 |
 | `NativeContinuations` | 跟踪 `LordsParasol.PurchaseEverything` 返回的任务 |
+| `RoomEntrySave` | `RunManager.EnterRoom` 进战斗房间之前序列化整局（游戏选图进房时也在进房之前存档，无头引擎不存）；`write_continue_save` 在战斗进行中写这一份，`resume_fight` 重进时开战效果只发生一次 |
 | `Spire.PublicHistory.NativeHistory` | 把原生公开事件接到公开历史状态机 |
 | `AnchorMerchant`、`AnchorTreasure` | 见 [3.4](#34-摘要锚点入口)；没有锚点提供数据时不改变行为 |
 | 水晶球（`RunSimulator.CrystalSphere.cs`） | 只替换 `NCrystalSphereScreen.ShowScreen`，格子点击和奖励结算走原生小游戏 |
@@ -279,7 +282,7 @@
 
 ## 7. 合并上游更新时的注意事项
 
-- 上游的改动几乎都落在 `RunSimulator.cs` 和 `Program.cs`。本仓库在 `RunSimulator.cs` 里改过的区域是：类声明（`partial`）、字段与构造函数、`StartRun`／`LoadSave`／`EnterRoom` 的签名和结尾、`DoAction` 开头、购买遗物／删牌／营火／事件四处的等待逻辑、`DoSelectCards`／`DoSelectBundle`、`WaitForActionExecutor`、`EnsureModelDbInitialized` 里的补丁安装、`HeadlessCardSelector` 整个类、本地化目录查找、`GetFullMap` 结尾。合并冲突会集中在这些地方。
+- 上游的改动几乎都落在 `RunSimulator.cs` 和 `Program.cs`。本仓库在 `RunSimulator.cs` 里改过的区域是：类声明（`partial`）、字段与构造函数、`StartRun`／`LoadSave`／`EnterRoom` 的签名和结尾、`DoAction` 开头、购买遗物／删牌／营火／事件四处的等待逻辑、`DoSelectCards`／`DoSelectBundle`、`WaitForActionExecutor`、`EnsureModelDbInitialized` 里的补丁安装、`HeadlessCardSelector` 整个类与它的注册（`InstallSelector`）、本地化目录查找、`GetFullMap` 结尾。合并冲突会集中在这些地方。
 - 上游如果继续新增 `Sleep` 轮询式的等待，合并时要改写成 `PendingOperation`，否则会重新引入“选择还没结算完就发布下一个边界”的问题。
 - 上游对 `DetectDecisionPoint` 的自动推进改动不影响协议路径，但协议各边界有自己的一套实现，上游修掉的同类问题需要在 `RunSimulator.Phases.cs` 等文件里对照检查是否也存在。
 - 游戏版本升级后，先看带数量断言的转译补丁是否还能安装，再跑 `MerchantParityChecks` 和 `tests/`。

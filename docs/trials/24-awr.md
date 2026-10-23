@@ -1,7 +1,7 @@
 # 优势加权回归（AWR）、温度修正与监督锚
 
 - **时间**：a0 路线的 AWR 与 `iterate` 驱动 2026-10-11 实现并合入（`9a96fdf`、`75925a2`、`8047f6b`…`b5915a5`、`1a1e920`、`7e5e1a5`）；幕组上的 AWR 试跑 iterate-v1 2026-10-15 启动、10-16 停下，iterate-v2 2026-10-16；2026-10-17 整体删除（joint-training 16）。
-- **来源**：`.scratch/a0-training-baseline/issues/19-awr-and-iteration.md`；`db6648d:model/awr.py`、`db6648d:model/advantage.py`、`db6648d:ARCHITECTURE.md`「策略改进」；`.scratch/joint-training/issues/07-act-groups.md`（阶段 05 与 2026-10-16 Comments）、`08-grpo-update.md`「问题」「分析」、`16-remove-awr.md`。
+- **来源**：`.scratch/a0-training-baseline/issues/19-awr-and-iteration.md`；`db6648d:model/awr.py`、`db6648d:model/advantage.py`、`db6648d:ARCHITECTURE.md`「策略改进」；`.scratch/joint-training/issues/act-groups-grpo.md`（07 的阶段 05 与 2026-10-16 Comments、08 的「问题」「分析」、16）。
 - **状态**：被删除。幕组上两次试跑都塌缩；裁剪目标成为唯一的更新方式。
 
 ## 动机

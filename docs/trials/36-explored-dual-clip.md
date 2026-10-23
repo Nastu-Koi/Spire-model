@@ -1,7 +1,7 @@
 # 探索步的双侧裁剪（v23–v30）
 
 - **时间**：2026-10-18 13:28 引入（与按战斗种类定率一起），v23–v24、v25–v30 两次运行在用；2026-10-19 量出窗口对探索步的作用后，当天改为按得分推。
-- **来源**：`.scratch/joint-training/issues/27-potion-exploration.md`（2026-10-19 22:45、23:00 两条）；`.scratch/joint-training/assets/potions/v29-v30-ratio.json`、`v29-round5-timing.json`、`v29-round5-trial.json`、`v2{4,6,8},v30-on-v16-frames-probability.json`；脚本 `.scratch/joint-training/scripts/potion_ratio.py`、`potion_timing.py`、`potion_trial.py`；引入它的提交 `409eda2`。
+- **来源**：`.scratch/joint-training/issues/potions.md`（原 27 的 2026-10-19 22:45、23:00 两条）；`.scratch/joint-training/assets/potions/v29-v30-ratio.json`、`v29-round5-timing.json`、`v29-round5-trial.json`、`v2{4,6,8},v30-on-v16-frames-probability.json`；脚本 `.scratch/joint-training/scripts/potion_ratio.py`、`potion_timing.py`、`potion_trial.py`；引入它的提交 `409eda2`。
 - **状态**：被取代。探索步改为 A·(1 + log r) 的得分项（只留 |log r| ≤ 3 的保险界）；分叉步仍双侧裁剪。
 
 ## 动机

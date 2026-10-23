@@ -235,3 +235,23 @@ def test_the_map_names_the_bosses_of_the_act():
     # A recording that does not say who a boss is leaves it unknown.
     assert named(boss="QUEEN_BOSS") == {15: None, 16: "ENCOUNTER.QUEEN_BOSS", 17: None}
     assert named() == {15: None, 16: None, 17: None}
+
+
+def test_a_recorded_card_being_played_is_in_the_play_zone():
+    from main.demos.recorder.snapshot import PublicSnapshot
+
+    state = message("combat_play", [], {})["state"]
+    hero = state["players"][0]
+    hero["combat"] = dict(energy=1, max_energy=3, hand=[card("STRIKE_IRONCLAD", "h1")], draw=[],
+                          discard=[card("BASH", "x1")], exhaust=[], play=[card("HEADBUTT", "p1")])
+    state["combat"] = dict(in_progress=True, enemies=[])
+
+    def played():
+        return [e for e in PublicSnapshot(state).entities if e.get("zone") == "play"]
+    assert [(e["entity_type"], e.get("content_id"), e.get("position")) for e in played()] == [
+        ("card", "CARD.HEADBUTT", 0), ("pile_summary", None, None)]
+    # An empty play pile, as the engine leaves it out, and the pile object older recordings
+    # exported instead of its cards, publish nothing.
+    for old in ([], {"Type": "Play"}):
+        hero["combat"]["play"] = old
+        assert not played()

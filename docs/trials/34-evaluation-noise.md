@@ -1,7 +1,7 @@
 # greedy 评估噪声的低估与 FP32 评估
 
 - **时间**：2026-10-10 首次量到重跑差异；2026-10-16 按“±3 局”使用；2026-10-18 01:20 推翻；2026-10-18 立项 FP32 评估，2026-10-19 00:35 结果
-- **来源**：`.scratch/joint-training/issues/24-serial-v12-v16.md`（2026-10-18 01:20）、`31-fp32-evaluation.md`、`08-grpo-update.md`；`.scratch/a0-training-baseline/issues/14-training-code-refactor.md`；2026-10-10 的 300 局重跑数字据记忆记录
+- **来源**：`.scratch/joint-training/issues/training-runs.md`（24 的 2026-10-18 01:20 一条、31b）、`act-groups-grpo.md`（08）；`.scratch/a0-training-baseline/issues/14-training-code-refactor.md`；2026-10-10 的 300 局重跑数字据记忆记录
 - **状态**：部分有效。“固定种子 greedy 评估噪声约 ±3 局”的假设被推翻，实际是 ±10 局级；FP32 评估保留，但只把分岔的种子从约 32–33 降到 25。2,000 局评估被否决（用户定）。
 
 ## 动机

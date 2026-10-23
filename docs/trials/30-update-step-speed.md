@@ -1,7 +1,7 @@
 # 更新步的提速尝试
 
 - **时间**：2026-10-17 ~ 2026-10-18
-- **来源**：`.scratch/joint-training/issues/14-stream-feeders.md`、`21-update-wait-time.md`、`26-update-step-overlap.md`、`29-iteration-time-budget.md`、`24-serial-v12-v16.md`；探针原始输出在 `.scratch/joint-training/assets/probe-26/`、`probe-29/`；提交 `2d8e629`、`0a52576`、`44e37a1`、`73fde28`、`89a1abe`、`e1cc51e`、`21034b5`
+- **来源**：`.scratch/joint-training/issues/throughput.md`（14、21、26、29）、`training-runs.md`（24）；探针原始输出在 `.scratch/joint-training/assets/probe-26/`、`probe-29/`；提交 `2d8e629`、`0a52576`、`44e37a1`、`73fde28`、`89a1abe`、`e1cc51e`、`21034b5`
 - **状态**：多数被否决。更新步接近 GPU 受限，预取线程、参考前向旁路流、参考前向 CUDA graph、加读取进程、训练侧 TF32 都没有提速；关系偏置的搬运优化、批量 Muon、按份额分配读取进程、去掉主机同步与读取进程降优先级有效。
 
 ## 动机

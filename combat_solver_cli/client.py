@@ -86,7 +86,11 @@ class SolverEngine(CliEngine):
         potion_policy=None,
         potion_directives=None,
         potion_costs=None,
+        final_boss_potion_costs=None,
+        potion_reserve=None,
         reuse_turn_plan=False,
+        reuse_route=False,
+        reuse_within_budget=False,
         beam_width=60,
         beam_portfolio=True,
         boss_budget_ms=None,
@@ -108,6 +112,10 @@ class SolverEngine(CliEngine):
                 **({"potion_policy": potion_policy} if potion_policy else {}),
                 **({"potion_directives": potion_directives} if potion_directives else {}),
                 **({"potion_costs": list(potion_costs)} if potion_costs else {}),
+                **({"final_boss_potion_costs": list(final_boss_potion_costs)} if final_boss_potion_costs else {}),
+                **({"potion_reserve": potion_reserve} if potion_reserve is not None else {}),
+                **({"reuse_route": True} if reuse_route else {}),
+                **({"reuse_within_budget": True} if reuse_within_budget else {}),
                 **{
                     k: routing[k]
                     for k in ("decision_id", "state_version", "selection_revision")

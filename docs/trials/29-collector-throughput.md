@@ -1,7 +1,7 @@
 # 采集吞吐的提速尝试
 
 - **时间**：2026-10-17 ~ 2026-10-18
-- **来源**：`.scratch/joint-training/issues/15-collector-timing.md`、`22-collector-pass-overhead.md`、`25-collector-throughput.md`、`29-iteration-time-budget.md`、`30-operator-level-speedups.md`；探针原始输出在 `.scratch/joint-training/assets/probe-25/`、`probe-29/`、`probe-30/`；提交 `f2c678d`、`3f536b3`、`525b528`；后续的编码表见 `38-encoder-content-cache.md` 与 `assets/probe-38/`
+- **来源**：`.scratch/joint-training/issues/throughput.md`（15、22、25、29、30）；探针原始输出在 `.scratch/joint-training/assets/probe-25/`、`probe-29/`、`probe-30/`；提交 `f2c678d`、`3f536b3`、`525b528`；后续的编码表见同一文件的 38 与 `assets/probe-38/`
 - **状态**：多数被否决。采集进程受主机发射限制，流水线、解包改写、编码器编译、多采集进程都没有提速；有效的是关系偏置并排建出、全局层 CUDA graph、程序节点字段紧凑化和引擎 32 → 48。之后（2026-10-19，工单 38）按内容缓存实体编码器的输出（编码表）再提约 30%，默认引擎改为 64。
 
 ## 动机

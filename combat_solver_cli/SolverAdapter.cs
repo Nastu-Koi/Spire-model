@@ -14,6 +14,8 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
+using MegaCrit.Sts2.Core.Models.Relics;
+using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Rooms;
 using Sts2Headless;
 
@@ -32,9 +34,22 @@ internal sealed class SolverAdapter(Assembly assembly)
 	private bool _poisoned;
 	private string? _refinementFailure;
 	private int _effectiveBudgetMs;
+	private bool _finalBossPriced;
+	private bool _withinBudget;
+	private int _potionReserveMs;
+	// The last search a later turn may continue (`reuse_route`), its fight and its request policy.
+	private object? _routeSource;
+	private CombatState? _routeCombat;
+	private string? _routePolicy;
 	private readonly Queue<object> _turnPlan = new();
 	private int _planTurn = -1;
 	private string? _planPolicy;
+	// The active transaction holds the choices the route planned for the next turn's setup.
+	private bool _selectorPlansSetup;
+	// The solver's root of a turn's setup, taken before the setup ran (see BeforeTurnSetup).
+	private object? _setupRoot;
+	private static SolverAdapter? _current;
+	private static bool _setupInstalled;
 
 	public bool Poisoned => _poisoned;
 
@@ -95,13 +110,46 @@ internal sealed class SolverAdapter(Assembly assembly)
 		return IsBossCombat() ? boss : normal;
 	}
 
+	// Time a Smart search keeps from its potion-free part for the potion audits: the share
+	// `potion_reserve` of the budget, when the belt holds a potion and no use is forced.
+	private static int PotionReserveMs(JsonElement request, JsonElement frame, int budget)
+	{
+		double share = request.TryGetProperty("potion_reserve", out var value) ? value.GetDouble() : 0;
+		if (share < 0 || share > 0.9) throw new ArgumentOutOfRangeException("potion_reserve");
+		bool smart = request.TryGetProperty("potion_policy", out var policy) ? policy.GetString() == "Smart"
+			: request.TryGetProperty("potions", out var potions) && potions.GetBoolean();
+		bool forced = request.TryGetProperty("potion_directives", out var directives) && directives.GetArrayLength() > 0;
+		bool belt = frame.GetProperty("public").GetProperty("entities").EnumerateArray()
+			.Any(e => e.TryGetProperty("entity_type", out var type) && type.GetString() == "potion");
+		return smart && !forced && belt ? (int)(budget * share) : 0;
+	}
+
 	public void PrepareEngine()
 	{
 		PortfolioDeadline.Install(assembly);
 		PotionCosts.Install(assembly);
+		PotionReserve.Install(assembly);
+		BlockPotionInsertion.Install(assembly);
+		FinalReplay.Install(assembly);
 		NativeSelectionBridge.Install();
-		// Restore the native Neutralize action; the CLI legacy prefix bypasses native attack commands.
-		// Keep the solver patch audit enabled and remove only this known compatibility prefix.
+		// The game takes the first thread that asks for its main thread, and the solver captures
+		// roots only there: make it this one, before a setup running elsewhere can ask.
+		NGame.IsMainThread();
+		_current = this;
+		if (!_setupInstalled)
+		{
+			MethodInfo setup = typeof(CombatManager).GetMethods(Flags).Single(m => m.Name == "SetupPlayerTurn" && m.GetParameters().Length == 3);
+			new Harmony("combat-solver-cli.turn-setup").Patch(setup, prefix: new HarmonyMethod(typeof(SolverAdapter).GetMethod(nameof(BeforeTurnSetup), Flags)));
+			_setupInstalled = true;
+		}
+		RestoreNativeNeutralize();
+	}
+
+	// Restore the native Neutralize action; the CLI legacy prefix bypasses native attack commands.
+	// Keep the solver patch audit enabled and remove only this known compatibility prefix.
+	// A run begun by a command gets the prefix again; the solver refuses roots while it is there.
+	private static void RestoreNativeNeutralize()
+	{
 		MethodInfo method = typeof(Neutralize).GetMethod("OnPlay", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 		MethodInfo prefix = typeof(RunSimulator).GetNestedType("LocPatches", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).GetMethod("NeutralizePrefix", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 		Patches patchInfo = Harmony.GetPatchInfo((MethodBase)method);
@@ -116,16 +164,87 @@ internal sealed class SolverAdapter(Assembly assembly)
 		_turnPlan.Clear();
 		_planTurn = -1;
 		_planPolicy = null;
+		(_routeSource, _routeCombat, _routePolicy) = (null, null, null);
 		ClearSelection();
+	}
+
+	// The rest of the last searched route, when this turn starts in exactly the state the route
+	// predicted for it: the solver's own continuation check (ContinuationStamp), as its full-auto
+	// mode uses between turns. Null when the route predicted another state or no later turn.
+	private object? Continue(CombatState combat, Player player)
+	{
+		if (_routeSource == null) return null;
+		object?[] args = { Call("ContinuationStamp", "CaptureLive", combat), player.Creature.CurrentHp, New("BattleDamageSnapshot", 0, 0, 0, Array.Empty<string>(), 0), null };
+		return (bool)_routeSource.GetType().GetMethod("TryCreateContinuation", Flags)!.Invoke(_routeSource, args)! ? args[3] : null;
 	}
 
 	private void ClearSelection()
 	{
 		NativeSelectionBridge.Activate(null);
+		// A setup no search was asked to plan (a replaying process, the selection rule outside the
+		// worker), or one that left its plan, may still finish its native requests; they no longer
+		// concern the worker.
+		if (_selector?.AwaitingPlan == true || _selector?.Diverged != null) _selector.Abandon();
 		_selector?.Dispose();
 		_selector = null;
 		_selectedCards = null;
 		_selectionId = null;
+		_selectorPlansSetup = false;
+		_setupRoot = null;
+	}
+
+	private string ChoiceKey(CardModel card) => (string)Call("CardChoiceSupport", "ChoiceCardKey", card)!;
+
+	// The solver mod's turn-setup takeover (PlayerTurnSetupCoordinator): a setup that asks for a
+	// choice the solver has to make (its own RequiresSolverChoice: Gambling Chip, Toasty Mittens,
+	// Toolbox, ...) is searched from the state before the setup ran, with the setup included.
+	// The native choice starts before the worker is asked to solve, so here the root is taken and
+	// a transaction opened that records the native requests; Step searches when the choice shows.
+	private static void BeforeTurnSetup(CombatManager __instance, object[] __args)
+	{
+		try
+		{
+			_current?.CaptureTurnSetup(__instance, (Player)__args[1]);
+		}
+		catch (Exception exception)
+		{
+			// Without the root the choice is answered outside the solver, as before.
+			Console.Error.WriteLine("[CombatSolverCli] turn_setup_capture_failed: " + exception);
+		}
+	}
+
+	private void CaptureTurnSetup(CombatManager manager, Player player)
+	{
+		CombatState? combat = manager.DebugOnlyGetState();
+		if (combat == null || player.PlayerCombatState == null || Convert.ToInt32(player.PlayerCombatState.Phase) != 1) return;
+		if (_selector != null && _selectorPlansSetup) return;
+		if (!(bool)Call("PlayerTurnSetupCoordinator", "RequiresSolverChoice", player)!) return;
+		// Otherwise the choice is answered outside the solver, as before.
+		// Vakuu plays the first turn with choices of its own, and the solver cannot search a setup
+		// that ends in that turn ("Cannot fork before a requested player turn end is resolved").
+		if (player.PlayerCombatState.TurnNumber <= 1 && player.Relics.Any(r => r is WhisperingEarring && !r.IsMelted))
+		{
+			Console.Error.WriteLine("[CombatSolverCli] turn_setup_not_taken reason=whispering_earring");
+			return;
+		}
+		if (!NGame.IsMainThread())
+		{
+			Console.Error.WriteLine("[CombatSolverCli] turn_setup_not_taken reason=off_main_thread");
+			return;
+		}
+		if (_selector != null && !_selector.Settled)
+		{
+			Console.Error.WriteLine("[CombatSolverCli] turn_setup_not_taken reason=unsettled_choices");
+			return;
+		}
+		// A resumed fight begins inside the command that began its run, before PrepareEngine ran after it.
+		RestoreNativeNeutralize();
+		object root = Call("CombatRootSnapshot", "Capture", combat, false)!;
+		_selector?.FinishAction();
+		ClearSelection();
+		_setupRoot = root;
+		_selector = new ChoiceTransaction(player, ChoiceKey);
+		NativeSelectionBridge.Activate(_selector);
 	}
 
 	public void ObserveBoundary(JsonElement frame)
@@ -162,7 +281,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 		return Describe(result);
 	}
 
-	private object Describe(object result)
+	private object Describe(object result, bool turnSetup = false)
 	{
 		return new
 		{
@@ -177,8 +296,17 @@ internal sealed class SolverAdapter(Assembly assembly)
 			refinement_failure = _refinementFailure,
 			budget_ms = _effectiveBudgetMs,
 			potion_costs = PotionCosts.Current,
+			// What the search kept from its potion-free part for the potion audits (PotionReserve).
+			potion_reserve_ms = _potionReserveMs,
 			// What the route's potions cost at those prices, as the solver counted it.
 			potion_strategic_cost = ((IEnumerable)Get(Get(result, "PotionStrategicCostByTurn"), "Values")).Cast<int>().Sum(),
+			final_boss_priced = _finalBossPriced,
+			// A continued route: the turn the search that found it started on.
+			reused_from_turn = (bool)Get(result, "WasReused")! ? Get(result, "ReusedFromTurn") : null,
+			// The last search ended before its budget (for a continued turn: the last search of the fight).
+			within_budget = _withinBudget,
+			// A search of the turn's setup, made for its choices (BeforeTurnSetup).
+			turn_setup = turnSetup ? true : (bool?)null,
 			boss_combat = IsBossCombat()
 		};
 	}
@@ -197,6 +325,33 @@ internal sealed class SolverAdapter(Assembly assembly)
 		{
 			throw new InvalidOperationException("solver_step requires an active combat");
 		}
+		object search = null;
+		bool asksChoice = (frame.GetProperty("public").TryGetProperty("selection_context", out var shown) && shown.ValueKind == JsonValueKind.Object)
+			|| frame.GetProperty("public").GetProperty("phase").GetString() is "card_reward" or "bundle_select";
+		if (asksChoice && _selector != null && _selector.AwaitingPlan)
+		{
+			object setup;
+			try
+			{
+				setup = Search(request, frame, _setupRoot);
+			}
+			catch (Exception exception) when (!_poisoned)
+			{
+				// The solver could not play this setup: the choice is answered outside it, as before.
+				Console.Error.WriteLine("[CombatSolverCli] turn_setup_not_taken reason=search_failed: " + (exception.InnerException ?? exception).Message);
+				ClearSelection();
+				return new { type = "solver_selection_required", frame = frame };
+			}
+			search = Describe(setup, turnSetup: true);
+			_selector.Supply(((IEnumerable)Get(setup, "TurnSetupChoices")!).Cast<object>());
+		}
+		if (asksChoice && _selector?.Diverged != null)
+		{
+			// The native setup offered a choice its plan does not have (ChoiceTransaction.Match):
+			// the rule answers it, and the turn is searched again once it is played.
+			ClearSelection();
+			return new { type = "solver_selection_required", frame = frame };
+		}
 		// Entry effects and replayed actions can expose choices without a solver plan.
 		// Return the unchanged boundary so the run search can retain every legal branch.
 		if (_selector == null &&
@@ -206,7 +361,6 @@ internal sealed class SolverAdapter(Assembly assembly)
 			return new { type = "solver_selection_required", frame = frame };
 		}
 		Player player = val.Players.Single();
-		object search = null;
 		JsonElement jsonElement;
 		if (frame.GetProperty("public").TryGetProperty("selection_context", out var value) && value.ValueKind == JsonValueKind.Object)
 		{
@@ -228,8 +382,11 @@ internal sealed class SolverAdapter(Assembly assembly)
 				ClearSelection();
 			}
 			bool reuse = request.TryGetProperty("reuse_turn_plan", out var reuseValue) && reuseValue.GetBoolean();
+			bool reuseRoute = request.TryGetProperty("reuse_route", out var reuseRouteValue) && reuseRouteValue.GetBoolean();
+			// `reuse_within_budget`: continue only routes whose search ended before its budget.
+			bool withinBudgetOnly = request.TryGetProperty("reuse_within_budget", out var withinValue) && withinValue.GetBoolean();
 			int turn = player.PlayerCombatState.TurnNumber;
-			string policy = string.Join("|", new[] { "budget_ms", "boss_budget_ms", "potions", "potion_policy", "potion_directives", "potion_costs", "beam_width", "beam_portfolio" }
+			string policy = string.Join("|", new[] { "budget_ms", "boss_budget_ms", "potions", "potion_policy", "potion_directives", "potion_costs", "final_boss_potion_costs", "potion_reserve", "beam_width", "beam_portfolio", "reuse_route", "reuse_within_budget" }
 				.Select(k => request.TryGetProperty(k, out var v) ? v.GetRawText() : ""));
 			if (!reuse || _planTurn != turn || _planPolicy != policy) _turnPlan.Clear();
 			object obj2;
@@ -240,7 +397,15 @@ internal sealed class SolverAdapter(Assembly assembly)
 			}
 			if (_turnPlan.Count == 0)
 			{
-				object result = Search(request, frame);
+				object? result = reuseRoute && _routePolicy == policy && ReferenceEquals(_routeCombat, val) ? Continue(val, player) : null;
+				if (result == null)
+				{
+					result = Search(request, frame);
+					// A route cut at the deadline covers the current turn only; it predicts no later turn.
+					_routeSource = Get(result, "ResultScope")!.ToString() == "CurrentTurnAdoption" || withinBudgetOnly && !_withinBudget
+						? null : result;
+					(_routeCombat, _routePolicy) = (val, policy);
+				}
 				search = Describe(result);
 				foreach (object action in ((IEnumerable)Get(Get(result, "BestNode"), "Actions")).Cast<object>())
 				{
@@ -254,11 +419,13 @@ internal sealed class SolverAdapter(Assembly assembly)
 			obj2 = _turnPlan.Dequeue();
 			jsonElement = MapAction(runSimulator, frame, player, obj2);
 			List<object> list = ((IEnumerable)obj2.GetType().GetMethod("GetActionChoicesInExecutionOrder", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).Invoke(obj2, null)).Cast<object>().ToList();
+			int planned = list.Count;
 			if (Get(obj2, "Kind").ToString() == "EndTurn" || (bool)Get(obj2, "EndsPlayerTurn"))
 			{
 				list.AddRange((((IEnumerable)Get(obj2, "TurnStartChoices")) ?? Array.Empty<object>()).Cast<object>());
 			}
-			_selector = new ChoiceTransaction(list, player, card => (string)Call("CardChoiceSupport", "ChoiceCardKey", card)!);
+			_selector = new ChoiceTransaction(list, player, ChoiceKey, setupFrom: planned);
+			_selectorPlansSetup = list.Count > planned;
 			NativeSelectionBridge.Activate(_selector);
 		}
 		JsonElement property = frame.GetProperty("routing");
@@ -406,15 +573,16 @@ internal sealed class SolverAdapter(Assembly assembly)
 		return Find(frame, "TAKE_CARD_REWARD", ((Dictionary<CardModel, string>)Get(obj4, "Cards"))[key]);
 	}
 
-	private object Search(JsonElement request, JsonElement frame)
+	// `setupRoot`: a root taken before a turn's setup ran; the search plays the setup as well.
+	private object Search(JsonElement request, JsonElement frame, object? setupRoot = null)
 	{
 		ObserveBoundary(frame);
-		if (_selector != null) throw new InvalidOperationException("Cannot search during a pending execution selection");
+		if (_selector != null && setupRoot == null) throw new InvalidOperationException("Cannot search during a pending execution selection");
 		if (_poisoned)
 		{
 			throw new InvalidOperationException("Solver isolation failed; restart this worker");
 		}
-		if (frame.GetProperty("public").GetProperty("phase").GetString() != "combat" || (frame.GetProperty("public").TryGetProperty("selection_context", out var value) && value.ValueKind == JsonValueKind.Object))
+		if (setupRoot == null && (frame.GetProperty("public").GetProperty("phase").GetString() != "combat" || (frame.GetProperty("public").TryGetProperty("selection_context", out var value) && value.ValueKind == JsonValueKind.Object)))
 		{
 			throw new InvalidOperationException("solver_solve requires a combat play decision");
 		}
@@ -424,15 +592,23 @@ internal sealed class SolverAdapter(Assembly assembly)
 		}
 		int num = EffectiveBudget(request);
 		_effectiveBudgetMs = num;
-		PotionCosts.Set(request);
+		int reserve = PotionReserveMs(request, frame, num);
+		_potionReserveMs = reserve;
+		int[] costs = PotionCosts.Read(request, "potion_costs");
+		int[]? finalCosts = request.TryGetProperty("final_boss_potion_costs", out _) ? PotionCosts.Read(request, "final_boss_potion_costs") : null;
 		Assembly assembly = Assembly.Load("sts2");
 		Type type = assembly.GetType("MegaCrit.Sts2.Core.Combat.CombatManager", throwOnError: true);
 		object value3 = type.GetProperty("Instance", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).GetValue(null);
 		object obj = type.GetMethod("DebugOnlyGetState", BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).Invoke(value3, null) ?? throw new InvalidOperationException("No active combat");
+		// The run's last fight: the solver values neither HP nor potions past it, so its own policy
+		// spends a potion there only to win. `final_boss_potion_costs` prices potions there as in any
+		// other fight and counts the HP they save in full (BossHpStrategy.MinimizeHpLoss).
+		_finalBossPriced = finalCosts != null && Call("ActEndingBossPolicy", "ResolveHpRelief", obj)!.ToString() == "RunEnding";
+		PotionCosts.Set(_finalBossPriced ? finalCosts! : costs);
 		object objA = Call("ContinuationStamp", "CaptureLive", obj);
 		try
 		{
-			object obj2 = Call("CombatRootSnapshot", "Capture", obj, false);
+			object obj2 = setupRoot ?? Call("CombatRootSnapshot", "Capture", obj, false);
 			object obj3 = Call("SolverDisplayNames", "Capture", obj);
 			object obj4 = New("BattleDamageSnapshot", 0, 0, 0, Array.Empty<string>(), 0);
 			int beam = request.TryGetProperty("beam_width", out var beamValue) ? beamValue.GetInt32() : 60;
@@ -471,7 +647,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 				Console.Error.WriteLine(s);
 			};
 			object obj8 = New("SearchDiagnosticsSink", action, action, null);
-			object obj9 = New("SearchPolicySnapshot", obj5, obj6, obj7, false, false, true, false, 1, num, false, null, System.Enum.ToObject(Type("BossHpStrategy"), 0), System.Enum.ToObject(Type("BossHpStrategy"), 0), 0, obj8, New("SearchFramePressureSignal"), New("SearchMemoryPressureSignal"));
+			object obj9 = New("SearchPolicySnapshot", obj5, obj6, obj7, false, false, true, false, 1, num, setupRoot != null, null, System.Enum.ToObject(Type("BossHpStrategy"), 0), Enum("BossHpStrategy", _finalBossPriced ? "MinimizeHpLoss" : "ProgressionFirst"), 0, obj8, New("SearchFramePressureSignal"), New("SearchMemoryPressureSignal"));
 			bool portfolio = !request.TryGetProperty("beam_portfolio", out var portfolioValue) || portfolioValue.GetBoolean();
 			Type("SearchPolicySnapshot").GetProperty("UseBeamWidthPortfolio", Flags)!.SetValue(obj9, portfolio);
 			var combat = (CombatState)obj;
@@ -485,15 +661,21 @@ internal sealed class SolverAdapter(Assembly assembly)
 			using CancellationTokenSource cancellationTokenSource = new(TimeSpan.FromMilliseconds(num + 10000));
 			using Timer softDeadline = new(_ => requestTakeover.Invoke(interaction, null), null, num, Timeout.Infinite);
 			_refinementFailure = null;
+			_withinBudget = false;
 			object? routeSeed = null;
 			Action<object> progress = update =>
 			{
 				object? seed = Get(update, "RouteAdoptionSeed");
 				if (seed != null) routeSeed = seed;
 			};
+			PotionReserve.Begin(num, reserve);
 			try
 			{
-				return Call("CombatSearchCoordinator", "Solve", obj2, obj3, obj4, obj9, cancellationTokenSource.Token, progress);
+				object found = Call("CombatSearchCoordinator", "Solve", obj2, obj3, obj4, obj9, cancellationTokenSource.Token, progress)!;
+				// No deadline reached the search: the takeover the timer asks for at the budget is still
+				// unasked, so the potion audits, cancelled no earlier than that, ran to their end too.
+				_withinBudget = Get(interaction, "CurrentTakeoverRequest") == null;
+				return found;
 			}
 			catch (TargetInvocationException exception) when (routeSeed != null
 				&& exception.InnerException?.GetType().FullName == "CombatSolver.SearchTransitionException")
@@ -513,6 +695,7 @@ internal sealed class SolverAdapter(Assembly assembly)
 		}
 		finally
 		{
+			PotionReserve.End();
 			if (!object.Equals(objA, Call("ContinuationStamp", "CaptureLive", obj)))
 			{
 				_poisoned = true;

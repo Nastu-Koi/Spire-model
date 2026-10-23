@@ -20,9 +20,11 @@ from main.play.rollout import precision_context
 
 
 def _by_source(sources):
-    """{source: weighted mean loss, total weight, samples} of what was accumulated."""
-    return {name: {"loss": loss / max(weight, 1e-12), "weight": weight, "samples": count}
-            for name, (loss, weight, count) in sorted(sources.items())}
+    """{source: weighted mean loss, total weight, samples, weighted mean entropy} of what
+    was accumulated."""
+    return {name: {"loss": loss / max(weight, 1e-12), "weight": weight, "samples": count,
+                   "entropy": entropy / max(weight, 1e-12)}
+            for name, (loss, weight, count, entropy) in sorted(sources.items())}
 
 
 # What the global layers of a pass's microbatches computed over, by source (`_shape`).
@@ -145,8 +147,6 @@ class Learner:
             training = saved_training.with_sampling(training, rates=rates is not None)
         if rates is not None:
             training = (training or saved_training).with_rates(rates)
-        if weights_only:
-            vocab = vocab.expanded()
         learner = cls(model, vocab, training or saved_training,
                       policy_version=0 if weights_only else progress.get("policy_version", 0),
                       decay_updates=decay_updates)
@@ -241,9 +241,9 @@ class Learner:
         gradient_clipped = 0
         update_stats = defaultdict(lambda: {"samples": 0, "delta_l2_sum": 0.0,
                                             "relative_sum": 0.0, "relative_max": 0.0})
-        # Weighted loss, weight and samples of every source: what a report of mixed
+        # Weighted loss, weight, samples and weighted entropy of every source: what a report of mixed
         # sources tells apart. The update itself sums by weight alone.
-        sources = defaultdict(lambda: [0.0, 0.0, 0])
+        sources = defaultdict(lambda: [0.0, 0.0, 0, 0.0])
         shapes = defaultdict(lambda: [0] * len(SHAPES))
         last_rates = {}
         waited_seconds = 0.0  # blocked on the loader for the next logical batch
@@ -264,7 +264,7 @@ class Learner:
             total_metrics["last_grad_norm"] = norm
             batch_weight = 0.0
             batch_metrics = defaultdict(float)
-            batch_sources = defaultdict(lambda: [0.0, 0.0, 0])
+            batch_sources = defaultdict(lambda: [0.0, 0.0, 0, 0.0])
             for item, (loss, entropy) in zip(step.items, host_rows):
                 w = item.weight
                 batch_weight += w
@@ -276,6 +276,7 @@ class Learner:
                     entry[0] += loss * w
                     entry[1] += w
                     entry[2] += 1
+                    entry[3] += entropy * w
             accuracy_correct += correct
             accuracy_decisions += decisions
             if on_update:

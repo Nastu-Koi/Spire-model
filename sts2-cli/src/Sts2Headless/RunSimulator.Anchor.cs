@@ -140,8 +140,9 @@ public partial class RunSimulator
     }
 
     // A run resumed at the entry of one of its fights: the save written at the fight's
-    // first decision holds the run as it stood before the room, and the fight is
-    // entered again (its enemies' HP and the opening hand drawn anew). For act groups
+    // first decision holds the run as it stood when the room was entered (RoomEntrySave),
+    // and the fight is entered again as it began: what its start does to the run happens
+    // once, its enemies' HP and the opening hand are drawn as they were. For act groups
     // cut at a boss fight. The contract names the initialization as with the others.
     public const string FightResumeInitialization = "fight-resume-v1";
 

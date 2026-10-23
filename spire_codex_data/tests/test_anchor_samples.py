@@ -293,6 +293,49 @@ def test_an_anchor_save_holds_the_recorded_bosses():
     assert base['acts'][0]['rooms']['boss_id'] == 'ENCOUNTER.SEED_1'
 
 
+class StepRecorder:
+    """A worker that answers every step with the given search report."""
+    def __init__(self, search):
+        self.search, self.options = search, None
+
+    def step(self, frame, **options):
+        self.options = options
+        return dict(type='solver_step', search=self.search)
+
+
+def test_a_search_must_report_the_prices_it_was_asked_for():
+    budgets = dict(budget_ms=5000, elite_budget_ms=5000, boss_budget_ms=20000, potion_costs=[7, 9, 11],
+                   final_boss_potion_costs=[1, 1, 1], beam_portfolio=False)
+    engine = StepRecorder(dict(potion_costs=[7, 9, 11], final_boss_priced=False))
+    anchor.solver_step(engine, {}, 5000, budgets, potions=True)
+    assert engine.options == dict(budget_ms=5000, boss_budget_ms=20000, reuse_turn_plan=True, potion_costs=[7, 9, 11],
+                                  final_boss_potion_costs=[1, 1, 1], beam_portfolio=False, potions=True)
+    # The run's last fight is searched at its own prices.
+    anchor.solver_step(StepRecorder(dict(potion_costs=[1, 1, 1], final_boss_priced=True)), {}, 20000, budgets)
+    for search, reason in [(dict(potion_costs=[1, 1, 1], final_boss_priced=False), 'solver_worker_without_potion_costs'),
+                           (dict(potion_costs=[7, 9, 11]), 'solver_worker_without_final_boss_costs')]:
+        with pytest.raises(ValueError, match=reason):
+            anchor.solver_step(StepRecorder(search), {}, 5000, budgets)
+    # A step that did not search has nothing to check.
+    anchor.solver_step(StepRecorder(None), {}, 5000, budgets)
+    plain = StepRecorder(dict(potion_costs=[9, 14, 18]))
+    anchor.solver_step(plain, {}, 5000, dict(budget_ms=5000, elite_budget_ms=5000, boss_budget_ms=20000))
+    assert 'potion_costs' not in plain.options and 'beam_portfolio' not in plain.options
+
+
+def test_a_search_must_report_the_time_it_kept_for_potions():
+    budgets = dict(budget_ms=5000, elite_budget_ms=5000, boss_budget_ms=20000, potion_reserve=0.3)
+    engine = StepRecorder(dict(potion_reserve_ms=0))
+    anchor.solver_step(engine, {}, 5000, budgets)
+    assert engine.options['potion_reserve'] == 0.3
+    # A worker that does not know the share searches without it and names no kept time.
+    with pytest.raises(ValueError, match='solver_worker_without_potion_reserve'):
+        anchor.solver_step(StepRecorder(dict(potion_costs=[9, 14, 18])), {}, 5000, budgets)
+    plain = StepRecorder(dict(potion_costs=[9, 14, 18]))
+    anchor.solver_step(plain, {}, 5000, dict(budgets, potion_reserve=0))
+    assert 'potion_reserve' not in plain.options
+
+
 def test_type_sequence_determines_a_route_only_when_one_path_spells_it():
     kinds = {'0,0': 'ancient', '0,1': 'monster', '1,1': 'monster', '0,2': 'shop', '1,2': 'elite', '0,3': 'boss'}
     edges = {'0,0': ['0,1', '1,1'], '0,1': ['0,2'], '1,1': ['1,2'], '0,2': ['0,3'], '1,2': ['0,3']}
@@ -366,7 +409,7 @@ def test_native_enchantment_amount_and_ascension_reach_the_model_input():
         assert [c['enchantment_amount'] for c in cards] == [amount]
         hero = next(e for e in frame['public']['entities'] if e.get('entity_type') == 'player')
         assert hero['ascension'] == ascension == frame['contract']['fixed_ascension']
-        assert frame['contract']['observation_schema'] == 'public-state-v6'
+        assert frame['contract']['observation_schema'] == 'public-state-v7'
         digests[ascension, amount] = observation(frame).digest
     # What the game shows differently, the model is given differently.
     assert len(set(digests.values())) == 3
@@ -663,3 +706,24 @@ def test_final_deck_settles_which_copy_an_upgrade_meant():
     states, info = anchor.node_states(run, base)
     assert info['error'] == 'floor_1:ambiguous_card_instance:CARD.STRIKE_IRONCLAD' and states[1, 2]['start'] is None
 
+
+
+def test_a_failed_choice_transaction_names_the_mismatch_that_failed_it():
+    trace = ('System.InvalidOperationException: choice_transaction_failed transaction=41\n'
+             ' ---> System.InvalidOperationException: choice_transaction_mismatch transaction=41 request=2 '
+             'entry=FromCombatPile: target mismatch: CARD.STRIKE source_occurrence=1\n'
+             '   --- End of inner exception stack trace ---\n   at CombatSolverCli.ChoiceTransaction.Check()')
+    reply = dict(type='error', message='choice_transaction_failed transaction=41', stack_trace=trace)
+    assert anchor.solver_failure(reply) == ('solver_failed:choice_transaction_failed transaction=41 (choice_transaction_mismatch '
+                                            'transaction=41 request=2 entry=FromCombatPile: target mismatch: '
+                                            'CARD.STRIKE source_occurrence=1) @ CombatSolverCli.ChoiceTransaction.Check')
+    # An error of the solver itself names where it was thrown.
+    thrown = dict(type='error', message='回合开始选牌时找不到 WOUND+0#0。', stack_trace=(
+        'CombatSolver.InvalidPlannedChoiceBranchException: 回合开始选牌时找不到 WOUND+0#0。\n'
+        '   at CombatSolver.TurnStartChoiceSupport.ResolveTokens(PlanCardChoice choice, Int32 minCount)\n'
+        '   at CombatSolver.TurnStartChoiceSupport.Apply(CombatPredictionSimulator simulator)\n'
+        '   at CombatSolver.CombatBeamSolver.Replay()\n   at CombatSolver.CombatBeamSolver.Solve()'))
+    assert anchor.solver_failure(thrown) == ('solver_failed:回合开始选牌时找不到 WOUND+0#0。 @ CombatSolver.TurnStartChoiceSupport.ResolveTokens'
+                                             ' < CombatSolver.TurnStartChoiceSupport.Apply < CombatSolver.CombatBeamSolver.Replay')
+    assert anchor.solver_failure(dict(type='error', message='other')) == 'solver_failed:other'
+    assert anchor.solver_failure(dict(type='weird')) == 'solver_failed:weird'

@@ -6,7 +6,7 @@
 | --- | --- |
 | `ModEntry.cs` | 初始化（无头环境下不加载）、计时器、Harmony 补丁安装、`settings.json` 的读写 |
 | `Recorder.cs`、`Journal.cs`、`Patches.cs`、`InputSnapshot.cs`、`Origin.cs` | 录制：输入前后的快照、动作来源（actor 与证据）、按局写 JSON Lines |
-| `Snapshot.cs` | 公开状态快照（含公开历史与事件、营火选项的 `displayed_names`） |
+| `Snapshot.cs` | 公开状态快照（含公开历史与事件、营火选项的 `displayed_names`，以及出牌区的牌：`snapshot.py` 在非空时转成 zone `play`，与无头引擎相同；之前的录制导出的是牌堆对象，转换后没有出牌区） |
 | `Selection*.cs` | 选择界面的捕获：候选、约束与元数据，提交顺序重建的标签路径 |
 | `LiveBridge.cs`、`Pending.cs` | 控制桥接：请求循环、协议、待执行动作与令牌 |
 | `LiveUi.cs`、`LiveRewards.cs` | 按人手点击的界面生命周期推进界面、领取奖励 |
@@ -54,4 +54,4 @@ Python 控制端对只有一个可用事件选项、其余仅能丢药的事件�
 
 - 不要用 headless 修改过的游戏 DLL 构建 Mod。
 - 仓库与已安装 Mod 的源码不一致时，从 DLL 内嵌的 PDB 提取原始源码对照，不要反编译。
-- 一局赢下时游戏会结束两次：`RunManager.WinRun()` 先调 `OnEnded(isVictory: true)`，再 `GuaranteeKillAllPlayers()`，玩家死亡的路径（`CreatureCmd`）又调一次 `OnEnded(isVictory: false)`。挂在 `OnEnded` 上的补丁两次都会运行，所以胜负只认同一局的第一次（`LiveBridge.RunEnded`；录制器由 `EnsureRun` 挡住第二次）。0.6.2 之前桥接取最后一次，`bridge/runs.jsonl` 把胜局记成 `victory: false`。这条路径在无头引擎里不出现（游戏在测试模式下不走它），只能实机验证。
+- 一局赢下时游戏会结束两次：`RunManager.WinRun()` 先调 `OnEnded(isVictory: true)`，再 `GuaranteeKillAllPlayers()`，玩家死亡的路径（`CreatureCmd`）又调一次 `OnEnded(isVictory: false)`。挂在 `OnEnded` 上的补丁两次都会运行，所以胜负只认同一局的第一次（`LiveBridge.RunEnded`；录制器由 `EnsureRun` 挡住第二次）。0.6.2 之前桥接取最后一次，`bridge/runs.jsonl` 把胜局记成 `victory: false`。这条路径在无头引擎里不出现（游戏在测试模式下不走它），只能实机验证；0.6.2 已在实机赢局上核对过，记为 `victory: true`。

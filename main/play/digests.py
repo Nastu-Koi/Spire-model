@@ -60,11 +60,20 @@ def decision(index, macro, frame):
             any(bool(step.get("explored")) for step in steps), any(bool(step.get("forked")) for step in steps)]
 
 
+def frameless(run):
+    """How many of a run's macro-actions kept no frames: the fights of a segment played
+    with greedy fights (`RolloutRunner.greedy_fights`), which have no line of their own
+    and no advantage."""
+    return sum("steps" not in macro for macro in run["macros"])
+
+
 def line(run, decisions):
     """A segment's line of its wave's digest, as a gzip member: the members of a wave's
-    segments, written one after another, read back as one gzip file."""
+    segments, written one after another, read back as one gzip file. `frameless` counts
+    the macro-actions it has no line for (`frameless`)."""
     text = json.dumps(dict(run_id=run["run_id"], group=run["group"], character=run["character"],
-                           outcome=run["outcome"], ascension=run.get("ascension"), decisions=decisions),
+                           outcome=run["outcome"], ascension=run.get("ascension"), decisions=decisions,
+                           frameless=frameless(run)),
                       ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     return gzip.compress((text + "\n").encode("utf-8"), compresslevel=6, mtime=0)
 

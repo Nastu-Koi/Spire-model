@@ -12,4 +12,4 @@ def test_choice_transaction_contract():
     result = subprocess.run(['dotnet', 'run', '--project', str(project), '-v:q'],
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert 'PASS 33 transaction cases' in result.stdout
+    assert 'PASS 46 transaction cases' in result.stdout

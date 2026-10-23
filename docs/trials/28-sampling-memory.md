@@ -1,7 +1,7 @@
 # 采样与加载的内存、并发小项
 
 - **时间**：2026-10-07 ~ 2026-10-12（BC 加载与多进程采样阶段）；2026-10-17（幕组采样内存）
-- **来源**：`.scratch/a0-training-baseline/implementation-report.md`（第五批）；`.scratch/a0-training-baseline/issues/25-a10-battles-large-budget.md`；`.scratch/joint-training/issues/11-sampling-memory.md`；多进程采样的数字据记忆记录（原工单 a0 `issues/09–11` 已不在磁盘）
+- **来源**：`.scratch/a0-training-baseline/implementation-report.md`（第五批）；`.scratch/a0-training-baseline/issues/25-a10-battles-large-budget.md`；`.scratch/joint-training/issues/throughput.md`（11）；多进程采样的数字据记忆记录（原工单 a0 `issues/09–11` 已不在磁盘）
 - **状态**：被否决。下列几项都没有降低内存或提高吞吐；真正有效的两项修法（训练前 fork 并复用采样进程、分片行按压缩帧流式写出）保留在代码里。
 
 ## 动机

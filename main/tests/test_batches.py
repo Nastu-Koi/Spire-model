@@ -7,7 +7,7 @@ import json
 import pytest
 
 from main.learn import advantage
-from main.learn import batches as awr
+from main.learn import batches as awr, streams
 from main.learn.advantage import FILE
 from main.data import shards
 from main.data.shards import RunShards, group_weights, samples
@@ -58,43 +58,43 @@ def test_a_decision_of_a_small_group_of_the_buffer_weighs_no_more_than_the_cap()
 
     # A phase met twice in a round would give each of its decisions a sixth of the buffer's weight.
     counts = {group("Ironclad", "map"): 1000, group("Ironclad", "shop"): 500, group("Silent", "bundle_select"): 2}
-    plain = awr.buffer_weights(counts, cap=0)
+    plain = streams.buffer_weights(counts, cap=0)
     assert plain == group_weights(counts) and plain[group("Silent", "bundle_select")] == pytest.approx(1 / 6)
     even = 1 / 1502
-    weights = awr.buffer_weights(counts)
-    assert weights[group("Silent", "bundle_select")] == pytest.approx(awr.WEIGHT_CAP * even)
+    weights = streams.buffer_weights(counts)
+    assert weights[group("Silent", "bundle_select")] == pytest.approx(streams.WEIGHT_CAP * even)
     # What it leaves of its share is the other groups', equally.
-    left = 1 - 2 * awr.WEIGHT_CAP * even
+    left = 1 - 2 * streams.WEIGHT_CAP * even
     assert weights[group("Ironclad", "map")] == pytest.approx(left / 2 / 1000)
     assert weights[group("Ironclad", "shop")] == pytest.approx(left / 2 / 500)
     assert sum(weights[key] * count for key, count in counts.items()) == pytest.approx(1.0)
     # Groups that can carry their share at the cap keep the plain rule.
     even_groups = {group("Ironclad", "map"): 300, group("Silent", "map"): 100, group("Defect", "shop"): 50}
-    assert awr.buffer_weights(even_groups) == group_weights(even_groups)
+    assert streams.buffer_weights(even_groups) == group_weights(even_groups)
     # The share a capped group gives up may bring the next smallest over the cap in turn.
     counts = {group("Ironclad", "map"): 1000, group("Ironclad", "event"): 40, group("Silent", "bundle_select"): 2}
-    limit = awr.WEIGHT_CAP / 1042
+    limit = streams.WEIGHT_CAP / 1042
     assert group_weights(counts)[group("Ironclad", "event")] < limit
-    weights = awr.buffer_weights(counts)
+    weights = streams.buffer_weights(counts)
     assert weights[group("Ironclad", "event")] == weights[group("Silent", "bundle_select")] == pytest.approx(limit)
     assert weights[group("Ironclad", "map")] == pytest.approx((1 - 42 * limit) / 1000) and weights[group("Ironclad", "map")] < limit
     assert sum(weights[key] * count for key, count in counts.items()) == pytest.approx(1.0)
-    assert awr.buffer_weights(counts, cap=1.0) == {key: pytest.approx(1 / 1042) for key in counts}
+    assert streams.buffer_weights(counts, cap=1.0) == {key: pytest.approx(1 / 1042) for key in counts}
     with pytest.raises(ValueError):
-        awr.buffer_weights(counts, cap=0.5)
+        streams.buffer_weights(counts, cap=0.5)
     # Even phase weights: every decision alike, the cap beside the point; an empty group has no weight.
-    even = awr.buffer_weights({**counts, group("Defect", "shop"): 0}, phase_weights="even")
+    even = streams.buffer_weights({**counts, group("Defect", "shop"): 0}, phase_weights="even")
     assert even == {key: pytest.approx(1 / 1042) for key in counts}
-    assert awr.buffer_weights(counts, cap=0, phase_weights="even") == even
+    assert streams.buffer_weights(counts, cap=0, phase_weights="even") == even
     with pytest.raises(ValueError):
-        awr.buffer_weights(counts, phase_weights="uniform")
+        streams.buffer_weights(counts, phase_weights="uniform")
 
 
 def test_a_batch_is_shared_out_in_proportion_and_adds_up():
-    assert awr.sizes(512, {"anchor": 0.2, "act1": 0.4, "act2": 0.4}) == {"anchor": 102, "act1": 205, "act2": 205}
-    assert sum(awr.sizes(7, {"a": 1, "b": 1, "c": 1}).values()) == 7
+    assert streams.sizes(512, {"anchor": 0.2, "act1": 0.4, "act2": 0.4}) == {"anchor": 102, "act1": 205, "act2": 205}
+    assert sum(streams.sizes(7, {"a": 1, "b": 1, "c": 1}).values()) == 7
     with pytest.raises(ValueError):
-        awr.sizes(2, {"a": 1, "b": 1, "c": 1})
+        streams.sizes(2, {"a": 1, "b": 1, "c": 1})
 
 
 def test_every_stream_of_an_update_reads_with_feeders_for_its_share_and_at_least_two():
@@ -104,10 +104,10 @@ def test_every_stream_of_an_update_reads_with_feeders_for_its_share_and_at_least
     # decoding its next shards stalls its stream, and the joint batch with it. The
     # wave that fills three quarters of every batch gets three of the four.
     shares = {"act1": 0.07, "act2": 0.18, "act3": 0.75}
-    assert awr.stream_feeders(TrainConfig(loader_feeders=4), shares) == {"act1": 2, "act2": 2, "act3": 3}
-    assert awr.stream_feeders(TrainConfig(loader_feeders=9), shares) == {"act1": 2, "act2": 2, "act3": 7}
-    assert awr.stream_feeders(TrainConfig(loader_feeders=4), {"only": 1.0}) == {"only": 4}
-    assert awr.stream_feeders(TrainConfig(loader_feeders=1), {"only": 1.0}) == {"only": awr.STREAM_FEEDERS} and awr.STREAM_FEEDERS == 2
+    assert streams.stream_feeders(TrainConfig(loader_feeders=4), shares) == {"act1": 2, "act2": 2, "act3": 3}
+    assert streams.stream_feeders(TrainConfig(loader_feeders=9), shares) == {"act1": 2, "act2": 2, "act3": 7}
+    assert streams.stream_feeders(TrainConfig(loader_feeders=4), {"only": 1.0}) == {"only": 4}
+    assert streams.stream_feeders(TrainConfig(loader_feeders=1), {"only": 1.0}) == {"only": streams.STREAM_FEEDERS} and streams.STREAM_FEEDERS == 2
 
 
 def test_the_waves_share_a_batch_by_their_decisions_unless_told_otherwise():
@@ -126,7 +126,7 @@ def test_the_waves_share_a_batch_by_their_decisions_unless_told_otherwise():
         awr.wave_shares({"act1": 0, "act2": 0})
     # A pass of ΣN / B batches at these shares sees each wave's decisions once, up to
     # the rounding of each batch's sizes and of the pass to whole batches.
-    sizes = awr.sizes(512, awr.wave_shares(macros))
+    sizes = streams.sizes(512, awr.wave_shares(macros))
     updates = awr.pass_updates(macros, 512)
     assert updates == -(-10000 // 512)
     for wave, count in macros.items():

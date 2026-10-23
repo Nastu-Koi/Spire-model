@@ -48,7 +48,7 @@ class SyntheticEngine:
     def contract(self):
         return {
             "adapter_version": "synthetic-v1",
-            "observation_schema": "public-state-v6",
+            "observation_schema": "public-state-v7",
             "public_history_version": "public-history-v1",
             "action_schema": "candidate-v1",
             "fixed_ascension": getattr(self, "ascension", 10),

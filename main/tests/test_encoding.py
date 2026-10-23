@@ -171,6 +171,30 @@ def test_a_map_node_an_action_refers_to_stays_an_entity():
     assert "map:2:1" in obs.refs and len(obs.effects[obs.refs["map:2:1"]].nodes) == 3
 
 
+def test_the_card_being_played_is_an_entity_of_its_zone():
+    # A card that opens a selection while it resolves stays in the play pile (public-state-v7).
+    player = {"ref": "player", "entity_type": "player", "hp": 60, "max_hp": 80}
+    played = {"ref": "card:0", "entity_type": "card", "content_id": "CARD.HEADBUTT", "zone": "play",
+              "position": 0, "owner_ref": "player"}
+    offered = [{"ref": f"card:{i}", "entity_type": "card", "content_id": content, "zone": "discard_pile",
+                "owner_ref": "player"} for i, content in ((1, "CARD.STRIKE_IRONCLAD"), (2, "CARD.BASH"))]
+    selection = frame([player, played, *offered],
+                      [action(f"card:{i}", "SELECT_ONE", source=[f"card:{i}"]) for i in (1, 2)],
+                      phase="card_select")
+    selection["public"]["selection_context"] = {
+        "mode": "buffered", "operation": "unknown", "source": "discard_pile", "destination": "unknown",
+        "selected_refs": [], "selected_count": 0, "min_total": 1, "max_total": 1, "remaining_required": 1,
+        "can_finish": False, "can_skip": False, "can_cancel": False, "repetition_allowed": False,
+        "order_matters": True,
+        "known_masks": {"operation": False, "source": True, "destination": False, "order_matters": False}}
+    model, vocabulary = build([selection])
+    logits(model, vocabulary, [selection])
+    assert not vocabulary.unregistered()
+    # A schema symbol: a checkpoint's table saved without it gains it when expanded.
+    assert "zone=play" in Vocabulary.from_frames([], ModelConfig.tiny()).lookup
+    assert any(f.symbol == "zone=play" for row in observation(selection).tokens for f in row)
+
+
 def test_entity_order_is_not_an_input():
     base = map_frame()
     shuffled = copy.deepcopy(base)

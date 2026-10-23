@@ -1,7 +1,7 @@
 # 两级链的幕组
 
 - **时间**：2026-10-15 设计并测量（joint-training 07 阶段 03），当天测完改为三级链。
-- **来源**：`.scratch/joint-training/issues/07-act-groups.md`（方案 1、阶段 03 Comments、`assets/act-group-signal.json`）。
+- **来源**：`.scratch/joint-training/issues/act-groups-grpo.md`（07 的方案 1、阶段 03 Comments、`assets/act-group-signal.json`）。
 - **状态**：被三级链取代。后段组信号成立，前段组信号太弱。
 
 ## 动机

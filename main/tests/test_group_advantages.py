@@ -11,10 +11,10 @@ import pytest
 
 from main.data.shards import RunShards
 from main.env.protocol import CHARACTERS
-from main.learn import advantage
+from main.learn import advantage, batches
 from main.learn.features import NAMES
-from main.learn.groups import (Decision, Segment, advantages, fit, headers, read_waves, returns, share, tree,
-                               wave_advantages)
+from main.learn.groups import advantages, headers, share, wave_advantages
+from main.learn.segments import Decision, Segment, fit, read_waves, returns, tree
 from main.play import digests
 from main.play.digests import where
 from main.play.groups import sample_groups
@@ -104,6 +104,45 @@ def test_the_baseline_is_fitted_within_groups_and_its_corrections_sum_to_zero():
     assert stats["between_share"] is not None and stats["uniform_groups"] == 0
 
 
+def test_dropping_the_uniform_groups_leaves_their_decisions_unpriced_and_out_of_the_baseline():
+    # Two groups whose returns rise with HP, and two whose segments all came to one
+    # return whatever their HP: fitted on, the latter pull the weight on HP towards zero.
+    members = {}
+    for g, outcomes in (("g0", ("loss", "win", "loss", "win")), ("g1", ("loss", "win", "loss", "win")),
+                        ("g2", ("win",) * 4), ("g3", ("loss",) * 4)):
+        for k, (hp, outcome) in enumerate(zip((0.2, 0.9, 0.5, 0.8), outcomes)):
+            members.setdefault(g, []).append(segment(
+                f"{g}-{k}", g, outcome, [decision(0, f"{g}-{k}-0", "a", hp_ratio=hp),
+                                         decision(1, f"{g}-{k}-1", "a", hp_ratio=hp + 0.05)]))
+    members["g0"][0].decisions[1].explored = members["g2"][0].decisions[1].explored = True
+    table = {s.run_id: 1.0 if s.outcome == "win" else -1.0 for group in members.values() for s in group}
+    wave = [s for group in members.values() for s in group]
+    kept = members["g0"] + members["g1"]
+    runs, stats = wave_advantages(wave, table, ridge=0.01)
+    dropped_runs, dropped = wave_advantages(wave, table, ridge=0.01, drop_uniform=True)
+    # Without the switch every group is priced.
+    assert set(runs) == {s.run_id for s in wave} and "dropped" not in stats
+    assert (stats["groups"], stats["uniform_groups"], stats["explored"]["decisions"]) == (4, 2, 2)
+    # With it the uniform groups' segments have no advantage, as a segment without a return has none.
+    assert set(dropped_runs) == {s.run_id for s in kept}
+    assert dropped["dropped"] == dict(groups=2, segments=8, decisions=16)
+    assert (dropped["segments"], dropped["decisions"], dropped["explored"]["decisions"]) == (8, 16, 1)
+    # The groups kept are priced as though the wave held them alone: the baseline is theirs.
+    alone_runs, alone = wave_advantages(kept, table, ridge=0.01)
+    assert dropped_runs == alone_runs
+    assert dropped["baseline"] == alone["baseline"] and dropped["baseline"]["fitted"] == 16
+    assert dropped["tree"] == alone["tree"] and dropped["explored"] == alone["explored"]
+    assert dropped["baseline"]["weights"]["hp_ratio"] > stats["baseline"]["weights"]["hp_ratio"]
+    # What the groups came to is still told of all of them.
+    for key in ("groups", "uniform_groups", "return_mean", "between_share"):
+        assert dropped[key] == stats[key]
+    for level, counts in stats["by_ascension"].items():
+        assert {key: value for key, value in dropped["by_ascension"][level].items() if key != "explored"} == \
+            {key: value for key, value in counts.items() if key != "explored"}
+    # A wave without a uniform group is priced alike with the switch or without.
+    assert wave_advantages(kept, table, ridge=0.01, drop_uniform=True)[0] == alone_runs
+
+
 def test_the_between_group_share_tells_group_means_from_noise():
     rng = np.random.default_rng(0)
     apart = [[m + rng.normal(0, 0.1) for _ in range(8)] for m in np.linspace(-1, 1, 20)]
@@ -135,6 +174,34 @@ def test_a_sampled_round_of_groups_gets_advantages_for_every_decision(tmp_path):
     # Written once: asking again reads the headers back.
     assert advantages(tmp_path / "groups") == written
     assert all(written[wave]["stats"]["forked"]["decisions"] == 0 for wave in written)
+
+
+def test_a_round_priced_without_its_uniform_groups_trains_on_the_rest(tmp_path):
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, runner(policy), seeds, tmp_path / "groups", n=2, m=2, boundaries=BOUNDARIES)
+    waves = ["act1", "act2", "act3"]
+    plain = advantages(tmp_path / "groups", processes=2)
+    kept = {wave: unzipped(tmp_path / "groups" / wave / advantage.FILE) for wave in waves}
+    # Priced again with the switch: the round's advantages are another, and are computed anew.
+    dropped = advantages(tmp_path / "groups", processes=2, drop_uniform=True)
+    assert sum(dropped[wave]["stats"]["dropped"]["groups"] for wave in waves) > 0
+    for wave in waves:
+        head, before = dropped[wave], plain[wave]
+        stats = head["stats"]
+        assert head["drop_uniform_groups"] is True and "drop_uniform_groups" not in before
+        assert stats["dropped"]["groups"] == stats["uniform_groups"] == before["stats"]["uniform_groups"]
+        assert stats["groups"] == before["stats"]["groups"]
+        assert head["runs"] + stats["dropped"]["segments"] == before["runs"]
+        assert head["decisions"] + stats["dropped"]["decisions"] == before["decisions"]
+        # What an update reads of the wave is the segments kept.
+        shards, table = batches.priced(tmp_path / "groups" / wave)
+        assert shards.macros == len(table) == head["decisions"] and len(shards.rows) == head["runs"]
+    assert advantages(tmp_path / "groups", processes=2, drop_uniform=True) == dropped
+    # Without the switch again: as they were, to the byte.
+    assert advantages(tmp_path / "groups", processes=2) == plain
+    assert {wave: unzipped(tmp_path / "groups" / wave / advantage.FILE) for wave in waves} == kept
 
 
 def test_the_shards_of_every_wave_are_read_in_one_pool_as_in_one_process(tmp_path):
@@ -227,3 +294,52 @@ def test_a_forked_round_compares_the_two_halves_of_every_group_at_its_first_choi
         assert stats["tree"]["branching_nodes"] >= stats["groups"]
         # Each half is measured against the other: their advantages are opposite.
         assert stats["forked"]["positive"] == stats["forked"]["negative"]
+
+
+def test_a_round_with_greedy_fights_prices_and_trains_the_decisions_outside_them_alone(tmp_path):
+    from main.data.shards import samples
+    from main.learn import streams
+    from main.learn.clipped import with_advantages
+    from main.tests.test_groups import greedy
+
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    directory = tmp_path / "groups"
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, greedy(policy), seeds, directory, n=2, m=2, boundaries=BOUNDARIES)
+    waves = ["act1", "act2", "act3"]
+    written = advantages(directory, processes=2)
+    for wave in waves:
+        head = written[wave]
+        # No decision of a fight has an advantage; the header counts those left out.
+        assert head["stats"]["fights"]["decisions"] == 0 and head["stats"]["fights"]["excluded"] > 0
+        shards, table = batches.priced(directory / wave)
+        assert shards.macros == len(table) == head["decisions"] and len(shards.rows) == head["runs"]
+        assert all(phase != "combat" for _, phase, _ in shards.source_counts)
+        runs = [run for window in shards.windows(shards=8) for run in window]
+        by_id = {run["run_id"]: run for run in runs}
+        assert all(by_id[run_id]["macros"][index]["fight"] is None for run_id, index in table)
+        # What an update's stream of the wave reads: the decisions outside the fights,
+        # each with its advantage; the fights in no batch and no count.
+        items = samples(runs, weights=streams.buffer_weights(shards.source_counts))
+        assert {(item.run_id, item.index) for item in items} == set(table)
+        assert all(item.macro["fight"] is None and item.temperature == 0.8 for item in items)
+        weights = streams.buffer_weights(shards.source_counts)
+        read = list(streams.batches(policy, shards, weights, 8, 8, 2)())
+        priced, done = with_advantages(table, wave, 1.0)([part for batch in read for part in batch])
+        assert done["samples"] == len(table)
+        assert all(item.macro["fight"] is None for micro, _ in priced for item in micro)
+    # Read from the shards, a wave is what its digest says, the fights left out alike.
+    for wave in waves:
+        (directory / wave / digests.FILE).rename(tmp_path / f"{wave}.digest")
+    from_shards = read_waves(directory, waves, processes=1)
+    for wave in waves:
+        (tmp_path / f"{wave}.digest").rename(directory / wave / digests.FILE)
+    assert read_waves(directory, waves, processes=1) == from_shards
+    assert all(segment.frameless > 0 for wave in waves for segment in from_shards[wave])
+    # Without greedy fights every fight's decision is priced and none is left out.
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, runner(policy), seeds, tmp_path / "plain", n=2, m=2, boundaries=BOUNDARIES)
+    plain = advantages(tmp_path / "plain", processes=2)
+    assert all(plain[wave]["stats"]["fights"]["decisions"] > 0 and plain[wave]["stats"]["fights"]["excluded"] == 0
+               for wave in waves)

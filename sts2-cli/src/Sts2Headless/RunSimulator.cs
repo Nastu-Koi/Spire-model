@@ -183,6 +183,23 @@ public partial class RunSimulator
     private int _lastKnownHp;
     private readonly HeadlessCardSelector _cardSelector = new();
     private IDisposable? _selectorScope;
+
+    // The headless selector answers both as the test selector and as the local player's:
+    // a selection with a choice context takes the local player's path, which signals the
+    // pause the game's turn order depends on (SelectionMetadata).
+    private IDisposable InstallSelector()
+    {
+        var shared = CardSelectCmd.UseSelector(_cardSelector);
+        return new Scopes(CardSelectCmd.UseSelector(_cardSelector, localOnly: true), shared);
+    }
+
+    private sealed class Scopes(params IDisposable[] scopes) : IDisposable
+    {
+        public void Dispose()
+        {
+            foreach (var scope in scopes) scope.Dispose();
+        }
+    }
     private readonly PendingOperation _pendingOperation = new();
     // Pending bundle selection (Scroll Boxes: pick 1 of N packs)
     private IReadOnlyList<IReadOnlyList<CardModel>>? _pendingBundles;
@@ -350,7 +367,7 @@ public partial class RunSimulator
             Log("Entered Act 0");
 
             // Register card selector for cards that need player choice
-            _selectorScope = CardSelectCmd.UseSelector(_cardSelector);
+            _selectorScope = InstallSelector();
             LocPatches._bundleSimRef = this;
 
             // Now we should be at the map — detect decision point
@@ -596,7 +613,7 @@ public partial class RunSimulator
 
             CombatManager.Instance.TurnStarted += OnTurnStarted;
             CombatManager.Instance.CombatEnded += OnCombatEnded;
-            _selectorScope = CardSelectCmd.UseSelector(_cardSelector);
+            _selectorScope = InstallSelector();
             LocPatches._bundleSimRef = this;
 
             var savedRoom = _runState.CurrentRoom;
@@ -909,7 +926,13 @@ public partial class RunSimulator
             else
             {
                 Log($"Saving pre-room checkpoint from {currentRoom.GetType().Name} (outputPath={outputPath})...");
-                serializableRun = RunManager.Instance.ToSave(new MapRoom());
+                // During a fight: the run as the room was entered, without what the
+                // fight's start did to it. Elsewhere, and after a fight's end, the run
+                // as it stands.
+                var entered = CombatManager.Instance.IsInProgress ? RoomEntrySave.For(currentRoom) : null;
+                serializableRun = entered != null
+                    ? SaveManager.FromJson<SerializableRun>(entered).SaveData!
+                    : RunManager.Instance.ToSave(new MapRoom());
                 if (!TryRollbackSerializedSaveToPreRoom(serializableRun, out var rollbackError))
                     return Error($"Cannot save checkpoint: {rollbackError}");
             }
@@ -3146,6 +3169,7 @@ public partial class RunSimulator
         SelectionMetadata.Install();
         HeadlessEventPresentation.Install();
         NativeContinuations.Install();
+        RoomEntrySave.Install();
         Spire.PublicHistory.NativeHistory.Install(new HarmonyLib.Harmony("local.sts2.public-history"));
 
         // Initialize localization system (needed for events, cards, etc.)

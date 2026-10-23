@@ -145,7 +145,7 @@ def names_from_frames(frames):
     categories = {
         "phase": "combat map event rest_site shop treasure rewards card_reward card_select bundle_select crystal_sphere",
         "entity_type": "global action player card pile_summary enemy summon intent previous_intent history_probability history_rule known_draw_position orb_slots orb power relic potion map_node displayed_variable event event_option rest_option shop_item reward reward_alternative bundle event_state tool board_cell event_context",
-        "zone": "deck hand draw_pile discard_pile exhaust_pile selection reward treasure shop",
+        "zone": "deck hand draw_pile discard_pile exhaust_pile play selection reward treasure shop",
         "operation": "unknown transform exhaust remove enchant discard upgrade copy obtain",
         "source": "unknown hand deck draw_pile discard_pile exhaust_pile",
         "destination": "unknown hand deck draw_pile discard_pile exhaust_pile removed",

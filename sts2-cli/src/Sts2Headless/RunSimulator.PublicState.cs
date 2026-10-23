@@ -91,6 +91,10 @@ public partial class RunSimulator
             snapshot.AddPile(pcs.DrawPile.Cards, "draw_pile");
             snapshot.AddPile(pcs.DiscardPile.Cards, "discard_pile");
             snapshot.AddPile(pcs.ExhaustPile.Cards, "exhaust_pile");
+            // A card being resolved sits in the play pile; a selection it opens shows it
+            // there. Empty between plays, it is then left out so those frames do not change.
+            if (pcs.PlayPile.Cards.Count > 0)
+                snapshot.AddPile(pcs.PlayPile.Cards, "play", ordered: true);
             if (combat != null)
             {
                 foreach (var creature in combat.Creatures.Where(c => !ReferenceEquals(c, player.Creature)))

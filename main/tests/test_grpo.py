@@ -9,7 +9,7 @@ import torch
 from main.commands import vocabulary_for
 from main.data.shards import samples
 from main.env.protocol import ProtocolError
-from main.learn.grpo import Clipped
+from main.learn.clipped import Clipped
 from main.network.config import ModelConfig
 from main.network.model import PolicyNetwork
 from main.network.policy import prepare_replay

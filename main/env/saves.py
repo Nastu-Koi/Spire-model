@@ -2,10 +2,12 @@
 
 A continue save written from inside a room holds the run as it was before the room
 was entered (the node is taken back out of the visited coordinates, the room cleared).
-Written at the first decision of a fight it enters the same fight again, with the same
-HP, gold, deck, relics, potions and enemies, the enemies' random HP and the opening
-hand drawn anew (`fight_resume_command`, `CliEngine.resume_fight`); written at a map
-decision it goes on from the map (`CliEngine.resume`). Act groups cut runs at both
+Written during a fight it is the run as the engine kept it when the fight's room was
+entered, before the fight's start acted on it (relics' heals, gold, potions and counts,
+the enemies' HP, the opening shuffle), and enters the same fight again as it began:
+the same actions play it the same way (`fight_resume_command`,
+`CliEngine.resume_fight`). Written at a map decision it goes on from the map
+(`CliEngine.resume`). Act groups cut runs at both
 (`main/play/groups.py`). `anchor_state` serializes the state with the room already
 entered and does not serve.
 """

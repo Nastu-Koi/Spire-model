@@ -7,6 +7,7 @@
 - 每项功能一个目录：`.scratch/<feature-slug>/`。
 - 规格的唯一维护位置为 `.scratch/<feature-slug>/spec.md`。
 - 拆分后的实施工单各占一个文件：`.scratch/<feature-slug>/issues/<NN>-<slug>.md`，编号从 01 开始。
+- 已结的工单可以按主题合并成一个文件（`issues/<主题>.md`），每张工单占一节（`## NN 标题`），编号不变；规格的工单表写明每个编号在哪个文件。
 - 规格和工单顶部使用 `Status:` 记录 triage 标签，取值见 `triage-labels.md`。
 - 若需要执行进度，另用 `Progress: pending | claimed | resolved`，与 triage 状态分开。
 - 评论追加到对应文件的 `## Comments`，保留先前记录。

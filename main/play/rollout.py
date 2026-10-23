@@ -21,6 +21,7 @@ from main.encoding.frames import clean_frame
 from main.env.rewards import MilestoneLedger
 from main.env.public_history import require_history_version
 from main.env.saves import FightTracker, continue_save
+from main.play.fights import FightLog
 
 
 # The precisions a run may be played at: bf16 autocasts the global layers, fp32 (or
@@ -157,8 +158,8 @@ FULL_RUNS = dict(trajectory=True, journal=True, combat_frames=True)
 # no frames and no journal; enough for its report and for `compare`.
 SUMMARY_RUNS = dict(trajectory="summary", journal=False, combat_frames=False)
 # Segments of runs played in act groups (`main/play/groups.py`): every frame, fights
-# included, no run file of its own (the segment makes a line in a shard), and the
-# continue save where a segment stops.
+# included (a round with greedy fights keeps none of theirs), no run file of its own
+# (the segment makes a line in a shard), and the continue save where a segment stops.
 SEGMENTS = dict(trajectory=False, journal=False, combat_frames=True, segment=True)
 
 
@@ -176,6 +177,7 @@ class RolloutRunner:
         claim_rewards=False,
         temperatures=None,
         explore_potions=0.0,
+        greedy_fights=False,
         iteration=None,
     ):
         if max_steps < 1 or timeout <= 0:
@@ -184,6 +186,10 @@ class RolloutRunner:
         temperatures = {"combat": 1.0, "other": 1.0} if temperatures is None else dict(temperatures)
         if set(temperatures) != {"combat", "other"} or not all(t > 0 for t in temperatures.values()):
             raise ValueError("The sampling temperatures must be positive, one for fights and one for the rest")
+        if type(greedy_fights) is not bool:
+            raise ValueError("Greedy fights are on or off")
+        if greedy_fights and any(explore_potions.values()):
+            raise ValueError("Greedy fights explore no potion use: their decisions are not drawn")
         if type(ascension) is not int or not 0 <= ascension <= 10:
             raise ValueError("Ascension must be an integer from 0 to 10")
         if iteration is not None and (type(iteration) is not int or iteration < 0):
@@ -208,6 +214,13 @@ class RolloutRunner:
         # log-probability of the action, as if the policy had drawn it; the update tells
         # it apart (`explored`) and holds it in a symmetric trust region.
         self.explore_potions = explore_potions
+        # Greedy fights: a sampled run takes every decision inside a fight by the
+        # policy's most likely action, as a greedy run does, and draws only the rest at
+        # their temperature. The fights are then the policy's fixed play, and whatever
+        # sets the segments of a group apart is the decisions outside them; a round of
+        # act groups keeps no frames of its fights (`groups.sample_groups`), so that no
+        # update learns from them. They explore nothing and are not forked.
+        self.greedy_fights = greedy_fights
         self._random = random.Random()
         # The sampling iteration the runs belong to.
         self.iteration = iteration
@@ -219,14 +232,34 @@ class RolloutRunner:
             self._digest = policy_digest(self.model)
         return self._digest
 
+    def variant(self, **changes):
+        """A runner of the same policy (model, vocabulary, digest) with some of its
+        settings changed: a round's fight groups are played by its runner without
+        greedy fights (`main.play.fight_groups`)."""
+        settings = dict(precision=self.precision, version=self.version, max_steps=self.max_steps,
+                        timeout=self.timeout, ascension=self.ascension, claim_rewards=self.claim_rewards,
+                        temperatures=self.temperatures, explore_potions=self.explore_potions,
+                        greedy_fights=self.greedy_fights, iteration=self.iteration)
+        if not set(changes) <= set(settings):
+            raise ValueError(f"A runner's settings are {sorted(settings)}")
+        runner = RolloutRunner(self.model, self.vocabulary, **{**settings, **changes})
+        # The same weights: hashed once.
+        runner._digest = self.digest
+        return runner
+
     def temperature_for(self, frame, sample=True, fight=None):
         """The temperature a decision of `frame` is drawn at: a fight's or the rest's.
         `fight` is the fight the decision belongs to (`saves.FightTracker`): a fight is
         what the engine's encounter events bound, so a selection made inside one (a
         discard, an exhaust) is drawn at the fight's temperature whatever its phase.
-        The most likely action, which a greedy run takes, is scored at 1."""
+        The most likely action, which a greedy run takes, is scored at 1. With
+        `greedy_fights` a sampled decision inside a fight is not drawn: None, it takes
+        the most likely action scored at 1 (`run`'s `choose`). The fight is the
+        tracker's alone, as it is for the frames a round keeps (`combat_frames`)."""
         if not sample:
             return 1.0
+        if self.greedy_fights and fight is not None:
+            return None
         inside = fight is not None or frame["public"]["phase"] == "combat"
         return self.temperatures["combat" if inside else "other"]
 
@@ -243,8 +276,8 @@ class RolloutRunner:
         return potions
 
     def run(self, engine, character, seed, *, sample=True, journal=None,
-            combat_frames=True, resume=None, until_act=None, until_boss=None, run_id=None, group=None,
-            fork=None, ascension=None, packed=False, _policy=None):
+            combat_frames=True, resume=None, until_act=None, until_boss=None, until_fight_end=False,
+            run_id=None, group=None, fork=None, ascension=None, packed=False, fight_entries=False, _policy=None):
         """Play one run, or a segment of one.
 
         With `resume` (a save a segment stopped at, as `save` below) the run goes on
@@ -259,17 +292,35 @@ class RolloutRunner:
         has `outcome` `win` or `loss`. `run_id` and `group` name the segment and the
         group of segments it belongs to (`main.play.groups`). With `fork` (`fork_ranks`:
         the segment's place in its group, the group's size, a depth) a sampled segment
-        takes its first decisions with a choice by the policy's order instead of a draw,
-        so that the group's segments part there two ways. `ascension` is the run's
+        takes its first decisions with a choice by the policy's order instead of a draw
+        (with `greedy_fights`, its first ones outside fights), so that the group's
+        segments part there two ways. `ascension` is the run's
         (the runner's own without one); a save goes on at the ascension it was
         written at, which must be the one asked for.
 
         Without `combat_frames` the macro-actions played inside fights keep their
         counts and log-probability but not their frames, which are most of a run.
         With `packed` the frames stay as the run held them while it was played
-        (`_pack`), for `packed_line` to write without building them again."""
+        (`_pack`), for `packed_line` to write without building them again.
+
+        With `fight_entries` the run keeps a record of every fight it plays and writes
+        the entry save of every fight not begun by an event (`fights.FightLog`), returned
+        as `fight_records`; the decisions and the frames are what they are without.
+
+        With `until_fight_end` a segment resumed from a fight's entry save (`resume` at
+        "fight") plays that fight alone: it stops at the first decision that does not
+        belong to the fight, which is not part of the segment (`outcome` `reached`, no
+        save), or with the run's end inside it (`win` or `loss`). The first decision of
+        another fight is such a decision: the last act's two bosses may follow each
+        other with no decision between them. The segment keeps its fight's record, the
+        HP after it taken at the decision it stopped at, as `fight_records`, and writes
+        no entry save: it was resumed from one."""
         if character not in CHARACTERS:
             raise ValueError("Unknown character")
+        if until_fight_end and (resume is None or resume.get("at") != "fight"):
+            raise ValueError("A segment plays to its fight's end from the fight's entry save")
+        if until_fight_end and (until_act is not None or until_boss is not None):
+            raise ValueError("A segment stops at its fight's end, at an act or at a boss fight, one of them")
         ascension = self.ascension if ascension is None else ascension
         if type(ascension) is not int or not 0 <= ascension <= 10:
             raise ValueError("Ascension must be an integer from 0 to 10")
@@ -301,10 +352,15 @@ class RolloutRunner:
         }
         if group is not None:
             trace["group"] = group
+        if sample and self.greedy_fights:
+            # Its fights' macro-actions record no temperature: they were not drawn.
+            trace["greedy_fights"] = True
         if until_act is not None and until_boss is not None:
             raise ValueError("A segment stops at an act or at a boss fight, not both")
         if resume is not None or until_act is not None or until_boss is not None:
             trace["segment"] = {"resumed": resume is not None, "until_act": until_act, "until_boss": until_boss}
+            if until_fight_end:
+                trace["segment"]["until_fight_end"] = True
             trace["outcome"] = None
         ledger = MilestoneLedger()
         policy = _policy or SessionPolicy(
@@ -314,18 +370,26 @@ class RolloutRunner:
         # A policy handed in draws its choices where the network runs; either is told
         # the temperature of each decision here, where the fight it belongs to is known.
         def choose(frame, fight, kind, *, sample, rank=None):
+            temperature = self.temperature_for(frame, sample, fight)
+            if temperature is None:
+                # A fight's decision with greedy fights: the most likely action, as a
+                # greedy run takes it, scored at 1; it explores and forks nothing.
+                return policy.choose(frame, sample=False, temperature=1.0)
             # A forking decision takes the candidate of its rank and explores nothing.
             restrict = None if rank is not None else self.exploration_for(frame, fight, sample, kind)
             # A policy that does not explore (a test double) is asked nothing it does not know.
             among = {} if restrict is None else {"restrict": restrict}
             if rank is not None:
                 among["rank"] = rank
-            return policy.choose(frame, sample=sample, temperature=self.temperature_for(frame, sample, fight), **among)
+            return policy.choose(frame, sample=sample, temperature=temperature, **among)
 
         pending_steps, current_segment, active_macro = [], None, None
-        branched = 0  # decisions with a choice so far: the first `len(ranks)` of them fork
+        branched = 0  # drawn decisions with a choice so far: the first `len(ranks)` of them fork
         waiting_since = None
         fights, stands = FightTracker(), []
+        # A segment played to its fight's end keeps the fight's record, not its entry save again.
+        log = FightLog(saves=not until_fight_end) if fight_entries or until_fight_end else None
+        started = None  # with `until_fight_end`, the fight the segment plays
         sink = Path(journal).open("w") if journal else nullcontext()
         self.model.eval()
         try:
@@ -371,6 +435,8 @@ class RolloutRunner:
                     fights.events(frame.get("events", []))
                     if boundary == "terminal":
                         fights.finish(victory)
+                        if log is not None:
+                            log.ended(frame, victory)
                         trace.update(status="complete", victory=victory)
                         if "segment" in trace:
                             trace["outcome"] = "win" if victory else "loss"
@@ -393,9 +459,27 @@ class RolloutRunner:
                         # The first decision of the act the segment stops at belongs to
                         # the next segment; the save there is where it goes on from.
                         trace["save"] = dict(at="act", save=continue_save(engine))
+                        if log is not None:
+                            log.passed(frame, None)
                         trace.update(status="complete", victory=None, outcome="reached", reached_act=act)
                         break
                     fight, entry = fights.decision()
+                    if entry is not None and fight == 1 and resume is not None and resume.get("at") == "fight":
+                        # The fight a run resumed at is its save's: begun there, the tracker
+                        # has not seen the act's first boss, which the save says it follows.
+                        entry = dict(entry, second_boss=bool(resume["fight"].get("second_boss", entry["second_boss"])))
+                    if log is not None:
+                        log.passed(frame, fight)
+                    if until_fight_end:
+                        if started is None:
+                            if entry is None:
+                                raise ProtocolError("A segment resumed at a fight began off its first decision")
+                            started = fight
+                        elif fight != started:
+                            # The first decision after the fight, or another fight's first:
+                            # its record took the HP after the fight here (`log.passed`).
+                            trace.update(status="complete", victory=None, outcome="reached")
+                            break
                     if entry and until_boss is not None and entry["kind"] == "boss" and not entry["second_boss"] \
                             and entry["act"] is not None and entry["act"] >= until_boss:
                         # The first decision of the boss fight the segment stops at: the
@@ -404,6 +488,8 @@ class RolloutRunner:
                         trace["save"] = dict(at="fight", save=continue_save(engine), fight=dict(entry, floor=floor))
                         trace.update(status="complete", victory=None, outcome="reached", reached_boss=entry["act"])
                         break
+                    if log is not None:
+                        log.entered(engine, frame, fight, entry, floor)
                     stands.append((act, floor, length))
                     automatic = environment_action(frame)
                     if automatic is None and self.claim_rewards:
@@ -420,9 +506,14 @@ class RolloutRunner:
                     if key != current_segment:
                         current_segment, pending_steps, active_macro = key, [], None
                     branching = len(frame["legal"]["candidates"]) > 1
-                    rank = ranks[branched] if branching and branched < len(ranks) else None
-                    branched += branching
+                    # A fight's decision taken greedily (`greedy_fights`) is not one of
+                    # them: the forks fall on the first drawn decisions with a choice.
+                    forking = branching and self.temperature_for(frame, sample, fight) is not None
+                    rank = ranks[branched] if forking and branched < len(ranks) else None
+                    branched += forking
                     choice = choose(frame, fight, fights.kind, sample=sample, rank=rank)
+                    if log is not None:
+                        log.chose(frame, fight, choice.candidate_ref)
                     # A frame played inside a fight is kept only where every frame is.
                     step = {
                         "frame": _pack(frame) if combat_frames or fight is None else None,
@@ -465,6 +556,8 @@ class RolloutRunner:
         reached, lengths = climbed(stands)
         trace["climb"] = {"reached": reached, "lengths": lengths}
         trace["fights"] = fights.tally()
+        if log is not None:
+            trace["fight_records"] = log.records(trace)
         for macro in trace["macros"]:
             steps = macro.pop("steps")
             if macro["fight"] is not None and not combat_frames:
@@ -548,13 +641,19 @@ def write_run(path, trace):
 
 
 def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, journal=True,
-         combat_frames=True, segment=False):
+         combat_frames=True, segment=False, fight_entries=False):
     """One job of a round: a run and, as the layout says (`FULL_RUNS`,
     `SUMMARY_RUNS`), its journal and its run file. With `segment` the job is
     (character, spec, None): a segment of a run (`main.play.groups`), `spec` naming
-    its seed, `run_id`, `group`, `until_act` or `until_boss`, its `ascension` if not
-    the runner's and, to go on from a save, the file the save is in (`resume`). Returns the run; one that no file of its own is written for
-    keeps its frames packed, for the line it makes in a shard (`packed_line`)."""
+    its seed, `run_id`, `group`, `until_act`, `until_boss` or `until_fight_end`, its
+    `ascension` if not the runner's and, to go on from a save, the file the save is in
+    (`resume`); with `until_fight_end` true it plays from a fight's entry save to the
+    fight's end and keeps the fight's record (`RolloutRunner.run`). With `fight_entries`
+    it keeps its fights' records and entry saves (`fights.FightLog`). Returns the run;
+    one that no file of its own is written for keeps its frames packed, for the line it
+    makes in a shard (`packed_line`)."""
+    if fight_entries and not segment:
+        raise ValueError("Fight entries are kept for the segments of act groups")
     if segment:
         from main.play.groups import read_save
 
@@ -562,9 +661,10 @@ def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, jour
         return runner.run(
             engine, character, spec["seed"], sample=sample, combat_frames=combat_frames,
             resume=read_save(spec["resume"]) if spec.get("resume") else None,
-            until_act=spec.get("until_act"), until_boss=spec.get("until_boss"), run_id=spec["run_id"],
+            until_act=spec.get("until_act"), until_boss=spec.get("until_boss"),
+            until_fight_end=spec.get("until_fight_end", False), run_id=spec["run_id"],
             group=spec["group"], fork=spec.get("fork"), ascension=spec.get("ascension"),
-            packed=not trajectory, _policy=policy)
+            packed=not trajectory, fight_entries=fight_entries, _policy=policy)
     character, seed, path = job
     trace = runner.run(
         engine,

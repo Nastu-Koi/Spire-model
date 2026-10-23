@@ -11,7 +11,8 @@ from main.data.index import read_index
 from main.data.shards import RunShards, validate_run
 from main.env.control import policy_macros
 from main.env.protocol import CHARACTERS, ProtocolError
-from main.learn.groups import advantages, read_waves
+from main.learn.groups import advantages
+from main.learn.segments import read_waves
 from main.network.policy import prepare_replay
 from main.play import digests
 from main.play.groups import cuts, groups_summary, per_wave, resume_jobs, sample_groups, save_rows, start_jobs, waves
@@ -374,3 +375,49 @@ def test_a_round_cut_at_a_boss_fight_plays_the_boss_wave_from_the_fights_saves(t
             assert frames(run)[0]["public"]["phase"] == "combat" and stand(frames(run)[0]) == (3, ACTS, None)
             assert run["fights"]["wins"] + run["fights"]["losses"] == 1
             validate_run(run, on_policy=True)
+
+
+def greedy(policy, iteration=0):
+    return RolloutRunner(policy.model, policy.vocabulary, version=policy.policy_version, precision="no",
+                         ascension=0, temperatures=TEMPERATURES, iteration=iteration, greedy_fights=True)
+
+
+def test_a_round_with_greedy_fights_keeps_no_frames_of_its_fights(tmp_path):
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    directory = tmp_path / "groups"
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        summary = sample_groups(pool, greedy(policy), seeds, directory, n=2, m=2, boundaries=BOUNDARIES,
+                                fork_depth=1)
+        with pytest.raises(ValueError, match="boss"):
+            sample_groups(pool, greedy(policy), seeds, tmp_path / "bosses", n=2, m=2, boundaries=BOUNDARIES,
+                          bosses=(3,))
+    assert summary["greedy_fights"] is True and summary["waves"] == ["act1", "act2", "act3"]
+    for wave in summary["waves"]:
+        # The round's decisions are those outside the fights: every segment forked at its
+        # first one, the fights' selections counted nowhere.
+        assert summary[wave]["phases"] and "combat" not in summary[wave]["phases"]
+        assert summary[wave]["forked"] == summary[wave]["written"]
+        runs = [run for window_ in RunShards(directory / wave).windows(shards=8) for run in window_]
+        frameless = 0
+        for run in runs:
+            assert run["greedy_fights"] is True
+            fights = [macro for macro in run["macros"] if macro["fight"] is not None]
+            # A fight's macro-actions keep their counts and how likely their play was,
+            # with no temperature and no frames; the rest are the run's samples.
+            assert fights and all("steps" not in macro and macro["temperature"] is None
+                                  and 1 <= macro["branches"] <= macro["decisions"] for macro in fights)
+            assert all(macro["fight"] is None and macro["temperature"] == TEMPERATURES["other"]
+                       for macro in policy_macros(run))
+            assert all(frame["public"]["phase"] != "combat" for frame in frames(dict(macros=list(policy_macros(run)))))
+            frameless += len(fights)
+        # The digest has a line for every decision kept, none of them in a fight, and
+        # counts the fights' macro-actions it has none for.
+        lines = list(digests.entries(directory / wave / digests.FILE))
+        assert not any(decision[digests.FIELDS.index("fight")] for line in lines for decision in line["decisions"])
+        assert sum(line["frameless"] for line in lines) == frameless > 0
+    # Without greedy fights the digest has none to count.
+    plain = tmp_path / "plain"
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, runner(policy), seeds, plain, n=2, m=2, boundaries=BOUNDARIES)
+    assert all(line["frameless"] == 0 for line in digests.entries(plain / "act1" / digests.FILE))

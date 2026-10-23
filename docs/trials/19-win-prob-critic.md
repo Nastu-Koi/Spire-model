@@ -1,7 +1,7 @@
 # 胜率模型（critic）：v1、v2、读不出 HP 与辅助目标
 
 - **时间**：v1 2026-10-11（`2342891` 起若干提交，合入 `main`）；v2 2026-10-14 立项、10-15 否决；HP 读出与辅助目标 2026-10-15；用户 2026-10-16 定删除，2026-10-17 代码删除（joint-training 09）。
-- **来源**：`.scratch/a0-training-baseline/issues/18-win-probability-critic.md`；`db6648d:critic/README.md`；`.scratch/joint-training/issues/02-critic.md`、`04-critic-hp-readout.md`、`05-critic-auxiliary-targets.md`、`06-seed-variance.md`、`09-remove-critic.md`。
+- **来源**：`.scratch/a0-training-baseline/issues/18-win-probability-critic.md`；`db6648d:critic/README.md`；`.scratch/joint-training/issues/critic-line.md`（02、04、05、06、09）。
 - **状态**：被否决，四次尝试都没过留出门槛；代码已删。
 
 ## 动机

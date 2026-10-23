@@ -320,6 +320,50 @@ def test_optional_single_card_keeps_stop_candidate(game):
     ]
 
 
+def zone(frame, name):
+    return [
+        e["content_id"]
+        for e in frame["public"]["entities"]
+        if e.get("entity_type") == "card" and e.get("zone") == name
+    ]
+
+
+def test_selection_shows_the_card_being_played_and_its_pile(game):
+    deck = ["STRIKE_IRONCLAD", "DEFEND_IRONCLAD", "HEADBUTT", "BASH", "STRIKE_IRONCLAD"]
+    prepare(game, deck)
+    game.set_draw_order(deck)
+    state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+    for card_id in ("CARD.STRIKE_IRONCLAD", "CARD.DEFEND_IRONCLAD"):
+        card = next(c for c in state["hand"] if c["id"] == card_id)
+        state = game.act("play_card", card_index=card["index"])
+    frame = advance(game)
+    # Between plays the play pile is empty and left out of the public state.
+    assert frame["public"]["phase"] == "combat" and not zone(frame, "play")
+    headbutt = next(c for c in state["hand"] if c["id"] == "CARD.HEADBUTT")
+    state = game.act("play_card", card_index=headbutt["index"])
+    assert state["decision"] == "card_select", state
+    frame = advance(game)
+    assert zone(frame, "play") == ["CARD.HEADBUTT"]
+    played = next(e for e in frame["public"]["entities"] if e.get("zone") == "play")
+    assert played["position"] == 0
+    assert frame["public"]["selection_context"]["source"] == "discard_pile"
+    assert frame["public"]["selection_context"]["known_masks"]["source"] is True
+    offered = {
+        e["ref"]: e.get("zone") for e in frame["public"]["entities"] if e.get("ref")
+    }
+    assert {
+        offered[c["source_refs"][0]]
+        for c in frame["legal"]["candidates"]
+        if c["verb"] == "SELECT_ONE"
+    } == {"discard_pile"}
+    candidate = next(c for c in frame["legal"]["candidates"] if c["verb"] == "SELECT_ONE")
+    frame = execute(game, frame, candidate)
+    if frame["public"]["phase"] == "card_select":
+        stop = next(c for c in frame["legal"]["candidates"] if c["verb"] == "FINISH_SELECTION")
+        frame = execute(game, frame, stop)
+    assert frame["public"]["phase"] == "combat" and not zone(frame, "play")
+
+
 def start(client, seed, ascension=10):
     return client.send(
         {
@@ -363,7 +407,7 @@ def test_map_names_the_boss_of_the_act(game):
     # Shown on the map from the first decision of the act, and on no other node.
     assert [e.get("encounter") for e in nodes if e["content_id"] == "Boss"] == ["ENCOUNTER." + drawn]
     assert not any("encounter" in e for e in nodes if e["content_id"] != "Boss")
-    assert frame["contract"]["observation_schema"] == "public-state-v6"
+    assert frame["contract"]["observation_schema"] == "public-state-v7"
     assert frame["contract"]["public_history_version"] == "public-history-v1"
 
 

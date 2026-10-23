@@ -1,7 +1,7 @@
 # KL 参考固定为运行起点
 
 - **时间**：2026-10-16 定为固定起点；2026-10-17 加 `--reference-every k`（默认仍固定）；2026-10-18 用户定改默认，2026-10-19 完成
-- **来源**：`.scratch/joint-training/issues/08-grpo-update.md`（取舍一节、Comments“四项候选改动的核查”）、`18-reference-every.md`、`33-reference-default.md`；`.scratch/joint-training/spec.md`（开放问题）
+- **来源**：`.scratch/joint-training/issues/act-groups-grpo.md`（08 的取舍一节、Comments“四项候选改动的核查”）、`update-settings.md`（18、33）；`.scratch/joint-training/spec.md`（开放问题）
 - **状态**：被修正的旧默认。改为“参考每隔评估间隔换成当时的策略”是按机理的修正，没有做过固定与刷新的配对评估。
 
 ## 动机

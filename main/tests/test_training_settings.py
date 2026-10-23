@@ -198,6 +198,39 @@ def test_legacy_encoding_can_only_start_new_training_without_reindexing(tmp_path
     assert fresh.updates == 0 and not fresh.optimizer.state
 
 
+def test_a_resumed_run_and_its_reference_register_new_schema_symbols_alike(tmp_path):
+    from main.learn.clipped import Reference
+    from main.play.rollout import policy_digest
+
+    runs, vocabulary, model, training = setup()
+    # A checkpoint saved before the play pile was public (public-state-v6).
+    old = vocabulary.state()
+    old["symbols"] = [s for s in old["symbols"] if s != "zone=play"]
+    vocabulary = Vocabulary.from_state(old, model.config)
+    learner = Learner(model, vocabulary, training)
+    learner.bootstrap(runs)
+    saved = tmp_path / "saved"
+    save_checkpoint(saved, model, vocabulary, learner.optimizer, learner.scheduler, training=training,
+                    progress={"updates": learner.updates, "policy_version": learner.policy_version})
+    resumed, _ = Learner.load(saved, "cpu")
+    # The run goes on with its optimizer's state; the new symbol takes a spare row, no old ID moves.
+    assert resumed.updates == learner.updates > 0 and resumed.optimizer.state
+    assert resumed.vocabulary.symbols[:len(old["symbols"])] == tuple(old["symbols"])
+    assert resumed.vocabulary.encode("zone=play") == len(old["symbols"])
+    # The KL reference read from the same checkpoint has the same table; the weights are unchanged.
+    reference = Reference.load(saved, "cpu")
+    assert reference.vocabulary_digest == resumed.vocabulary.digest
+    assert policy_digest(reference.model) == policy_digest(model)
+    # Data of the old public state still trains, with nothing unregistered.
+    resumed.bootstrap(runs)
+    assert not resumed.vocabulary.unregistered()
+    # Saved again, the expanded table loads as it was saved.
+    again = tmp_path / "again"
+    save_checkpoint(again, resumed.model, resumed.vocabulary, resumed.optimizer, resumed.scheduler,
+                    training=training, progress={"updates": resumed.updates, "policy_version": resumed.policy_version})
+    assert load_model(again)[1].digest == resumed.vocabulary.digest
+
+
 def test_decay_runs_bc_rates_to_zero_and_resumes_only_at_its_length(tmp_path):
     parameter = torch.nn.Parameter(torch.ones(1))
     optimizer = torch.optim.AdamW([parameter], lr=4e-5)
@@ -433,6 +466,23 @@ def test_feeders_share_tensors_by_name_and_a_dead_feeder_is_reported(tmp_path, m
     monkeypatch.setattr(loader, "_feed", vanish)
     with pytest.raises(RuntimeError, match="exited without finishing"):
         list(stream(shards, vocabulary, training, window_shards=2, shuffle=False))
+
+
+def test_the_packers_of_every_stream_register_with_the_one_manager_of_their_server(tmp_path):
+    shards, runs = sharded(tmp_path)
+    vocabulary = vocabulary_for(runs, ModelConfig.tiny())
+    training = TrainConfig(precision="no", loader_workers=1, loader_feeders=2, logical_batch_size=3,
+                           microbatch_size=2)
+    # A received tensor names the manager (`torch_shm_manager`) its file is registered
+    # with, and the trainer stays connected to every manager it received from: one per
+    # packer would add up, stream after stream.
+    managers = set()
+    for _ in range(2):
+        for logical in stream(shards, vocabulary, training, window_shards=2, shuffle=False):
+            for _, prepared in logical:
+                if prepared.labels.is_shared():
+                    managers.add(prepared.labels.untyped_storage()._share_filename_cpu_()[0])
+    assert len(managers) == 1
 
 
 def test_stalled_loader_workers_are_replaced_without_losing_or_repeating_batches(monkeypatch):

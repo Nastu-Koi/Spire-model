@@ -22,33 +22,82 @@ internal sealed class ChoiceTransaction : IDisposable
         internal readonly string Entry = entry, Source = source, Effect = effect;
         internal readonly int Min = min, Max = max;
         internal Snapshot[]? Options;
+        // The source pile when the candidates were shown: the plan may be matched later.
+        internal Snapshot[]? Pile;
         internal CardModel[]? Expected;
+        // A result that came before the plan did (a turn setup's automatic choice); checked once it comes.
+        internal CardModel[]? Actual;
         internal int? PlanIndex;
         internal bool Completed, Explicit, NotOpened;
         internal readonly HashSet<CardModel> Moved = new();
     }
 
     private readonly object gate = new();
-    private readonly Plan[] plan;
+    // Null while the search that plans the choices has not run (a turn's setup, see SolverAdapter).
+    private Plan[]? plan;
     private readonly Func<CardModel, string> key;
     internal readonly Player Player;
     private readonly List<Request> requests = new();
     private int reserved;
+    // Plans from this index on are a turn's setup choices (the transaction's own setup, or the
+    // turn-start choices an ending turn planned for the next one).
+    private readonly int setupFrom;
+    // Why the native setup stopped following the plan (see Match); null while it follows it.
+    private string? diverged;
     private Exception? failure;
-    private bool closed;
+    private bool closed, abandoned;
     private static long sequence;
     internal readonly long Id = Interlocked.Increment(ref sequence);
 
     private static object Read(object obj, string name) => obj.GetType().GetProperty(name,
         BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(obj)!;
 
-    internal ChoiceTransaction(IEnumerable<object> choices, Player player, Func<CardModel, string> key)
+    internal ChoiceTransaction(IEnumerable<object> choices, Player player, Func<CardModel, string> key, int setupFrom = int.MaxValue)
+        : this(player, key)
+    {
+        plan = Parse(choices);
+        this.setupFrom = setupFrom;
+    }
+
+    // The plan comes later (Supply): native requests are recorded and their candidates
+    // snapshotted as they come, and matched to the plan once it is known. Such a plan is a
+    // turn's setup, searched for its choices (SolverAdapter.CaptureTurnSetup).
+    internal ChoiceTransaction(Player player, Func<CardModel, string> key)
     {
         Player = player; this.key = key;
-        plan = choices.Select(c => new Plan(Read(c, "SourcePile").ToString()!, Read(c, "Effect").ToString()!,
+        setupFrom = 0;
+    }
+
+    private static Plan[] Parse(IEnumerable<object> choices) =>
+        choices.Select(c => new Plan(Read(c, "SourcePile").ToString()!, Read(c, "Effect").ToString()!,
             ((IEnumerable)Read(c, "Cards")).Cast<object>().Select(t => new Token(
                 (string)Read(t, "CardId"), (int)Read(t, "UpgradeLevel"), (string)Read(t, "StateKey"),
                 (int)Read(t, "SourceOccurrence"), (int)Read(t, "OptionOccurrence"))).ToArray())).ToArray();
+
+    internal bool AwaitingPlan { get { lock (gate) return plan == null && !closed; } }
+
+    // The native setup offered a choice the plan cannot follow: its remaining choices are not the solver's.
+    internal string? Diverged { get { lock (gate) return closed ? null : diverged; } }
+
+    // Every planned choice made and nothing failed: finishing cannot fail.
+    internal bool Settled { get { lock (gate) return failure == null && !closed && plan != null && reserved == plan.Length && requests.All(r => r.Completed); } }
+
+    internal void Supply(IEnumerable<object> choices)
+    {
+        lock (gate)
+        {
+            Check();
+            if (plan != null) throw Fail(null, "plan already given");
+            plan = Parse(choices);
+            foreach (var request in requests.Where(r => r.Options != null && r.Expected == null))
+            {
+                Match(request);
+                if (diverged != null) return;
+                if (request.Completed && !request.Expected!.SequenceEqual(request.Actual!))
+                    throw Fail(request, "result mismatch: expected=" + string.Join(",", request.Expected!.Select(c => c.Id.Entry))
+                        + " actual=" + string.Join(",", request.Actual!.Select(c => c.Id.Entry)));
+            }
+        }
     }
 
     internal Request BeginRequest(string entry, string source, string effect, int min, int max, bool cancelable = false, long? parentId = null)
@@ -66,50 +115,69 @@ internal sealed class ChoiceTransaction : IDisposable
     {
         lock (gate)
         {
+            if (abandoned) return;
             Check();
             if (!requests.Contains(request)) throw Fail(request, "foreign request");
             if (request.Options != null) return; // Multiple native Count reads of the same materialized list.
             request.Options = candidates.Select(Snap).ToArray();
-            // Native zero-candidate requests need no solver choice. Preserve the event,
-            // but do not consume the following nonempty request's plan.
-            if (request.Options.Length == 0 && (reserved == plan.Length || plan[reserved].Cards.Length != 0))
-            { request.Expected = []; return; }
-            if (reserved == plan.Length) throw Fail(request, "unexpected native request; plan exhausted");
-            var expected = plan[reserved];
-            if (request.Source != "unknown" && expected.Source != request.Source)
-                throw Fail(request, $"source expected={expected.Source} actual={request.Source}");
-            if (request.Effect != "unknown" && expected.Effect != request.Effect)
-                throw Fail(request, $"effect expected={expected.Effect} actual={request.Effect}");
-            bool sourceBacked = request.Source is not ("unknown" or "None");
-            var source = !sourceBacked ? request.Options
-                : Enum.Parse<PileType>(request.Source).GetPile(Player).Cards.Select(Snap).ToArray();
-            var selected = new List<CardModel>();
-            foreach (var token in expected.Cards)
-            {
-                bool Identity(Snapshot s) => s.Id == token.Id && s.Upgrade == token.Upgrade;
-                var equivalents = request.Options.Where(Identity).ToArray();
-                var original = source.Where(Identity).Skip(token.SourceOccurrence).FirstOrDefault();
-                // Solver options may be shuffled while the native command filters
-                // that subset in pile order. SourceOccurrence is the identity in
-                // the complete pile; OptionOccurrence is a different coordinate.
-                // Only generated choices (no source pile) use the option ordinal
-                // to identify the instance. Never substitute another equal card.
-                var option = sourceBacked
-                    ? request.Options.FirstOrDefault(s => ReferenceEquals(s.Card, original?.Card))
-                    : equivalents.Skip(token.OptionOccurrence).FirstOrDefault();
-                if (token.SourceOccurrence < 0 || token.OptionOccurrence < 0 || token.OptionOccurrence >= equivalents.Length
-                    || option == null || original == null || (!sourceBacked && !ReferenceEquals(option.Card, original.Card))
-                    || (!string.IsNullOrEmpty(token.Key) && option.Key != token.Key))
-                    throw Fail(request, $"target mismatch: {token.Id} source_occurrence={token.SourceOccurrence} option_occurrence={token.OptionOccurrence}; expected_key={token.Key}; actual_key={option?.Key}");
-                if (selected.Contains(option.Card)) throw Fail(request, "duplicate planned target");
-                selected.Add(option.Card);
-            }
-            // Native auto-select permits fewer than Min when there are insufficient options.
-            if ((selected.Count < Math.Min(request.Min, request.Options.Length) && !(selected.Count == 0 && request.Cancelable)) || selected.Count > request.Max)
-                throw Fail(request, $"selection count {selected.Count} outside {request.Min}..{request.Max}");
-            request.Expected = selected.ToArray();
-            request.PlanIndex = reserved++;
+            if (request.Source is not ("unknown" or "None"))
+                request.Pile = Enum.Parse<PileType>(request.Source).GetPile(Player).Cards.Select(Snap).ToArray();
+            if (plan != null) Match(request);
         }
+    }
+
+    private void Match(Request request)
+    {
+        if (diverged != null) return;
+        var plan = this.plan!;
+        // Native zero-candidate requests need no solver choice. Preserve the event,
+        // but do not consume the following nonempty request's plan.
+        if (request.Options!.Length == 0 && (reserved == plan.Length || plan[reserved].Cards.Length != 0))
+        { request.Expected = []; return; }
+        if (reserved == plan.Length) throw Fail(request, "unexpected native request; plan exhausted");
+        var expected = plan[reserved];
+        if (request.Source != "unknown" && expected.Source != request.Source)
+            throw Fail(request, $"source expected={expected.Source} actual={request.Source}");
+        if (request.Effect != "unknown" && expected.Effect != request.Effect)
+            throw Fail(request, $"effect expected={expected.Effect} actual={request.Effect}");
+        bool sourceBacked = request.Source is not ("unknown" or "None");
+        var source = !sourceBacked ? request.Options : request.Pile!;
+        var selected = new List<CardModel>();
+        foreach (var token in expected.Cards)
+        {
+            bool Identity(Snapshot s) => s.Id == token.Id && s.Upgrade == token.Upgrade;
+            var equivalents = request.Options.Where(Identity).ToArray();
+            var original = source.Where(Identity).Skip(token.SourceOccurrence).FirstOrDefault();
+            // Solver options may be shuffled while the native command filters
+            // that subset in pile order. SourceOccurrence is the identity in
+            // the complete pile; OptionOccurrence is a different coordinate.
+            // Only generated choices (no source pile) use the option ordinal
+            // to identify the instance. Never substitute another equal card.
+            var option = sourceBacked
+                ? request.Options.FirstOrDefault(s => ReferenceEquals(s.Card, original?.Card))
+                : equivalents.Skip(token.OptionOccurrence).FirstOrDefault();
+            if (reserved >= setupFrom && (option == null || original == null))
+            {
+                // The solver plays a turn's side-start effects (Orange Dough's cards, say) when the
+                // setup's first choice pauses it, as the game does with its own selection screen;
+                // the headless selector does not pause it, so those effects come after the setup and
+                // a later choice offers other generated cards, or a hand without theirs.
+                diverged = $"request={request.Id} entry={request.Entry} planned={token.Id} options={string.Join(",", request.Options.Select(o => o.Id))}";
+                Console.Error.WriteLine($"[CombatSolverCli] turn_setup_diverged transaction={Id} {diverged}");
+                return;
+            }
+            if (token.SourceOccurrence < 0 || token.OptionOccurrence < 0 || token.OptionOccurrence >= equivalents.Length
+                || option == null || original == null || (!sourceBacked && !ReferenceEquals(option.Card, original.Card))
+                || (!string.IsNullOrEmpty(token.Key) && option.Key != token.Key))
+                throw Fail(request, $"target mismatch: {token.Id} source_occurrence={token.SourceOccurrence} option_occurrence={token.OptionOccurrence}; expected_key={token.Key}; actual_key={option?.Key}; options={string.Join(",", request.Options.Select(o => o.Id))}");
+            if (selected.Contains(option.Card)) throw Fail(request, "duplicate planned target");
+            selected.Add(option.Card);
+        }
+        // Native auto-select permits fewer than Min when there are insufficient options.
+        if ((selected.Count < Math.Min(request.Min, request.Options.Length) && !(selected.Count == 0 && request.Cancelable)) || selected.Count > request.Max)
+            throw Fail(request, $"selection count {selected.Count} outside {request.Min}..{request.Max}");
+        request.Expected = selected.ToArray();
+        request.PlanIndex = reserved++;
     }
 
     internal CardModel[] Select(IEnumerable<CardModel> options, int min, int max)
@@ -118,7 +186,7 @@ internal sealed class ChoiceTransaction : IDisposable
         {
             Check();
             var cards = options.ToArray();
-            var matches = requests.Where(r => !r.Completed && r.Options != null
+            var matches = requests.Where(r => !r.Completed && r.Expected != null
                 && r.Options.Length == cards.Length && r.Options.All(s => cards.Contains(s.Card))).ToArray();
             if (matches.Length != 1) throw Fail(null, "explicit surface has no unique native request");
             var request = matches[0];
@@ -134,6 +202,7 @@ internal sealed class ChoiceTransaction : IDisposable
     {
         lock (gate)
         {
+            if (abandoned) return;
             Check();
             if (!requests.Contains(request)) throw Fail(request, "foreign result");
             if (request.Completed) throw Fail(request, "duplicate result");
@@ -151,7 +220,14 @@ internal sealed class ChoiceTransaction : IDisposable
                 request.NotOpened = true;
                 request.Options = []; request.Expected = [];
             }
-            if (!request.Expected!.SequenceEqual(cards))
+            if (request.Expected == null)
+            {
+                // Resolved before its plan came: Supply checks it.
+                request.Actual = cards;
+                request.Completed = true;
+                return;
+            }
+            if (!request.Expected.SequenceEqual(cards))
                 throw Fail(request, "result mismatch: expected=" + string.Join(",", request.Expected!.Select(c => c.Id.Entry))
                     + " actual=" + string.Join(",", cards.Select(c => c.Id.Entry)));
             request.Completed = true;
@@ -163,11 +239,12 @@ internal sealed class ChoiceTransaction : IDisposable
     {
         lock (gate)
         {
+            if (abandoned) return;
             Check();
             foreach (var request in requests.Where(r => r.Completed && r.PlanIndex != null && r.Expected!.Contains(card)))
             {
                 if (!request.Moved.Add(card)) continue;
-                var effect = plan[request.PlanIndex!.Value].Effect;
+                var effect = plan![request.PlanIndex!.Value].Effect;
                 var expected = effect switch { "Discard" => "Discard", "Exhaust" => "Exhaust",
                     "MoveToDrawTop" or "MoveToDrawBottom" => "Draw", "MoveToHand" => "Hand", _ => null };
                 if (expected != null && (destination != expected || effect == "MoveToDrawTop" && index != 0))
@@ -176,7 +253,12 @@ internal sealed class ChoiceTransaction : IDisposable
         }
     }
 
-    internal void Fault(Exception error) { lock (gate) failure ??= error; }
+    internal void Fault(Exception error) { lock (gate) if (!abandoned) failure ??= error; }
+
+    // Left before any search planned it (a turn setup the solver was not asked about): native
+    // code may still finish its requests, which then mean nothing to the transaction.
+    internal void Abandon() { lock (gate) abandoned = closed = true; }
+
     internal void Check()
     {
         lock (gate)
@@ -197,6 +279,20 @@ internal sealed class ChoiceTransaction : IDisposable
         lock (gate)
         {
             Check();
+            if (diverged != null)
+            {
+                closed = true;
+                return;
+            }
+            if (plan == null)
+            {
+                // No search was needed: every native request of the setup resolved itself.
+                if (requests.Any(r => !r.Completed))
+                    throw Fail(null, $"unfinished: no plan, pending={requests.Count(r => !r.Completed)}");
+                Console.Error.WriteLine($"[CombatSolverCli] choice_action_without_plan transaction={Id} requests={requests.Count}");
+                closed = true;
+                return;
+            }
             if ((!combatEnded && reserved != plan.Length) || requests.Any(r => !r.Completed))
                 throw Fail(null, $"unfinished: planned={plan.Length} reserved={reserved} pending={requests.Count(r => !r.Completed)}");
             if (reserved != plan.Length)

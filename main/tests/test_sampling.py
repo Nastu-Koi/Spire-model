@@ -844,3 +844,95 @@ def test_sampling_processes_explore_potion_use_as_the_runner_alone_does(tmp_path
     assert all(run["explore_potions"] == {"normal": 1.0, "elite": 1.0, "boss": 1.0} for run in runs)
     assert all(len(explored_steps(run)) == 1 and verb_of(explored_steps(run)[0]) == "USE_POTION" for run in runs)
     assert replayed_gap(learner.model, learner.vocabulary, runs) < 1e-4
+
+
+def greedy_runner(learner, temperatures, **settings):
+    return RolloutRunner(learner.model, learner.vocabulary, version=learner.policy_version, precision="no",
+                         ascension=0, temperatures=temperatures, greedy_fights=True, **settings)
+
+
+class Asking:
+    """A policy that says how each decision was asked of it: its phase, whether it is
+    drawn and at what temperature."""
+
+    def __init__(self, policy):
+        self.policy, self.asked = policy, []
+
+    def reset(self):
+        self.policy.reset()
+
+    def choose(self, frame, **asked):
+        self.asked.append((frame["public"]["phase"], asked["sample"], asked["temperature"]))
+        return self.policy.choose(frame, **asked)
+
+
+def test_greedy_fights_take_the_fights_most_likely_actions_and_draw_the_rest(tmp_path):
+    from main.network.policy import SessionPolicy
+
+    temperatures = {"combat": 0.5, "other": 0.8}
+    learner, runner, seeds = setup_round(temperatures)
+    model, vocabulary = learner.model, learner.vocabulary
+    greedy = greedy_runner(learner, temperatures)
+    # The plain engine's fight is its selection (`card_select`); the decision after it is outside.
+    asking = Asking(SessionPolicy(model, vocabulary))
+    run = greedy.run(engine(), "Ironclad", "asked", _policy=asking)
+    assert {asked for asked in asking.asked} == {("card_select", False, 1.0), ("combat_play", True, 0.8)}
+    # Without the switch every decision is drawn, at its phase's temperature, as before.
+    plain = Asking(SessionPolicy(model, vocabulary))
+    runner.run(engine(), "Ironclad", "asked", _policy=plain)
+    assert {asked for asked in plain.asked} == {("card_select", True, 0.5), ("combat_play", True, 0.8)}
+    assert "greedy_fights" not in runner.run(engine(), "Ironclad", "plain")
+
+    torch.manual_seed(0)
+    alone = [greedy.run(engine(), "Ironclad", f"greedy-{index}") for index in range(8)]
+    with samplers(greedy, engines=5, processes=3) as pool:
+        apart = read(collect_round(pool, greedy, seeds, tmp_path / "round"))
+    for run in alone + apart:
+        assert run["status"] == "complete" and run["greedy_fights"] is True and run["temperature"] == temperatures
+        fights = [macro for macro in run["macros"] if macro["fight"] is not None]
+        rest = [macro for macro in run["macros"] if macro["fight"] is None]
+        assert fights and rest
+        # Inside the fight the most likely action, in the sampling processes as alone; the
+        # macro-action records no temperature: it was not drawn.
+        assert all(rank_of(model, vocabulary, step) == 0 for macro in fights for step in branching_steps(dict(macros=[macro])))
+        assert all(macro["temperature"] is None for macro in fights)
+        assert all(macro["temperature"] == 0.8 for macro in rest)
+        assert not any(step.get("explored") or step.get("forked") for step in branching_steps(run))
+        validate_run(run, on_policy=True)
+    # Its log-probability is the action's at 1, as a greedy run's; the rest's at its temperature.
+    assert largest_gap(model, vocabulary, alone + apart, {"combat": 1.0, "other": 0.8}) < 1e-4
+    # Outside the fight the decisions are drawn: not always the most likely candidate.
+    outside = [rank_of(model, vocabulary, step) for run in alone for macro in run["macros"] if macro["fight"] is None
+               for step in branching_steps(dict(macros=[macro]))]
+    assert outside and any(outside)
+    # Greedy runs are greedy throughout, as they were; the switch takes no exploration.
+    assert "greedy_fights" not in greedy.run(engine(), "Ironclad", "evaluated", sample=False)
+    with pytest.raises(ValueError, match="explore"):
+        greedy_runner(learner, temperatures, explore_potions=0.1)
+    with pytest.raises(ValueError, match="Greedy"):
+        RolloutRunner(model, vocabulary, greedy_fights=1)
+
+
+def test_greedy_fights_fork_at_the_first_decisions_outside_them(tmp_path):
+    learner, _, _ = setup_round({"combat": 0.5, "other": 0.8})
+    model, vocabulary = learner.model, learner.vocabulary
+    greedy = greedy_runner(learner, {"combat": 0.5, "other": 0.8})
+    runs = [greedy.run(engine(), "Ironclad", "fork", fork=dict(index=j, size=4, depth=1)) for j in range(4)]
+    for j, run in enumerate(runs):
+        fight, after = run["macros"]
+        assert fight["fight"] is not None and after["fight"] is None
+        # The fight's decisions come first and are taken by argmax, unforked; the fork
+        # falls on the first decision with a choice outside it.
+        assert not any(step.get("forked") for step in fight["steps"])
+        assert all(rank_of(model, vocabulary, step) == 0 for step in branching_steps(dict(macros=[fight])))
+        first = branching_steps(dict(macros=[after]))[0]
+        assert first["forked"] and rank_of(model, vocabulary, first) == (0 if j < 2 else 1)
+        assert _without_frames(run)["forked"] == 1
+    # The sampling processes fork as the runner alone does.
+    from main.play.rollout import SEGMENTS
+    jobs = [("Ironclad", dict(seed="fork", run_id=f"g-{j}", group="g", fork=dict(index=j, size=4, depth=1)), None)
+            for j in range(4)]
+    with samplers(greedy, engine, engines=4, processes=2) as pool:
+        played = []
+        pool.collect(greedy, jobs, on_run=lambda index, run: played.append((index, run)), layout=SEGMENTS)
+    assert sorted(run["forked"] for _, run in played) == [1, 1, 1, 1]

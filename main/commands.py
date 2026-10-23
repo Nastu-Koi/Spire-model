@@ -341,7 +341,8 @@ def run_heldout_nll(args, runtime):
     if args.combat_from:
         runs = combat_from(runs, args.combat_from)
     learner, _ = Learner.load(args.checkpoint, args.device, inference=True)
-    _, held = split_held_out(runs)
+    # A data set kept out of training whole is scored on every seed group.
+    held = runs if args.all_groups else split_held_out(runs)[1]
     if not extent(held)["macros"]:
         raise ProtocolError("The data set has no macro-actions in its held-out seed groups")
     groups = learner.evaluate_bootstrap(held, window_shards=args.window_shards, include_a0=True)
@@ -352,7 +353,7 @@ def run_heldout_nll(args, runtime):
         "checkpoint": str(args.checkpoint),
         "policy_version": learner.policy_version,
         "updates": learner.updates,
-        "held_out": {"fraction": HELDOUT_FRACTION, **extent(held), "of": extent(runs)},
+        "held_out": {"fraction": 1.0 if args.all_groups else HELDOUT_FRACTION, **extent(held), "of": extent(runs)},
         **nll_report(groups),
     })
 
@@ -368,11 +369,17 @@ def run_iterate(args, runtime):
         checkpoint=args.checkpoint, runs_per_character=args.runs_per_character, seed_root=args.seed_root,
         exclude_seeds=args.exclude_seeds, workers=args.workers, processes=args.processes,
         max_steps=args.max_steps, engine_root=args.engine_root, config=args.config,
-        wave_shares=args.wave_shares,
+        wave_shares=args.wave_shares, drop_uniform_groups=args.drop_uniform_groups,
         boundaries=args.boundary_acts, bosses=args.boundary_bosses, group_n=args.group_n, group_m=args.group_m,
-        fork_depth=args.fork_depth, ascensions=args.ascensions,
+        fork_depth=args.fork_depth, ascensions=args.ascensions, fight_entries=args.fight_entries,
         min_entropy=args.min_entropy, clip=args.clip, kl=args.kl, reference_every=args.reference_every,
         learning_rates=args.learning_rates, explore_potions=args.explore_potions,
+        greedy_fights=args.greedy_fights, fight_groups=args.fight_groups, fight_group_size=args.fight_group_size,
+        fight_group_priority=args.fight_group_priority, fight_group_fork_depth=args.fight_group_fork_depth,
+        fight_group_explore_potions=args.fight_group_explore_potions,
+        combat_demos=args.combat_demos, source_shares=dict(args.source_shares) if args.source_shares else None,
+        round_demos=args.round_demos, demo_buffer=args.demo_buffer, demo_opening=args.demo_opening,
+        demo_workers=args.demo_workers,
         eval_precision=args.eval_precision, batch=args.batch,
         updates=args.updates, weight_cap=args.weight_cap, phase_weights=args.phase_weights,
         window_shards=args.window_shards,
@@ -443,6 +450,95 @@ def run_evaluate(args, runtime):
     emit(evaluate_runs(json.loads(p.read_text()) for p in paths))
 
 
+def run_fight_set(args, runtime):
+    from main.play.fight_eval import build_set
+
+    emit(build_set(args.sources, args.output, count=args.count, root=args.root, exclude=args.exclude))
+
+
+def _fight_solver(solver, fights_dir):
+    """The solver's fights to set against: `--solver`, or the set's own (`fight_eval.SOLVER`) if it has them."""
+    from main.play.fight_eval import SOLVER
+
+    if solver:
+        return Path(solver)
+    default = Path(fights_dir) / SOLVER
+    return default if (default / "selection.json").is_file() else None
+
+
+def run_fight_eval(args, runtime):
+    """The policy plays every fight of a fight evaluation set greedily, from its entry
+    save to its end, in the engines of sampling processes; each fight's row and the
+    report go to the output."""
+    from main.learn.costs import FIXED
+    from main.learn.fight_report import priced, report, text
+    from main.play.fight_eval import load_set, play_set, solver_rows
+
+    if args.workers < 1 or (args.processes is not None and args.processes < 1):
+        raise ValueError("Sampling needs positive numbers of engines and processes")
+    directory = Path(args.output)
+    if (directory / "fights.jsonl").exists():
+        raise FileExistsError(f"{directory} holds a fight evaluation already; choose a new output")
+    learner, manifest = Learner.load(args.checkpoint, args.device, inference=True)
+    fights, seeds = load_set(args.fights)
+    validate_evaluation_seeds(seeds, manifest["progress"])
+    if args.per_kind is not None:
+        # A trial on part of the set: the first fights of each kind.
+        fights = [fight for kind in ("normal", "elite", "boss")
+                  for fight in [fight for fight in fights if fight["kind"] == kind][:args.per_kind]]
+    precision = args.precision or learner.config.precision
+    runner = RolloutRunner(learner.model, learner.vocabulary, precision=precision, version=learner.policy_version,
+                           max_steps=args.max_steps, ascension=learner.config.ascension,
+                           temperatures=learner.config.temperatures, iteration=None)
+    temperature = learner.config.temperatures["combat"]
+    began = time.monotonic()
+    with Samplers(lambda: CliEngine(root=args.engine_root), learner.model,
+                  learner.vocabulary, engines=args.workers, processes=args.processes) as samplers:
+        rows = play_set(samplers, runner, fights, temperature=temperature)
+        timing = samplers.timing
+    seconds = time.monotonic() - began
+    directory.mkdir(parents=True, exist_ok=True)
+    with open(directory / "fights.jsonl", "w", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps(priced(row, FIXED) if row["status"] == "complete" and row["record"] else row,
+                                    ensure_ascii=False, allow_nan=False) + "\n")
+    metadata = dict(checkpoint=str(args.checkpoint), policy_version=learner.policy_version,
+                    policy_digest=runner.digest, precision=precision, fights=str(args.fights), played=len(rows),
+                    workers=args.workers, processes=args.processes, danger_temperature=temperature,
+                    seconds=round(seconds, 1), collector=timing)
+    (directory / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+    solver = _fight_solver(args.solver, args.fights)
+    found = dict(report(rows, solver_rows(solver, fights) if solver else None, FIXED),
+                 checkpoint=str(args.checkpoint), precision=precision, seconds=round(seconds, 1),
+                 solver_dir=None if solver is None else str(solver))
+    (directory / "report.json").write_text(json.dumps(found, ensure_ascii=False, indent=2) + "\n")
+    (directory / "report.txt").write_text(text(found), encoding="utf-8")
+    emit(found)
+
+
+def run_fight_compare(args, runtime):
+    """The report of one fight evaluation again, from its rows (at the fixed prices,
+    against the solver's fights if there are any); of two, also fight by fight."""
+    from main.learn.costs import FIXED
+    from main.learn.fight_report import paired_plays, report, text
+    from main.play.fight_eval import load_set, read_rows, solver_rows
+
+    if not 1 <= len(args.results) <= 2:
+        raise ValueError("Compare one fight evaluation, or two of the same set")
+    played = [read_rows(Path(directory) / "fights.jsonl") for directory in args.results]
+    fights_dir = args.fights or json.loads((Path(args.results[0]) / "metadata.json").read_text())["fights"]
+    solver = _fight_solver(args.solver, fights_dir)
+    found = report(played[0], solver_rows(solver, load_set(fights_dir)[0]) if solver else None, FIXED)
+    found["solver_dir"] = None if solver is None else str(solver)
+    if len(played) == 2:
+        found["second"] = report(played[1], None, FIXED)["summary"]
+        found["paired"] = paired_plays(played[0], played[1], FIXED)
+    if args.text:
+        print(text(found), end="")
+    else:
+        emit(found)
+
+
 COMMANDS = {
     "play-steam": run_play_steam,
     "parameters": run_parameters,
@@ -459,4 +555,7 @@ COMMANDS = {
     "iterate": run_iterate,
     "infer": run_infer,
     "evaluate": run_evaluate,
+    "fight-set": run_fight_set,
+    "fight-eval": run_fight_eval,
+    "fight-compare": run_fight_compare,
 }

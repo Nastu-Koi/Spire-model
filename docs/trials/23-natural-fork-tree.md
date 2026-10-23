@@ -1,7 +1,7 @@
 # 自然分叉树与岭回归状态基线：保留但信号弱
 
 - **时间**：2026-10-15 设计并在两级链测量中实测（joint-training 07 方案 2、阶段 03）；2026-10-16 在 GRPO v5 的数据上核查（08）。
-- **来源**：`.scratch/joint-training/issues/07-act-groups.md`（方案 2 (a)(b)、阶段 03 与 04 Comments）、`08-grpo-update.md`（2026-10-16“四项候选改动的核查”，脚本 `an/uniform.py`）、`19-boss-waves.md`、`34-wave-start-forks.md`。
+- **来源**：`.scratch/joint-training/issues/act-groups-grpo.md`（07 的方案 2 (a)(b)、阶段 03 与 04 Comments；08 的 2026-10-16“四项候选改动的核查”，脚本 `an/uniform.py`）、`sampling-settings.md`（19、34）。
 - **状态**：部分保留。代码仍在幕组优势里，但树覆盖的决策很少、分不出动作，状态基线几乎不减方差；组内均值才是主要的基线。
 
 ## 动机

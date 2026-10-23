@@ -39,3 +39,9 @@ def test_search_pays_requested_potion_prices():
         assert paid('SWIFT_POTION') == ([9, 14, 18], 18)
         refused = engine.solve(frame, budget_ms=300, potions=True, potion_costs=[9, 7, 5])
         assert refused['type'] == 'error' and 'potion_costs' in refused['message']
+        # Prices for the run's last fight leave every other fight at the request's own prices.
+        reply = engine.solve(frame, budget_ms=300, potions=True, potion_costs=[5, 7, 9], final_boss_potion_costs=[1, 1, 1])
+        assert reply['type'] == 'solver_result', reply
+        assert reply['potion_costs'] == [5, 7, 9] and reply['final_boss_priced'] is False
+        refused = engine.solve(frame, budget_ms=300, potions=True, final_boss_potion_costs=[0, 0, 0])
+        assert refused['type'] == 'error' and 'final_boss_potion_costs' in refused['message']
