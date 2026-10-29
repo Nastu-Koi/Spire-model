@@ -65,6 +65,15 @@ def world(tmp_path):
                            checkpoint=journeys.checkpoint(tmp_path / "policy"), seeds=seeds)
 
 
+@pytest.fixture
+def keep_uniform(monkeypatch):
+    """The groups whose segments all came to one return kept in the update: the synthetic
+    rounds' groups are so small that leaving them out would leave a stream with nothing."""
+    import main.iterate
+
+    monkeypatch.setattr(main.iterate, "DROP_UNIFORM", False)
+
+
 def chain():
     """Runs of two acts of six rooms: every segment reaches its cut."""
     return Journey(4, 2, rooms=6, acts=2)
@@ -173,19 +182,17 @@ def test_the_command_line_runs_the_iterations(world, monkeypatch, capsys):
     from main.env import engine as engine_module
 
     arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "3"])
-    assert (arguments.runs_per_character, arguments.evaluate_every, arguments.updates) == (200, 5, "round")
+    assert (arguments.runs_per_character, arguments.evaluate_every) == (200, 5)
     assert (arguments.clip, arguments.kl) == (0.2, 0.01) and arguments.wave_shares is None
-    assert arguments.weight_cap == streams.WEIGHT_CAP == Settings(checkpoint="c").weight_cap
     monkeypatch.setattr(engine_module, "CliEngine", lambda root=None: chain())
     common = ["iterate", "--checkpoint", str(world.checkpoint), "--output", str(world.output),
               "--checkpoints", str(world.checkpoints), "--iterations", "1",
               "--boundary-acts", "2", "3", "--group-n", "2", "--group-m", "2", "2"]
     assert main([*common, "--runs-per-character", "1", "--workers", "2", "--seed-root", "cli",
-                 "--kl", "0.05", "--updates", "2", "--exclude-seeds", str(world.seeds)]) == 0
+                 "--kl", "0.05", "--exclude-seeds", str(world.seeds)]) == 0
     printed = capsys.readouterr().out
     assert json.loads(printed[printed.rindex("\n{\n"):]) == dict(output=str(world.output), iterations=1)
     state = read(world.output / "state.json")
-    assert state["iterations"]["0"]["update"]["pass_updates"] == 2
     assert state["iterations"]["0"]["update"]["kl"] == 0.05
     assert state["iterations"]["0"]["settings"]["exclude_seeds"] == [str(world.seeds)]
     # Every step said what it came to as it ended, one line each.
@@ -256,7 +263,8 @@ def test_act_group_iterations_sample_waves_price_them_update_and_clean_up(world)
     for wave, head in first["advantages"].items():
         assert head["runs"] > 0 and head["decisions"] > 0 and head["groups"] > 0 and head["r2_within"] is not None
     assert first["advantages"]["act3"]["groups"] == 20
-    assert all(head["dropped"] is None for head in first["advantages"].values())
+    # The groups whose segments all came to one return are left out.
+    assert all(head["dropped"]["groups"] == head["uniform_groups"] for head in first["advantages"].values())
     assert first["advantages"]["act2"]["advantage"]["n"] > 0
 
     # Updated with the clipped objective: the waves by their decisions; as many
@@ -354,10 +362,7 @@ def assigned_levels(assigned):
 def test_act_group_settings_resolve_their_defaults_and_refuse_what_cannot_be_run(world):
     plain = settings(world, group_m=[8])
     assert plain.group_m == [8, 8] and plain.wave_shares is None and (plain.clip, plain.kl) == (0.2, 0.01)
-    # A boss cut is one more wave: `group_m` gives one number for each later wave.
-    assert plain.bosses == [] and settings(world, bosses=[3], group_m=[4]).group_m == [4, 4, 4]
-    assert settings(world, bosses=[3], group_m=[2, 2, 4]).group_m == [2, 2, 4]
-    assert plain.phase_weights == "group" and settings(world, phase_weights="even").phase_weights == "even"
+    assert settings(world, group_m=[2, 4]).group_m == [2, 4]
     # The waves share a batch by their priced decisions.
     macros = {"act1": 1000, "act2": 2000, "act3": 7000}
     assert plain.group_shares(macros) == {"act1": pytest.approx(0.1), "act2": pytest.approx(0.2), "act3": pytest.approx(0.7)}
@@ -367,26 +372,33 @@ def test_act_group_settings_resolve_their_defaults_and_refuse_what_cannot_be_run
     assert settings(world, wave_shares=[1, 1, 2]).group_shares(macros) == {
         "act1": pytest.approx(0.25), "act2": pytest.approx(0.25), "act3": pytest.approx(0.5)}
     for wrong in (dict(boundaries=[3, 2]), dict(group_n=0), dict(group_m=[1, 2, 3]), dict(clip=1.0), dict(kl=-0.1),
-                  dict(bosses=[0]), dict(bosses=[3], group_m=[2, 2]),
-                  dict(updates="none"), dict(updates="buffer"), dict(updates="0"),
-                  dict(runs_per_character=0), dict(weight_cap=0.5), dict(phase_weights="uniform"),
-                  dict(wave_shares=[1, 1]), dict(wave_shares=[1, 0, 1]), dict(wave_shares=[1, 1, -1])):
+                  dict(runs_per_character=0),
+                  dict(wave_shares=[1, 1]), dict(wave_shares=[1, 0, 1]), dict(wave_shares=[1, 1, -1]),
+                  dict(fight_group_shares=dict(normal=1, elite=1)), dict(fight_hindsight_shares=dict(normal=0, elite=0, boss=0)),
+                  dict(fight_group_kind_size=dict(boss=1)), dict(fight_pool=["p"], fight_pool_share=0.0),
+                  dict(fight_pool_share=0.5)):
         with pytest.raises(ValueError):
             settings(world, **wrong)
     arguments = parser().parse_args([
         "iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
-        "--boundary-acts", "2", "3", "--group-n", "4", "--group-m", "4", "2", "--wave-shares", "1", "2", "7",
-        "--phase-weights", "even", "--boundary-bosses", "3"])
-    assert (arguments.boundary_acts, arguments.boundary_bosses, arguments.group_n, arguments.group_m) == ([2, 3], [3], 4, [4, 2])
-    assert arguments.wave_shares == [1.0, 2.0, 7.0] and arguments.phase_weights == "even"
+        "--boundary-acts", "2", "3", "--group-n", "4", "--group-m", "4", "2", "--wave-shares", "1", "2", "7"])
+    assert (arguments.boundary_acts, arguments.group_n, arguments.group_m) == ([2, 3], 4, [4, 2])
+    fights = parser().parse_args([
+        "iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1", "--fight-group-shares", "normal=2",
+        "elite=4", "boss=5", "--fight-group-kind-size", "boss=16", "--fight-pool", "a", "b", "--fight-pool-share", "0.5",
+        "--fight-hindsight-shares", "normal=0", "elite=1", "boss=1"])
+    assert fights.fight_group_shares == [("normal", 2.0), ("elite", 4.0), ("boss", 5.0)]
+    assert (fights.fight_group_kind_size, fights.fight_pool, fights.fight_pool_share) == ([("boss", 16.0)], ["a", "b"], 0.5)
+    with pytest.raises(SystemExit):
+        parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--fight-group-shares", "champion=1"])
+    assert arguments.wave_shares == [1.0, 2.0, 7.0]
     plain_arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"])
-    assert plain_arguments.wave_shares is None and plain_arguments.boundary_bosses == []
+    assert plain_arguments.wave_shares is None
 
 
-def test_a_run_may_leave_the_uniform_groups_out_of_its_updates(world):
-    state = driver(world, eval_seeds=None, drop_uniform_groups=True).run(1)
+def test_a_run_leaves_the_uniform_groups_out_of_its_updates(world):
+    state = driver(world, eval_seeds=None).run(1)
     entry = state["iterations"]["0"]
-    assert entry["settings"]["drop_uniform_groups"] is True
     priced, update = entry["advantages"], entry["update"]
     assert sum(head["dropped"]["groups"] for head in priced.values()) > 0
     for wave, head in priced.items():
@@ -396,10 +408,6 @@ def test_a_run_may_leave_the_uniform_groups_out_of_its_updates(world):
     decisions = sum(head["decisions"] for head in priced.values())
     assert update["decisions"] == decisions and update["pass_updates"] == -(-decisions // 8)
     assert update["shares"] == {wave: pytest.approx(head["decisions"] / decisions) for wave, head in priced.items()}
-    assert settings(world).drop_uniform_groups is False
-    common = ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]
-    assert parser().parse_args([*common, "--drop-uniform-groups"]).drop_uniform_groups is True
-    assert parser().parse_args(common).drop_uniform_groups is False
 
 
 def test_act_group_iterations_stop_once_the_policy_has_lost_its_entropy(world):
@@ -479,6 +487,25 @@ def test_an_optimizer_step_accumulates_the_logical_batches_its_batch_holds(world
     assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).batch is None
 
 
+def test_an_update_may_make_several_passes_over_its_round(world):
+    state = driver(world, eval_seeds=None, passes=2, freeze_outside=True).run(1)
+    update = state["iterations"]["0"]["update"]
+    steps = [record["metrics"] for record in lines(world.output / "updates.jsonl") if record["round"] == 0]
+    # Two passes of the same size, the second at the round's sampled log-probabilities.
+    assert len(update["passes"]) == 2 and len(steps) == 2 * update["pass_updates"] == update["updates"]
+    assert update["passes"][1]["ratio_mean"] != 1.0
+    # Frozen act groups: nothing but their KL.
+    assert all(step["zero_share"] == 1.0 for step in steps)
+    for wrong in (dict(passes=0), dict(freeze_outside=1), dict(fight_kl=0.1), dict(fight_kl=-1.0),
+                  dict(fight_group_natural=True)):
+        with pytest.raises(ValueError):
+            settings(world, eval_seeds=None, **wrong)
+    arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
+                                     "--passes", "3", "--freeze-outside", "--fight-kl", "0.0", "--fight-group-natural"])
+    assert (arguments.passes, arguments.freeze_outside, arguments.fight_kl) == (3, True, 0.0)
+    assert arguments.fight_group_natural is True
+
+
 def test_a_checkpoint_out_of_another_runs_iteration_starts_this_runs_first_update(world):
     acts = dict(eval_seeds=None)
     first = driver(world, **acts).run(1)
@@ -510,8 +537,8 @@ def test_every_round_and_evaluation_of_a_run_is_played_by_the_processes_forked_b
     assert len(pids) == 2 * 3 and len(set(pids)) == 2
 
 
-def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
-    acts = dict(eval_seeds=None, reference_every=2)
+def test_the_kl_reference_is_renewed_at_every_evaluation_interval(world):
+    acts = dict(eval_seeds=None, evaluate_every=2)
     state = driver(world, **acts).run(3)
     # The reference archive survives the cleanups that remove the others not evaluated,
     # for as long as the next update refers to it.
@@ -530,20 +557,9 @@ def test_the_kl_reference_is_renewed_every_so_many_iterations(world):
     # The first update of a stretch is on-policy with its reference: the KL starts at zero.
     first_of_stretch = [record["metrics"] for record in lines(world.output / "updates.jsonl") if record["round"] == 2][0]
     assert first_of_stretch["kl"] == pytest.approx(0.0, abs=1e-5)
-    plain = driver(world, eval_seeds=None, reference_every=0)
-    assert plain.reference(7) == Path(world.checkpoint)
     renewed = driver(world, **acts)
     assert renewed.reference(5) == world.checkpoints / "iteration-0003"
-    with pytest.raises(ValueError):
-        settings(world, reference_every=-1)
-    arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
-                                     "--reference-every", "3"])
-    assert arguments.reference_every == 3
-    # Unless given, the reference is renewed at the evaluation interval: an evaluated policy.
-    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).reference_every is None
-    assert Settings(checkpoint="c").reference_every == 5 and Settings(checkpoint="c", evaluate_every=3).reference_every == 3
-    assert Settings(checkpoint="c", reference_every=0).reference_every == 0
-    assert settings(world).reference_every == 2 and settings(world, reference_every=4).reference_every == 4
+    assert driver(world, eval_seeds=None, evaluate_every=3).reference(5) == world.checkpoints / "iteration-0002"
 
 
 
@@ -568,60 +584,68 @@ def test_an_evaluation_plays_at_the_precision_asked_and_sampling_at_the_checkpoi
     assert run.learner.config.precision != "fp32"
 
 
-def test_the_fork_depth_is_a_setting_of_the_run(world):
-    state = driver(world, eval_seeds=None, fork_depth=1).run(1)
+def test_the_exploration_rate_outside_fights_is_a_setting_of_the_run(world):
+    from main.commands import explore_outside
+    base = ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]
+    assert explore_outside(parser().parse_args(base).explore_outside) == 0.0
+    assert explore_outside(parser().parse_args(base + ["--explore-outside", "0.05"]).explore_outside) == 0.05
+    assert explore_outside(parser().parse_args(base + ["--explore-outside", "map=0.1", "event=0.2"]).explore_outside) \
+        == {"map": 0.1, "event": 0.2}
+    with pytest.raises(ValueError, match="not both"):
+        explore_outside(parser().parse_args(base + ["--explore-outside", "0.1", "map=0.2"]).explore_outside)
+    with pytest.raises(SystemExit):
+        parser().parse_args(base + ["--explore-outside", "map=lots"])
+    assert settings(world, eval_seeds=None, explore_outside={"map": 0.1}).explore_outside == {"map": 0.1}
+    assert settings(world, eval_seeds=None).explore_outside == {}
+    with pytest.raises(ValueError, match="outside fights"):
+        settings(world, eval_seeds=None, explore_outside={"combat": 0.1})
+
+
+def test_a_run_asks_a_prior_for_proposals_outside_fights_and_may_learn_only_the_trees(world, keep_uniform):
+    from main.commands import explore_outside
+
+    base = ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]
+    args = parser().parse_args(base + ["--explore-prior", "0.2", "--prior", "p", "--explored-on-tree"])
+    assert explore_outside(args.explore_prior) == 0.2 and args.prior == "p" and args.explored_on_tree
+    plain = parser().parse_args(base)
+    assert explore_outside(plain.explore_prior) == 0.0 and plain.prior is None and not plain.explored_on_tree
+    with pytest.raises(ValueError, match="prior's checkpoint"):
+        settings(world, eval_seeds=None, explore_prior=0.2)
+    prior = journeys.learner(seed=1)
+    prior.save(world.root / "prior")
+
+    class Rewarding(Journey):
+        # The decision after each fight on a reward screen: a phase the prior proposes in.
+        def frame(self):
+            frame = super().frame()
+            if frame["public"]["phase"] == "combat_play":
+                frame["public"]["phase"] = "rewards"
+            return frame
+
+    state = Driver(world.output, settings(world, eval_seeds=None, explore_prior=1.0, prior=str(world.root / "prior"),
+                                          explored_on_tree=True),
+                   checkpoints=world.checkpoints, engine=lambda: Rewarding(4, 2, rooms=6, acts=2),
+                   say=lambda _: None).run(1)
     entry = state["iterations"]["0"]
-    # Every segment of the round forked once, and its advantages say what forking taught.
-    assert all(entry["sample"]["forked"][wave] == count for wave, count in
-               {wave: sum(outcomes.values()) for wave, outcomes in entry["sample"]["outcomes"].items()}.items())
-    assert all(entry["advantages"][wave]["forked"]["decisions"] > 0 for wave in ("act1", "act2", "act3"))
-    assert entry["settings"]["fork_depth"] == 1
-    assert settings(world, eval_seeds=None).fork_depth == 0
-    for wrong in (-1, 1.5):
-        with pytest.raises(ValueError, match="fork"):
-            settings(world, eval_seeds=None, fork_depth=wrong)
-    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
-                                "--fork-depth", "2"]).fork_depth == 2
-    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).fork_depth == 0
+    assert entry["settings"]["explored_on_tree"] is True and entry["settings"]["prior"] == str(world.root / "prior")
+    outside = [head["explored_outside"] for head in entry["advantages"].values() if "explored_outside" in head]
+    assert outside and all(found["learned"] == "on_tree" for found in outside)
+    assert sum(found["by_source"].get("prior", {}).get("decisions", 0) for found in outside) > 0
 
 
-def test_the_potion_exploration_rate_is_a_setting_of_the_run(world):
-    arguments = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
-                                     "--explore-potions", "0.25"])
-    assert arguments.explore_potions == [0.25]
-    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
-                                "--explore-potions", "0.01", "0.03"]).explore_potions == [0.01, 0.03]
-    assert parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).explore_potions == [0.0]
-    assert settings(world, eval_seeds=None, explore_potions=0.25).explore_potions == {"normal": 0.25, "elite": 0.25, "boss": 0.25}
-    assert settings(world, eval_seeds=None, explore_potions=[0.01, 0.03]).explore_potions == {"normal": 0.01, "elite": 0.03, "boss": 0.03}
-    assert settings(world, eval_seeds=None).explore_potions == {"normal": 0.0, "elite": 0.0, "boss": 0.0}
-    for wrong in (1.5, -0.1, [0.1, 0.2, 0.3, 0.4]):
-        with pytest.raises(ValueError, match="exploration"):
-            settings(world, eval_seeds=None, explore_potions=wrong)
-
-
-def test_greedy_fights_are_a_setting_of_the_run_and_its_updates_learn_nothing_of_the_fights(world):
-    state = driver(world, eval_seeds=None, greedy_fights=True, fork_depth=1).run(1)
+def test_a_runs_fights_are_greedy_and_its_updates_learn_nothing_of_them(world):
+    state = driver(world, eval_seeds=None).run(1)
     entry = state["iterations"]["0"]
-    assert entry["settings"]["greedy_fights"] is True and entry["sample"]["greedy_fights"] is True
+    assert entry["sample"]["greedy_fights"] is True
     assert groups_summary(world.output / "groups/round-0")["greedy_fights"] is True
     priced, update = entry["advantages"], entry["update"]
     for wave, head in priced.items():
         # The round's decisions are those outside the fights: no fight has an advantage,
         # and the fights left out are counted.
-        assert entry["sample"]["decisions"][wave] == head["decisions"] > 0
+        assert entry["sample"]["decisions"][wave] == head["decisions"] + head["dropped"]["decisions"] > 0
         assert head["fights"]["decisions"] == 0 and head["fights"]["excluded"] > 0
         assert update["waves"][wave]["data"]["macros"] == head["decisions"]
     # The shares, the pass and the loss's scale are of those decisions alone.
     decisions = sum(head["decisions"] for head in priced.values())
     assert update["decisions"] == decisions and update["pass_updates"] == -(-decisions // 8)
     assert update["greedy_fights"] is True
-    # Without it every fight's decision is priced, as before.
-    assert settings(world).greedy_fights is False
-    for wrong in (dict(greedy_fights=True, explore_potions=0.1), dict(greedy_fights=True, bosses=[3]),
-                  dict(greedy_fights=1)):
-        with pytest.raises(ValueError, match="Greedy"):
-            settings(world, eval_seeds=None, **wrong)
-    common = ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]
-    assert parser().parse_args([*common, "--greedy-fights"]).greedy_fights is True
-    assert parser().parse_args(common).greedy_fights is False

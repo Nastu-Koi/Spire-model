@@ -35,7 +35,7 @@ import torch
 from main.env.protocol import CHARACTERS, fingerprint
 from main.network.policy import SessionPolicy, choose_batch
 from main.play.fight_groups import SHARES, quotas
-from main.play.fights import FILE, PLAYS
+from main.play.fights import DANGER, FILE, PLAYS
 from main.play.rollout import SEGMENTS, precision_context
 
 FORMAT = "fight-eval-v1"
@@ -44,12 +44,11 @@ SEEDS = "seeds.json"  # the seeds of the set's runs by character
 SAVES = "saves"  # the entry saves, `<fight id>.json.gz`
 SOLVER = "solver"  # where the solver's fights of the set go by default (`entry_battles run --output`)
 COUNT = 440
-DANGER = 0.3  # a decision below this share of the player's max HP is in danger
 # What names a fight of a set.
 FIELDS = ("id", "character", "seed", "ascension", "kind", "act", "floor", "encounter", "second_boss")
 # A fight's record as a row keeps it (`fights.ROW`, less where it was played).
 RECORD = ("entry_hp", "entry_max_hp", "exit_hp", "exit_max_hp", "last_hp", "last_max_hp", "potions_used",
-          "opening_selection", "died", "decisions")
+          "opening_selection", "died", "decisions", "entry_state", "growth", "relic_counters")
 # The choices that set a fight up before its first play, by the relic that offers them
 # and what the selection looks like (`selection_context`).
 SETUP_SOURCES = (

@@ -35,7 +35,7 @@ is learned with
 - **An anchor.** KL_i is the sum over the macro-action's decisions of
   KL(π_θ,T ‖ π_ref,T) over the legal actions, exact, with π_ref the reference the
   driver chooses (the run's starting checkpoint, or the policy as it stood when the
-  current stretch of `reference_every` iterations began) run on the same batch
+  current stretch of `evaluate_every` iterations began) run on the same batch
   without gradients. Where the reference is the policy that played the round, its
   distributions are those the decisions were drawn from, kept as they were sampled
   (`Choice.log_probs`, `Replay.reference`), and it is not run at all
@@ -46,8 +46,14 @@ is learned with
 
 The weights are the sampled data's share weights (`main/learn/streams.py`); the
 trainer sums Σ w_i L_i on the scale of behavior cloning (`trainer.Learner.fit`).
+
+What it saw is tallied by kind of decision too (`RATIO_KINDS`: explored, forked, and
+the rest by the sign of their advantage): how many, how many with a ratio above `OVER`,
+and the largest ratio. A plain decision with a negative advantage is the one a large
+ratio pushes with its whole size; the others stop pushing outside their region.
 """
 
+import math
 from dataclasses import replace
 
 import torch
@@ -63,9 +69,34 @@ LOG_RATIO_BOUND = 20.0
 # An explored decision whose log-ratio is beyond this (a factor of 20) no longer pushes:
 # a guard against the pathological, far outside the drift a pass leaves (p90 1.85 in v29's round).
 EXPLORED_LOG_RATIO = 3.0
+# The kinds of decision whose ratios are tallied apart: explored, forked, and the rest
+# by the sign of their advantage (none for a zero advantage).
+RATIO_KINDS = ("explored", "forked", "negative", "positive")
+OVER = 10.0  # a ratio above this is counted (`<kind>_over`)
 # The tally's entries, in order (`Clipped.__call__`, `means`).
 TALLY = ("ratio", "clipped", "kl", "zero", "explored", "explored_log_ratio", "explored_up", "explored_up_log_ratio",
-         "explored_down", "explored_down_log_ratio", "explored_outside_clip", "explored_beyond")
+         "explored_down", "explored_down_log_ratio", "explored_outside_clip", "explored_beyond",
+         *(f"{kind}_{entry}" for kind in RATIO_KINDS for entry in ("count", "over", "max_log_ratio")))
+# The entries combined by their maximum rather than their sum.
+MAXIMA = tuple(index for index, name in enumerate(TALLY) if name.endswith("_max_log_ratio"))
+
+
+def combine(first, second, maxima=MAXIMA):
+    """Two tallies as one: their sum, but the maximum of the entries at `maxima`."""
+    if first is None or second is None:
+        return second if first is None else first
+    total = first + second
+    if maxima:
+        places = list(maxima)
+        total[places] = torch.maximum(first[places], second[places])
+    return total
+
+
+def empty(device):
+    """The tally of nothing: zeros, and the maxima at minus infinity."""
+    tally = torch.zeros(len(TALLY), dtype=torch.float64, device=device)
+    tally[list(MAXIMA)] = -math.inf
+    return tally
 
 
 class Clipped:
@@ -98,16 +129,21 @@ class Clipped:
         model = learner.model
         prepared = prepared.to(model.device)
         temperatures = given([item.temperature for item in micro], model.device)
-        if self.reference is None and prepared.reference is None:
+        if self.kl and self.reference is None and prepared.reference is None:
             raise ProtocolError("A decision kept no distribution it was drawn from; the KL needs a reference policy")
         with precision_context(model, learner.config.precision):
-            if self.reference is None:
-                reference = prepared.reference
+            if not self.kl:
+                # No KL: the reference is not run, and its KL is reported as 0.
+                log_prob, entropy, accuracy = model.replay(prepared, with_accuracy=True, temperatures=temperatures)
+                kl = torch.zeros_like(log_prob)
             else:
-                with torch.no_grad():
-                    reference = self.reference.decision_log_probs(prepared, temperatures)
-            log_prob, entropy, accuracy, kl = model.replay(
-                prepared, with_accuracy=True, temperatures=temperatures, reference=reference)
+                if self.reference is None:
+                    reference = prepared.reference
+                else:
+                    with torch.no_grad():
+                        reference = self.reference.decision_log_probs(prepared, temperatures)
+                log_prob, entropy, accuracy, kl = model.replay(
+                    prepared, with_accuracy=True, temperatures=temperatures, reference=reference)
         old = given([item.old_log_prob for item in micro], model.device)
         advantage = given([item.advantage for item in micro], model.device)
         explored = given([float(item.explored) for item in micro], model.device) > 0
@@ -132,13 +168,20 @@ class Clipped:
             clipped = (stopped & (advantage != 0)).sum()
             # What the drift of a pass does to the explored decisions, by the sign of their advantage.
             up, down = explored & (advantage > 0), explored & (advantage < 0)
+            # The ratios by kind of decision: how many, how many above `OVER`, the largest.
+            plain = ~explored & ~forked
+            extremes = []
+            for kind in (explored, forked, plain & (advantage < 0), plain & (advantage > 0)):
+                extremes += [kind.sum().to(ratio.dtype), (kind & (ratio > OVER)).sum().to(ratio.dtype),
+                             torch.where(kind, log_ratio, torch.full_like(log_ratio, -math.inf)).max()]
             tally = torch.stack([
                 ratio.sum(), clipped.to(ratio.dtype), kl.float().sum(), (advantage == 0).sum().to(ratio.dtype),
                 explored.sum().to(ratio.dtype), (log_ratio * explored).sum(),
                 up.sum().to(ratio.dtype), (log_ratio * up).sum(), down.sum().to(ratio.dtype), (log_ratio * down).sum(),
-                (explored & ~inside).sum().to(ratio.dtype), (explored & ~guarded).sum().to(ratio.dtype)]).double()
-        self._seen = tally if self._seen is None else self._seen + tally
-        self._all = tally if self._all is None else self._all + tally
+                (explored & ~inside).sum().to(ratio.dtype), (explored & ~guarded).sum().to(ratio.dtype),
+                *extremes]).double()
+        self._seen = combine(self._seen, tally)
+        self._all = combine(self._all, tally)
         self._samples += len(micro)
         self._samples_all += len(micro)
         return loss, entropy, accuracy
@@ -159,13 +202,18 @@ class Clipped:
         def mean(total, n):  # None where there is nothing to average: the records are strict JSON
             return seen[total] / seen[n] if seen[n] else None
 
+        extremes = {}
+        for kind in RATIO_KINDS:
+            counted = int(seen[f"{kind}_count"])
+            extremes.update({f"ratio_samples_{kind}": counted, f"ratio_over_{kind}": int(seen[f"{kind}_over"]),
+                             f"ratio_max_{kind}": math.exp(seen[f"{kind}_max_log_ratio"]) if counted else None})
         return dict(ratio_mean=seen["ratio"] / count, clip_fraction=seen["clipped"] / count, kl=seen["kl"] / count,
                     zero_share=seen["zero"] / count, explored=int(seen["explored"]),
                     explored_log_ratio=mean("explored_log_ratio", "explored"),
                     explored_up_log_ratio=mean("explored_up_log_ratio", "explored_up"),
                     explored_down_log_ratio=mean("explored_down_log_ratio", "explored_down"),
                     explored_outside_clip=mean("explored_outside_clip", "explored"),
-                    explored_beyond=mean("explored_beyond", "explored"))
+                    explored_beyond=mean("explored_beyond", "explored"), **extremes)
 
     def take(self):
         """What was seen since the last `take` or `flush`, as means over its macro-actions."""
@@ -176,12 +224,14 @@ class Clipped:
         return dict(self.means(self._all, self._samples_all), samples=self._samples_all)
 
 
-def with_advantages(table, source, scale):
-    """A stream's batches with every sample's advantage, reported as `source`, weights times `scale`."""
+def with_advantages(table, source, scale, frozen=False):
+    """A stream's batches with every sample's advantage, reported as `source`, weights
+    times `scale`; `frozen`, every advantage 0 (only the KL pulls)."""
     def weigh(batch):
         try:
             priced = [([replace(item, source=source, weight=item.weight * scale,
-                                advantage=table[item.run_id, item.index]) for item in micro], prepared)
+                                advantage=0.0 * table[item.run_id, item.index] if frozen
+                                else table[item.run_id, item.index]) for item in micro], prepared)
                       for micro, prepared in batch]
         except KeyError as missing:
             raise ProtocolError(f"Sampled decision {missing.args[0]} has no advantage; compute the "

@@ -236,6 +236,13 @@ class Program
                 return sim.SetDrawOrder(cards);
             }
 
+            case "reseed":
+            {
+                if (!cmd.TryGetProperty("seed", out var seedValue) || !seedValue.TryGetUInt64(out var seed))
+                    return new Dictionary<string, object?> { ["type"] = "error", ["message"] = "reseed needs an unsigned seed" };
+                return sim.Reseed(seed);
+            }
+
             case "write_continue_save":
             {
                 var outputPath = cmd.TryGetProperty("path", out var op) ? op.GetString() : null;

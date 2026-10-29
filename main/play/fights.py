@@ -4,7 +4,9 @@ With `fight_entries` a segment (`rollout.RolloutRunner.run`) keeps a record of e
 fight it plays (`FightLog`): which fight it was, the player's HP and max HP at its
 first decision and at the first decision after it, the potions the policy used in it,
 whether it set the fight up with a choice before its first play, whether the player
-died there, how many decisions it took. At the first decision of
+died there, how many decisions it took, and where the player stood and what they had
+at its first decision (`state`: belt, deck and relics, what a potion's price may
+depend on). At the first decision of
 every fight not begun by an event it has the engine write its continue save, the
 fight's entry save, in the format of a boss cut's (`{"at": "fight", "save": …,
 "fight": …}`), from which `CliEngine.resume_fight` enters the same fight again. The
@@ -46,16 +48,27 @@ FILE = "fights.jsonl"
 SAVES = "fights"
 # The decisions that play a fight; a choice before the first of them sets it up.
 PLAYS = frozenset({"PLAY_CARD", "USE_POTION", "END_TURN"})
+DANGER = 0.3  # a decision below this share of the player's max HP is in danger
 # A fight's line in its wave's `FILE`, in order: what the fight was, the player's HP
 # and max HP at its first decision, at the first decision after it and at its last
 # decision, the content ids of the potions the policy used in it in the order used,
 # whether its first choice before any play was a selection (a gambling chip's, toasty
 # mittens', a choice of one card of several: `opening_selection`), whether the player
-# died in it, its decisions; then the segment it was played in and the file of its entry save (None
-# for a fight an event began).
+# died in it, its decisions, where the player stood and what they had at its first
+# decision (`entry_state`, `state`); then the segment it was played in and the file of
+# its entry save (None for a fight an event began).
 ROW = ("fight", "kind", "act", "floor", "encounter", "second_boss", "from_event", "entry_hp", "entry_max_hp",
        "exit_hp", "exit_max_hp", "last_hp", "last_max_hp", "potions_used", "opening_selection", "died", "decisions",
-       "run_id", "group", "character", "seed", "ascension", "path")
+       "entry_state", "growth", "relic_counters", "run_id", "group", "character", "seed", "ascension", "path")
+# The card types a deck is counted by (`state`), as the engine names them.
+CARD_TYPES = {"Attack": "attacks", "Skill": "skills", "Power": "powers", "Curse": "curses", "Status": "statuses"}
+# Cards that leave the run something after the fight (ticket 15 of .scratch/training-plan):
+# grown each time they are played, or something gained when their blow is fatal. A
+# record's `growth` counts, by card, the plays or the fatal blows, each copy of the deck
+# at most once a fight (`FightLog.chose`).
+PLAYED = frozenset({"CARD.GENETIC_ALGORITHM", "CARD.THE_SCYTHE"})
+FATAL = frozenset({"CARD.FEED", "CARD.HAND_OF_GREED", "CARD.THE_HUNT"})
+HUNT = "POWER.THE_HUNT_POWER"  # what a fatal blow of The Hunt leaves on the player while the fight goes on
 
 
 def vitals(frame):
@@ -64,6 +77,73 @@ def vitals(frame):
         if entity.get("entity_type") == "player":
             return entity.get("hp"), entity.get("max_hp")
     return None, None
+
+
+def state(frame):
+    """Where the player stands in a frame and what they have, as a potion's price may
+    depend on it (`main/learn/potion_prices.py`): the act, the floor and the act's
+    floors (its map's rows, as `rollout.stand` counts them), HP and max HP, the
+    potions in the belt in slot order and the belt's capacity, the deck in counts
+    (cards, attacks, skills, powers, curses, statuses, upgraded cards) and the relics.
+    None where the frame has no player."""
+    player, potions, rows, relics = None, [], [], 0
+    deck = dict(cards=0, **dict.fromkeys(CARD_TYPES.values(), 0), upgraded=0)
+    for entity in frame.get("public", {}).get("entities", ()):
+        kind = entity.get("entity_type")
+        if kind == "player" and player is None:
+            player = entity
+        elif kind == "potion" and entity.get("owner_ref") == "player":
+            potions.append((entity.get("slot", 0), entity.get("content_id")))
+        elif kind == "card" and entity.get("zone") == "deck":
+            deck["cards"] += 1
+            if entity.get("card_type") in CARD_TYPES:
+                deck[CARD_TYPES[entity["card_type"]]] += 1
+            deck["upgraded"] += bool(entity.get("upgraded"))
+        elif kind == "relic":
+            relics += 1
+        elif kind == "map_node" and type(entity.get("floor")) is int:
+            rows.append(entity["floor"])
+    if player is None:
+        return None
+    return dict(act=player.get("act"), floor=player.get("floor"), act_floors=max(rows) + 1 if rows else None,
+                hp=player.get("hp"), max_hp=player.get("max_hp"), potions=[content for _, content in sorted(potions)],
+                capacity=player.get("capacity"), deck=deck, relics=relics)
+
+
+def player_marks(frame):
+    """What shows a fatal blow of a `FATAL` card: the player's max HP (Feed), gold (Hand
+    of Greed) and stacks of The Hunt's power."""
+    marks = dict(max_hp=None, gold=None, hunt=0)
+    for entity in frame.get("public", {}).get("entities", ()):
+        if entity.get("entity_type") == "player" and marks["max_hp"] is None:
+            marks.update(max_hp=entity.get("max_hp"), gold=entity.get("gold"))
+        elif entity.get("entity_type") == "power" and entity.get("owner_ref") == "player" \
+                and entity.get("content_id") == HUNT:
+            marks["hunt"] += entity.get("stacks") or 0
+    return marks
+
+
+def relic_counters(frame):
+    """{relic's content id: the count it shows} of the player's relics that show one."""
+    return {entity["content_id"]: entity["counter"] for entity in frame.get("public", {}).get("entities", ())
+            if entity.get("entity_type") == "relic" and type(entity.get("counter")) is int}
+
+
+def potion_of(frame, candidate):
+    """The content id of the potion a USE_POTION candidate drinks: the potion entity
+    its first source refers to in the frame (None if the frame lacks it)."""
+    sources = candidate.get("source_refs") or [None]
+    return next((e for e in frame["public"]["entities"] if e.get("ref") == sources[0]), {}).get("content_id")
+
+
+def drinks(frame):
+    """{potion's content id: the refs of the USE_POTION candidates that drink it} of a
+    frame, a potion that takes a target having a candidate for each."""
+    found = {}
+    for candidate in frame["legal"]["candidates"]:
+        if candidate.get("verb") == "USE_POTION":
+            found.setdefault(potion_of(frame, candidate), []).append(candidate["candidate_ref"])
+    return found
 
 
 class FightLog:
@@ -82,10 +162,34 @@ class FightLog:
 
     def passed(self, frame, fight):
         """A decision of `fight` (None outside a fight) is reached. The fight under way,
-        if this is not one of its decisions, is over: this is the first decision after it."""
+        if this is not one of its decisions, is over: this is the first decision after it,
+        whose relics' counts are those the fight leaves (`relic_counters`)."""
+        if self.open is not None and self.open["pending"] is not None:
+            self._judge(frame, going_on=fight == self.open["fight"])
         if self.open is not None and fight != self.open["fight"]:
             self.open["exit_hp"], self.open["exit_max_hp"] = vitals(frame)
-            self.open = None
+            self.open["relic_counters"] = relic_counters(frame)
+            self._close()
+
+    def _judge(self, frame, going_on):
+        """Whether the `FATAL` card played at the decision before this one dealt a fatal
+        blow, from what it left on the player: more max HP (Feed), more gold (Hand of
+        Greed), more stacks of The Hunt's power, or for The Hunt the fight over at once
+        (its power goes with the fight; the blow that ends a fight kills)."""
+        card, before = self.open["pending"]
+        self.open["pending"] = None
+        after = player_marks(frame)
+
+        def grew(mark):
+            return after[mark] is not None and before[mark] is not None and after[mark] > before[mark]
+
+        if (card == "CARD.FEED" and grew("max_hp") or card == "CARD.HAND_OF_GREED" and grew("gold")
+                or card == "CARD.THE_HUNT" and (grew("hunt") or not going_on)):
+            self.open["events"][card] += 1
+
+    def _close(self):
+        self.open["growth"] = growth(self.open)
+        self.open = None
 
     def entered(self, engine, frame, fight, entry, floor):
         """A decision the run plays, of `fight`; with `entry` (`FightTracker`'s
@@ -102,7 +206,11 @@ class FightLog:
                 fight=entry["fight"], kind=entry["kind"], act=entry["act"], floor=floor, encounter=entry["encounter"],
                 second_boss=entry["second_boss"], from_event=entry["from_event"], entry_hp=hp, entry_max_hp=max_hp,
                 exit_hp=None, exit_max_hp=None, last_hp=hp, last_max_hp=max_hp, potions_used=[], opening_selection=False,
-                died=False, decisions=0, save=save, played=False)
+                died=False, decisions=0, entry_state=state(frame), growth={}, relic_counters=None, save=save,
+                played=False, pending=None, events=Counter(),
+                copies=Counter(entity["content_id"] for entity in frame.get("public", {}).get("entities", ())
+                               if entity.get("entity_type") == "card" and entity.get("zone") == "deck"
+                               and entity.get("content_id") in PLAYED | FATAL))
             self.fights.append(self.open)
         if self.open is not None and fight == self.open["fight"]:
             self.open["decisions"] += 1
@@ -112,7 +220,8 @@ class FightLog:
         """The policy took `candidate_ref` at a decision of `fight`: a potion it used is
         the fight's, named by the potion the candidate refers to in the frame. Before
         the fight's first play a choice among several candidates that is no play sets
-        the fight up (`opening_selection`)."""
+        the fight up (`opening_selection`). A `PLAYED` card played counts for `growth`;
+        a `FATAL` card played is judged at the next decision (`_judge`)."""
         if self.open is None or fight != self.open["fight"]:
             return
         candidates = frame["legal"]["candidates"]
@@ -123,11 +232,15 @@ class FightLog:
                 self.open["played"] = True
             elif len(candidates) > 1:
                 self.open["opening_selection"] = True
+        if verb == "PLAY_CARD":
+            card = potion_of(frame, candidate)  # the entity its source names: here a card
+            if card in PLAYED:
+                self.open["events"][card] += 1
+            elif card in FATAL:
+                self.open["pending"] = (card, player_marks(frame))
         if verb != "USE_POTION":
             return
-        sources = candidate.get("source_refs") or [None]
-        potion = next((e for e in frame["public"]["entities"] if e.get("ref") == sources[0]), {})
-        self.open["potions_used"].append(potion.get("content_id"))
+        self.open["potions_used"].append(potion_of(frame, candidate))
 
     def ended(self, frame, victory):
         """The run ended, in the fight under way if there is one: won (the last boss)
@@ -135,18 +248,32 @@ class FightLog:
         if self.open is None:
             return
         hp, max_hp = vitals(frame)
+        if self.open["pending"] is not None:
+            self._judge(frame, going_on=False)
         if victory:
             self.open["exit_hp"], self.open["exit_max_hp"] = hp, max_hp
         else:
             self.open.update(died=True, exit_hp=0, exit_max_hp=self.open["last_max_hp"] if max_hp is None else max_hp)
-        self.open = None
+        self._close()
 
     def records(self, run):
         """The records, each with the run's id, group, character, seed and ascension and
         its entry save (`save`, None for a fight an event began)."""
         where = {key: run.get(key) for key in ("run_id", "group", "character", "seed", "ascension")}
-        return [dict({key: value for key, value in record.items() if key != "played"}, **where)
-                for record in self.fights]
+        return [dict({key: value for key, value in record.items() if key not in INTERNAL},
+                     growth=growth(record), **where) for record in self.fights]
+
+
+# What a record keeps while its fight goes on, and drops.
+INTERNAL = frozenset({"played", "pending", "events", "copies"})
+
+
+def growth(record):
+    """{card: how many times it grew} of a fight's record (`PLAYED`, `FATAL`): its plays
+    or fatal blows, each copy of the deck at most once (no more than the deck's copies:
+    a card's reference is the frame's own, so the copies are told apart by number only)."""
+    return {card: min(count, record["copies"][card]) for card, count in sorted(record["events"].items())
+            if min(count, record["copies"][card]) > 0}
 
 
 def pack_save(save):

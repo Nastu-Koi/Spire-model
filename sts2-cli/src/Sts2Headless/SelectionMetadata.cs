@@ -41,7 +41,7 @@ internal sealed record SelectionMetadata(string Operation = "unknown", string So
         var prefsIndex = Array.FindIndex(parameters, p => p.ParameterType == typeof(CardSelectorPrefs));
         CardSelectorPrefs? prefs = prefsIndex >= 0 ? (CardSelectorPrefs)__args[prefsIndex] : null;
         var name = __originalMethod.Name;
-        // The same derivation as the Steam recorder's (steam_recorder/RunRecorder/SelectionMetadata.cs).
+        // The same derivation as the Steam recorder's (steam_takeover/SpireTakeover/SelectionMetadata.cs).
         string operation = prefs?.Prompt.LocEntryKey switch
         {
             "TO_TRANSFORM" => "transform", "TO_EXHAUST" => "exhaust", "TO_REMOVE" => "remove",

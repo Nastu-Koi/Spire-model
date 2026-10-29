@@ -50,24 +50,38 @@ from main.play.wire import Sent, pack, tables, unpack
 # A sampling process says something whenever a decision or a run is ready. Silence
 # this long is checked against the processes being alive.
 SILENCE_SECONDS = 60
+# The channels a decision goes to the collecting process on: the policy's network, or
+# the prior's of `RolloutRunner.explore_prior`. Each has encoder tables of its own.
+POLICY, PRIOR = "policy", "prior"
 
 
 class _Waiting:
     """The decisions the engines of one sampling process wait for."""
 
-    def __init__(self, connection, send, vocabulary, runner, sent):
+    def __init__(self, connection, send, vocabulary, runner, sent, prior_sent=None):
         self.connection, self.send = connection, send
         self.vocabulary, self.runner = vocabulary, runner
-        # What this process has sent the collecting process's encoder tables this round.
-        self.sent = sent
+        # What this process has sent the collecting process's encoder tables this round:
+        # the policy's and, with `explore_prior`, the prior's, a channel of its own.
+        self.sent = {POLICY: sent, PRIOR: prior_sent}
         self.requests = queue.Queue()
 
     def policy(self, job):
-        """The policy of one run: `job` says whose decisions they are."""
+        """The policy of one run: `job` says whose decisions they are. With
+        `explore_prior` it carries the run's prior (`prior`), whose decisions the
+        collecting process takes by the prior's network."""
+        remote = self._remote(job, POLICY)
+        if self.runner.explore_prior:
+            remote.prior = self._remote(job, PRIOR)
+        return remote
+
+    def _remote(self, job, channel):
         session = SessionPolicy(None, self.vocabulary, version=self.runner.version)
         requests = self.requests
 
         class Remote:
+            prior = None
+
             def reset(self):
                 session.reset()
 
@@ -79,8 +93,11 @@ class _Waiting:
                 result = Future()
                 with clock.timed("choice_wait"):
                     # Not sampling, the decision takes the most likely action, even in a
-                    # round that samples the rest (`RolloutRunner.greedy_fights`).
-                    requests.put((job, frame, temperature, restrict, rank if sample else None, not sample, result))
+                    # round that samples the rest (`RolloutRunner.greedy_fights`); the
+                    # prior's always does.
+                    greedy = not sample or channel == PRIOR
+                    requests.put((job, frame, temperature, restrict, None if greedy else rank, greedy, result,
+                                  channel))
                     return result.result()
 
         return Remote()
@@ -99,34 +116,37 @@ class _Waiting:
                 break
         observations, messages = [], []
         laps = clock.Laps()
-        for job, frame, temperature, restrict, rank, _, _ in waiting:
+        for job, frame, temperature, restrict, rank, _, _, channel in waiting:
             # Fields become tensors in `pack`, of what it sends alone.
             (obs,), decisions = prepare_decisions(self.vocabulary, [frame], restrict=[restrict], rank=[rank],
                                                   observe=_observe, tensors=False)
             laps("preparing")
             observations.append(obs)
-            messages.append((job, pack(decisions, [obs], self.sent), temperature))
+            messages.append((job, pack(decisions, [obs], self.sent[channel]), temperature, channel))
             laps("wire_packing")
         self.send(("decisions", messages))
         laps("sending")
         chosen, drawn = self.connection.recv()
         laps("collector_wait")
-        for number, ((_, frame, _, restrict, rank, greedy, result), obs, (slot, log_prob, base)) in enumerate(
+        for number, ((_, frame, _, restrict, rank, greedy, result, _), obs, (slot, log_prob, base)) in enumerate(
                 zip(waiting, observations, chosen)):
-            if greedy and drawn is not None:
+            # The distribution the pass returned for the decision: none for a greedy
+            # pass, nor for a decision of the prior's, which is greedy by its own pass.
+            row = None if drawn is None else drawn[number]
+            if greedy and row is not None:
                 # A decision not drawn in a round that samples, sent at temperature 1: the
                 # most likely slot of the distribution the pass returned for it, the first
                 # of equals as a greedy pass's `argmax` takes it, in place of the draw.
-                slot = int(drawn[number].argmax())
-                log_prob = base = float(drawn[number, slot])
+                slot = int(row.argmax())
+                log_prob = base = float(row[slot])
             slot = obs.slot_refs[int(slot)]
             candidates = frame["legal"]["candidates"]
-            if drawn is None:
+            if row is None:
                 distribution = None
             else:
                 # Each candidate's log-probability at its temperature, in the frame's order.
                 place = {ref: index for index, ref in enumerate(obs.slot_refs)}
-                distribution = [round(float(drawn[number, place[c["decoder_slot_ref"]]]), 6) for c in candidates]
+                distribution = [round(float(row[place[c["decoder_slot_ref"]]]), 6) for c in candidates]
             result.set_result(Choice(
                 next(c["candidate_ref"] for c in candidates if c["decoder_slot_ref"] == slot),
                 log_prob, base_log_prob=base, explored=restrict is not None, forked=rank is not None,
@@ -165,8 +185,9 @@ def recorded_distributions(run):
 
 
 def explored_steps(run, mark="explored"):
-    """How many of a run's decisions were explored (`RolloutRunner.explore_potions`),
-    or with `mark` "forked" taken by rank (`RolloutRunner.run(fork=)`)."""
+    """How many of a run's decisions were explored (`RolloutRunner.explore_outside`,
+    a hindsight fork's potion), or with `mark` "forked" taken at a hindsight fork
+    (`RolloutRunner.run(hindsight=)`)."""
     return sum(bool(step.get(mark)) for macro in run["macros"] if "steps" in macro for step in macro["steps"])
 
 
@@ -252,7 +273,8 @@ def _sample(connection, inherited, collector, engine_factory, model, vocabulary,
             # not this process's to read.
             runner._digest = digest
             # A round's encoder tables are new: nothing of them has been sent.
-            waiting = _Waiting(connection, send, vocabulary, runner, Sent(process))
+            waiting = _Waiting(connection, send, vocabulary, runner, Sent(process),
+                               Sent(process) if runner.explore_prior else None)
             finished = []
 
             def work(slot):
@@ -346,11 +368,14 @@ class Samplers:
     """Sampling processes holding `engines` engines between them, for the rounds of
     one model and vocabulary. `processes` of them, at most one per engine."""
 
-    def __init__(self, engine_factory, model, vocabulary, *, engines, processes=None):
+    def __init__(self, engine_factory, model, vocabulary, *, engines, processes=None, prior=None):
         processes = engines if processes is None else processes
         if type(engines) is not int or type(processes) is not int or min(engines, processes) < 1:
             raise ValueError("Sampling needs positive numbers of engines and processes")
         self.model, self.vocabulary = model, vocabulary
+        # The network of a runner's `explore_prior`, of the same vocabulary, run here.
+        self.prior = prior
+        self._prior_tables = None
         # Where the collecting process's time went in the last round (`timing`).
         self._timing = _Timing()
         # The encoder's output for what the processes have sent, during a round (`wire`).
@@ -423,6 +448,8 @@ class Samplers:
         their engines are in the middle of."""
         if runner.model is not self.model or runner.vocabulary is not self.vocabulary:
             raise ValueError("The round's model and vocabulary differ from the sampling processes'")
+        if runner.explore_prior and self.prior is None:
+            raise ValueError("A runner that asks a prior needs the sampling processes' prior network")
         if not self.samplers:
             raise RuntimeError("The sampling processes have ended")
         try:
@@ -433,7 +460,7 @@ class Samplers:
         finally:
             # Rows of the weights this round sampled with; between rounds the memory is
             # the trainer's.
-            self._tables = None
+            self._tables = self._prior_tables = None
 
     def _collect(self, runner, jobs, sample, on_run, layout):
         self.model.eval()
@@ -444,9 +471,15 @@ class Samplers:
         self.taken.value = 0
         # Each process starts the round with nothing sent (`_sample`).
         self._tables = tables(self.model, len(self.samplers))
+        if runner.explore_prior:
+            self.prior.eval()
+            if hasattr(self.prior, "graphed"):
+                self.prior.graphed(True)
+            self._prior_tables = tables(self.prior, len(self.samplers))
+        # The prior's network stays here: a process asks for its choices (`_Waiting.policy`).
         settings = {name: getattr(runner, name) for name in (
             "precision", "version", "max_steps", "timeout", "ascension", "claim_rewards",
-            "temperatures", "explore_potions", "greedy_fights", "iteration")}
+            "temperatures", "explore_outside", "explore_prior", "greedy_fights", "iteration")}
         for connection in self.connections:
             connection.send((settings, runner.digest, jobs, sample, layout))
         active = dict(enumerate(self.connections))
@@ -510,34 +543,48 @@ class Samplers:
         return self._timing.report()
 
     def _answer(self, runner, asked, sample):
-        """Choose for the decisions of several sampling processes in one pass. Each
-        process sent a list of (job, packed decision, temperature)."""
+        """Choose for the decisions of several sampling processes in one pass of each
+        network asked. Each process sent a list of (job, packed decision, temperature,
+        channel); a decision of the prior's channel is the prior's most likely, with no
+        distribution returned."""
         timing, began = self._timing, time.monotonic()
-        tagged = [triple for _, triples in asked for triple in triples]
-        decisions, unregistered = unpack([message for _, message, _ in tagged], self._tables)
-        self.vocabulary.report(unregistered)
-        unpacked = time.monotonic()
-        with torch.no_grad(), precision_context(self.model, runner.precision):
-            chosen = self.model.choose(
-                decisions, sample=sample, distributions=sample,
-                temperature=torch.tensor([temperature for _, _, temperature in tagged],
-                                         dtype=torch.float32, device=self.model.device))
-            # One transfer for the whole pass: (slot, log-probability, at temperature 1) rows,
-            # and when sampling every slot's log-probability after them, which the
-            # update's KL may take for its reference's (`main/learn/grpo.py`).
-            with clock.timed("readback"):
-                columns = [column.float().unsqueeze(1) for column in chosen[:3]]
-                table = torch.cat(columns + [chosen[3].float()] if sample else columns, dim=1).cpu().numpy()
-        rows = table[:, :3].tolist()
-        drawn = table[:, 3:] if sample else None
+        tagged = [entry for _, entries in asked for entry in entries]
+        rows, drawn = [None] * len(tagged), [None] * len(tagged) if sample else None
+        unpacking = choosing = 0.0
+        for channel, network, encoder in ((POLICY, self.model, self._tables), (PRIOR, self.prior, self._prior_tables)):
+            places = [index for index, entry in enumerate(tagged) if entry[3] == channel]
+            if not places:
+                continue
+            started = time.monotonic()
+            decisions, unregistered = unpack([tagged[index][1] for index in places], encoder)
+            self.vocabulary.report(unregistered)
+            unpacked = time.monotonic()
+            drawing = sample and channel == POLICY
+            with torch.no_grad(), precision_context(network, runner.precision):
+                chosen = network.choose(
+                    decisions, sample=drawing, distributions=drawing,
+                    temperature=torch.tensor([tagged[index][2] for index in places],
+                                             dtype=torch.float32, device=network.device))
+                # One transfer for the whole pass: (slot, log-probability, at temperature 1) rows,
+                # and when sampling every slot's log-probability after them, which the
+                # update's KL may take for its reference's (`main/learn/grpo.py`).
+                with clock.timed("readback"):
+                    columns = [column.float().unsqueeze(1) for column in chosen[:3]]
+                    table = torch.cat(columns + [chosen[3].float()] if drawing else columns, dim=1).cpu().numpy()
+            for place, row in zip(places, table):
+                rows[place] = row[:3].tolist()
+                if drawing:
+                    drawn[place] = row[3:]
+            unpacking += unpacked - started
+            choosing += time.monotonic() - unpacked
         chose = time.monotonic()
         start = 0
-        for connection, triples in asked:
-            end = start + len(triples)
+        for connection, entries in asked:
+            end = start + len(entries)
             connection.send((rows[start:end], None if drawn is None else drawn[start:end]))
             start = end
         timing.passes += 1
         timing.decisions += len(tagged)
-        timing.unpacking += unpacked - began
-        timing.choosing += chose - unpacked
+        timing.unpacking += unpacking
+        timing.choosing += choosing
         timing.sending += time.monotonic() - chose

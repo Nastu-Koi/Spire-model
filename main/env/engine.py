@@ -12,7 +12,7 @@ import orjson
 from main.env.clock import timed
 from main.env.dotnet_runtime import runtime_command
 from main.env.protocol import ProtocolError
-from main.env.saves import fight_resume_command
+from main.env.saves import fight_resume_command, resume_fields
 
 
 # An engine process grows by a few megabytes with every run it plays.
@@ -137,7 +137,7 @@ class CliEngine:
         (`saves.continue_save`): the same state, played on from the map, with the
         engine's `resume_save`. Returns the map decision's frame, as `reset` returns a
         run's first; the process is reused or replaced as `reset` does."""
-        command = {"cmd": "resume_save", "save": save}
+        command = {"cmd": "resume_save", **resume_fields(save)}
         if self.closed or self.proc.poll() is not None or self.runs >= RUNS_PER_PROCESS:
             self.close()
             self._start()
@@ -169,6 +169,17 @@ class CliEngine:
         if reply.get("type") == "error":
             raise ProtocolError("resume_fight: " + str(reply.get("message") or reply))
         return reply if reply.get("type") == "decision_frame" else self.send({"cmd": "advance_to_boundary"})
+
+    def reseed(self, seed):
+        """Another future from the run's state now: every random stream of the run
+        and its players starts anew from `seed` (an unsigned 64-bit integer); nothing
+        public changes, so the frame in progress is still the one to answer. What the
+        run rolled up front (the acts' encounters and events, the bosses, the map)
+        stays."""
+        reply = self.send({"cmd": "reseed", "seed": int(seed)})
+        if reply.get("type") != "ok":
+            raise ProtocolError("reseed: " + str(reply.get("message") or reply))
+        return reply
 
     def close(self):
         if self.closed:

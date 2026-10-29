@@ -66,7 +66,7 @@
 - `potion` 锚点保留在示范里，见 [demos 必须用药的战斗](../implementation/demos.md#必须用药的战斗)。
 - 药价参数与 `PotionCosts.cs` 仍在仓库，见 [solver 组成](../implementation/solver.md#组成)；A10 大预算批按 5／7／9 求出，示范的其余战斗仍是原价。学生状态标签那条链路已删除（[16](16-student-solver-labels.md)）。
 - A10 大预算批保留为 BC 第二段的战斗数据，示范默认预算是 5000／5000／20000 ms，见 [architecture 训练路线](../architecture.md#训练路线)。
-- 用药问题留到幕组迭代：组内比较只能比较采样里出现过的动作，用药概率太小时比较不起来，于是加了用药探索（[33](33-potion-exploration.md)），现在的做法见 [architecture 用药探索](../architecture.md#用药探索)。
+- 用药问题留到幕组迭代：组内比较只能比较采样里出现过的动作，用药概率太小时比较不起来，于是加了用药探索（[33](33-potion-exploration.md)），现在的做法见 [architecture 用药探索](../architecture.md#探索步)。
 
 ## 教训
 

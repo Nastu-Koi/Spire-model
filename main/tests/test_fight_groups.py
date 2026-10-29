@@ -15,14 +15,14 @@ from main.env.protocol import CHARACTERS
 from main.iterate import fight_cost
 from main.learn.advantage import FILE as ADVANTAGES
 from main.play import digests
-from main.play.fight_groups import (PICKS, WAVE, candidates, group_name, jobs, pick, quotas, read_picks,
-                                    sample_fight_groups)
+from main.play.fight_groups import (PICKS, WAVE, candidates, group_name, jobs, pick, pick_pool, pool_rows, quotas,
+                                    read_picks, sample_fight_groups)
 from main.play.fights import FILE, ROW, SAVES, fight_rows
 from main.play.groups import groups_summary, sample_groups
 from main.play.rollout import RolloutRunner
 from main.play.sampling import Samplers
 from main.tests.journeys import TEMPERATURES, Journey, learner
-from main.tests.test_iterate import driver, settings, world  # noqa: F401  (`world` is a fixture)
+from main.tests.test_iterate import driver, keep_uniform, settings, world  # noqa: F401  (fixtures)
 
 
 # ---- The pick ----
@@ -86,16 +86,84 @@ def test_half_of_each_kind_is_picked_by_priority_and_half_evenly_from_the_rest()
             pick(rows, count, flat, key="k", priority=share)
 
 
+def test_a_natural_pick_counts_every_run_once_in_each_act_whatever_the_fan_out():
+    """The act groups fan out: one run is 2 segments in act1 and 8 in act3. A natural pick
+    draws a kind's fights at one over their run's segments in their wave, as a
+    demonstration pick does, so that act3 no longer outnumbers act1 by the fan-out."""
+    rows = []
+    for seed in range(40):
+        for wave, segments in (("act1", 2), ("act3", 8)):
+            for number in range(segments):
+                run = f"s{seed}:{wave}:{number}"
+                rows.append(dict(fight(1, "boss", 10 + seed % 7, died=seed % 9 == 0 and wave == "act3", run=run),
+                                 wave=wave, character="Silent", seed=f"s{seed}"))
+    shares = dict(normal=0, elite=0, boss=1)
+    plain, _ = pick(rows, 40, flat, key="k", shares=shares)
+    natural, account = pick(rows, 40, flat, key="k", shares=shares, natural=True)
+    acts = lambda picked: Counter(row["wave"] for row in picked)  # noqa: E731
+    assert acts(plain)["act3"] >= 30
+    assert 12 <= acts(natural)["act1"] <= 28
+    assert account["natural"] == dict(thin=2) and account["kinds"]["boss"]["fights"] == len(rows)
+    # Deaths still come first among the fights the thinning keeps.
+    assert all(row["died"] for row in natural if row["reason"] == "priority") or \
+        not any(row["died"] for row in natural if row["reason"] == "uniform")
+    assert pick(rows, 40, flat, key="k", shares=shares, natural=True) == (natural, account)
+
+
 def test_a_fight_picked_is_played_from_its_entry_save_by_its_group():
     row = dict(fight(4, "boss", 30, run="Regent:S:act1-1"), character="Regent", seed="S", ascension=3)
-    played = jobs([row], size=4, fork_depth=1)
+    played = jobs([row], size=4)
     assert [spec["run_id"] for _, spec, _ in played] == [f"Regent:S:act1-1:fight4-{n}" for n in range(4)]
     for number, (character, spec, path) in enumerate(played):
         assert (character, path, spec["group"], spec["seed"], spec["ascension"]) == (
             "Regent", None, group_name(row), "S", 3)
-        assert spec["resume"] == row["path"] and spec["until_fight_end"] is True
-        assert spec["fork"] == dict(index=number, size=4, depth=1)
-    assert "fork" not in jobs([row], size=2)[0][1]
+        assert spec["resume"] == row["path"] and spec["until_fight_end"] is True and "fork" not in spec
+
+
+def test_the_kinds_can_share_the_fights_otherwise_and_have_groups_of_their_own_size():
+    shares = dict(normal=2, elite=4, boss=5)
+    assert quotas(11, shares) == dict(normal=2, elite=4, boss=5)
+    assert quotas(10, dict(normal=0, elite=4, boss=5)) == dict(normal=0, elite=4, boss=6)
+    # As the command line gives them: numbers that need not be whole.
+    floats = quotas(1000, dict(normal=2.0, elite=4.0, boss=5.0))
+    assert floats == dict(normal=182, elite=364, boss=454) and all(type(n) is int for n in floats.values())
+    rows = [fight(n, kind, cost=n, run=kind) for kind in ("normal", "elite", "boss") for n in range(20)]
+    picked, account = pick(rows, 22, flat, key="root:0", shares=shares)
+    assert {kind: counts["quota"] for kind, counts in account["kinds"].items()} == dict(normal=4, elite=8, boss=10)
+    boss = dict(fight(4, "boss", 30), character="Regent", seed="S")
+    normal = dict(fight(5, "normal", 3), character="Regent", seed="S")
+    played = jobs([boss, normal], size=dict(normal=8, elite=8, boss=16))
+    assert Counter(spec["group"] for _, spec, _ in played) == {group_name(boss): 16, group_name(normal): 8}
+
+
+def fight_set(directory, fights):
+    """A fight evaluation set (`fight_eval`'s format) of `fights`: (id, kind) pairs, each with a save."""
+    (directory / "saves").mkdir(parents=True)
+    rows = []
+    for number, (name, kind) in enumerate(fights):
+        (directory / "saves" / f"{name}.json.gz").write_bytes(b"")
+        rows.append(dict(id=name, character="Regent", seed=f"S{number}", ascension=10, kind=kind, act=1, floor=1,
+                         path=f"saves/{name}.json.gz"))
+    (directory / "fights.json").write_text(json.dumps(dict(format="fight-eval-v1", fights=rows)))
+    return directory
+
+
+def test_a_pool_of_entry_saves_gives_fights_drawn_evenly_within_each_kind(tmp_path):
+    first = fight_set(tmp_path / "a", [(f"n{n}", "normal") for n in range(5)] + [(f"b{n}", "boss") for n in range(5)])
+    second = fight_set(tmp_path / "b", [("e0", "elite")])
+    rows = pool_rows([first, second])
+    assert len(rows) == 11 and {row["wave"] for row in rows} == {"pool"} and not any(row["died"] for row in rows)
+    row = next(row for row in rows if row["run_id"] == "b:e0")
+    assert row["path"] == str((second / "saves" / "e0.json.gz").resolve()) and row["ascension"] == 10
+    picked, account = pick_pool(rows, 11, key="root:0")
+    # 3:4:4 again: three normal fights, the one elite (short of four), four bosses.
+    assert account["kinds"] == dict(normal=dict(fights=5, quota=3, picked=3, short=0),
+                                    elite=dict(fights=1, quota=4, picked=1, short=3),
+                                    boss=dict(fights=5, quota=4, picked=4, short=0))
+    assert account["short"] == ["elite"] and {row["reason"] for row in picked} == {"pool"}
+    assert len({row["run_id"] for row in picked}) == len(picked) == 8
+    assert pick_pool(rows, 11, key="root:0") == (picked, account)
+    assert pick_pool(rows, 11, key="root:1")[0] != picked
 
 
 # ---- Playing to the fight's end ----
@@ -169,17 +237,18 @@ def test_a_segment_played_to_its_fights_end_stops_at_the_first_decision_after_it
     played, engine = runner(policy), Rooms(4, 2, rooms=4)
     run = played.run(engine, "Regent", "S", resume=entry(1), until_fight_end=True, run_id="g-0", group="g")
     assert (run["status"], run["outcome"], run["victory"]) == ("complete", "reached", None)
-    assert run["segment"] == dict(resumed=True, until_act=None, until_boss=None, until_fight_end=True)
+    assert run["segment"] == dict(resumed=True, until_act=None, until_fight_end=True)
     # The fight's decisions alone (the room's selection, one macro-action), drawn at the
     # fight's temperature; the decision after it would be the next segment's.
     assert fight_decisions(run) == [1] and run["macros"][0]["temperature"] == 0.5
     assert all(step["frame"]["public"]["phase"] == "combat" for macro in run["macros"] for step in macro["steps"])
     (record,) = run["fight_records"]
-    assert {key: record[key] for key in ROW if key != "path"} == dict(
+    assert {key: record[key] for key in ROW if key not in ("path", "entry_state")} == dict(
         fight=1, kind="normal", act=3, floor=2, encounter="ENCOUNTER.SYNTHETIC", second_boss=False, from_event=False,
         entry_hp=65, entry_max_hp=80, exit_hp=62, exit_max_hp=80, last_hp=65, last_max_hp=80, potions_used=[],
-        opening_selection=True, died=False, decisions=3, run_id="g-0", group="g", character="Regent", seed="S",
-        ascension=0)
+        opening_selection=True, died=False, decisions=3, growth={}, relic_counters={}, run_id="g-0", group="g",
+        character="Regent", seed="S", ascension=0)
+    assert (record["entry_state"]["act"], record["entry_state"]["hp"]) == (3, 65)
     # It keeps its fight's record and writes no entry save: it was resumed from one.
     assert record["save"] is None and engine.saves == 0
     # A greedy segment stops at the same place (a fixed set of fights played greedily).
@@ -189,8 +258,7 @@ def test_a_segment_played_to_its_fights_end_stops_at_the_first_decision_after_it
     # With fight entries as well, still no save.
     again = played.run(Rooms(4, 2, rooms=4), "Regent", "S", resume=entry(1), until_fight_end=True, fight_entries=True)
     assert [record["save"] for record in again["fight_records"]] == [None]
-    for wrong in (dict(), dict(resume=dict(at="act", save={})), dict(resume=entry(1), until_act=3),
-                  dict(resume=entry(1), until_boss=2)):
+    for wrong in (dict(), dict(resume=dict(at="act", save={})), dict(resume=entry(1), until_act=3)):
         with pytest.raises(ValueError):
             played.run(Rooms(4, 2, rooms=4), "Regent", "S", until_fight_end=True, **wrong)
 
@@ -258,9 +326,8 @@ def test_a_rounds_fight_groups_play_its_fights_again_beside_its_act_waves(tmp_pa
         sample_groups(pool, greedy, seeds, directory, n=2, m=[1, 1], fight_entries=True)
         before = {wave: (directory / wave / "summary.json").read_text()
                   for wave in groups_summary(directory)["waves"]}
-        fights = greedy.variant(greedy_fights=False, explore_potions=[0.0, 0.5])
-        summary = sample_fight_groups(pool, fights, directory, 11, cost=fight_cost, key="test:0", size=3,
-                                      fork_depth=1)
+        fights = greedy.variant(greedy_fights=False)
+        summary = sample_fight_groups(pool, fights, directory, 11, cost=fight_cost, key="test:0", size=3)
     rows = candidates(directory, summary["waves"])
     assert len(rows) == 2 * sum(summary[wave]["written"] for wave in summary["waves"])
     wave = summary["fight_groups"]
@@ -273,7 +340,6 @@ def test_a_rounds_fight_groups_play_its_fights_again_beside_its_act_waves(tmp_pa
     assert [row["reason"] for row in picked] == ["priority", "priority", "uniform", "priority", "priority",
                                                  "uniform", "uniform"]
     assert wave["groups"] == 7 and wave["segments"] == wave["written"] == 21 and wave["failed"] == {}
-    assert wave["plan"]["explore_potions"] == dict(normal=0.0, elite=0.5, boss=0.5)
     # Each segment plays its fight alone, every frame kept, and records it with no save.
     segments = {run["run_id"]: run for window in RunShards(directory / WAVE).windows(shards=1) for run in window}
     records = fight_rows(directory, WAVE)
@@ -288,7 +354,6 @@ def test_a_rounds_fight_groups_play_its_fights_again_beside_its_act_waves(tmp_pa
             row["kind"], row["act"], row["floor"], row["entry_hp"])
         assert run["segment"]["until_fight_end"] is True and "greedy_fights" not in run
         assert all(macro["fight"] == 1 for macro in run["macros"]) and run["outcome"] in ("reached", "win", "loss")
-        assert run["fork"]["size"] == 3
     assert wave["phases"] == dict(combat=sum(len(run["macros"]) for run in segments.values()))
     # A digest line for every segment, as an act wave has.
     assert {entry["run_id"] for entry in digests.entries(directory / WAVE / digests.FILE)} == set(segments)
@@ -296,8 +361,49 @@ def test_a_rounds_fight_groups_play_its_fights_again_beside_its_act_waves(tmp_pa
     assert groups_summary(directory)["fight_groups"] == wave
     assert {name: (directory / name / "summary.json").read_text() for name in summary["waves"]} == before
     # Played again on the same pick, the finished wave stands.
-    assert sample_fight_groups(Idle(), fights, directory, 11, cost=fight_cost, key="test:0", size=3,
-                               fork_depth=1)["fight_groups"] == wave
+    assert sample_fight_groups(Idle(), fights, directory, 11, cost=fight_cost, key="test:0",
+                               size=3)["fight_groups"] == wave
+
+
+def test_a_rounds_fight_groups_also_play_a_pools_entry_saves(tmp_path):
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    greedy = runner(policy, greedy_fights=True)
+    directory = tmp_path / "round"
+    with Samplers(chain, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, greedy, seeds, directory, n=2, m=[1, 1], fight_entries=True)
+        # A pool of two boss fights from another set: copies of this round's own saves.
+        entered = [row for row in candidates(directory, groups_summary(directory)["waves"])
+                   if row["path"] is not None and row["kind"] == "boss"][:2]
+        sets = tmp_path / "pool"
+        (sets / "saves").mkdir(parents=True)
+        fights = []
+        for number, row in enumerate(entered):
+            (sets / "saves" / f"f{number}.json.gz").write_bytes(Path(row["path"]).read_bytes())
+            fights.append(dict(id=f"f{number}", character=row["character"], seed=row["seed"],
+                               ascension=row.get("ascension"), kind="boss", act=1, floor=1,
+                               path=f"saves/f{number}.json.gz"))
+        (sets / "fights.json").write_text(json.dumps(dict(format="fight-eval-v1", fights=fights)))
+        drawn = greedy.variant(greedy_fights=False)
+        summary = sample_fight_groups(pool, drawn, directory, 4, cost=fight_cost, key="test:0", size=2,
+                                      shares=dict(normal=0, elite=0, boss=1), pool=pool_rows([sets]), pool_share=0.5)
+        # A natural pick is a plan of its own: the wave is played again on it.
+        natural = sample_fight_groups(pool, drawn, directory, 2,
+                                      cost=fight_cost, key="test:0", size=2, shares=dict(normal=0, elite=0, boss=1),
+                                      natural=True)["fight_groups"]
+        assert natural["plan"]["natural"] == dict(thin=2) == natural["picks"]["natural"]
+        summary = sample_fight_groups(pool, drawn, directory, 4, cost=fight_cost, key="test:0", size=2,
+                                      shares=dict(normal=0, elite=0, boss=1), pool=pool_rows([sets]), pool_share=0.5)
+    wave = summary["fight_groups"]
+    picked = read_picks(directory / WAVE)["picks"]
+    # Four boss fights: two of the round's, two of the pool's, each played twice.
+    assert sorted(row["reason"] for row in picked).count("pool") == 2 and len(picked) == 4
+    assert wave["picks"]["pool"]["picked"] == 2 and wave["picks"]["kinds"]["normal"]["quota"] == 0
+    assert wave["plan"]["shares"] == dict(normal=0, elite=0, boss=1)
+    assert wave["plan"]["pool"] == dict(share=0.5, fights=["pool:f0", "pool:f1"])
+    assert wave["groups"] == 4 and wave["written"] == 8 and wave["failed"] == {}
+    played = {run["group"] for window in RunShards(directory / WAVE).windows(shards=1) for run in window}
+    assert {"pool:f0:fight0", "pool:f1:fight0"} <= played
 
 
 def test_a_cut_off_wave_of_fight_groups_goes_on_with_its_pick(tmp_path):
@@ -341,9 +447,8 @@ def test_a_cut_off_wave_of_fight_groups_goes_on_with_its_pick(tmp_path):
 
 # ---- The iteration ----
 
-def test_fight_groups_are_sampled_after_the_act_waves_priced_and_learned_beside_them(world):
-    state = driver(world, eval_seeds=None, greedy_fights=True, fight_entries=True, fight_groups=11,
-                   fight_group_size=2, fight_group_explore_potions=[0.0, 0.1]).run(1)
+def test_fight_groups_are_sampled_after_the_act_waves_priced_and_learned_beside_them(world, keep_uniform):
+    state = driver(world, eval_seeds=None, fight_groups=11, fight_group_size=2).run(1)
     entry = state["iterations"]["0"]
     sampled = entry["sample"]["fight_groups"]
     assert entry["settings"]["fight_groups"] == 11 and entry["settings"]["fight_group_size"] == 2
@@ -367,28 +472,20 @@ def test_fight_groups_are_sampled_after_the_act_waves_priced_and_learned_beside_
     for name in ("accepted", INDEX, digests.FILE, FILE, PICKS, ADVANTAGES):
         assert not (directory / WAVE / name).exists()
     assert json.loads((directory / WAVE / "summary.json").read_text())["kind"] == "fight_groups_wave"
-    # It needs the round's greedy fights and their records.
-    for wrong in (dict(fight_groups=4), dict(fight_groups=4, greedy_fights=True),
-                  dict(fight_groups=4, fight_entries=True)):
-        with pytest.raises(ValueError, match="greedy fights and fight entries"):
-            settings(world, eval_seeds=None, **wrong)
-    on = dict(greedy_fights=True, fight_entries=True, fight_groups=4)
-    for wrong in (dict(fight_groups=-1), dict(fight_group_size=1, **on), dict(fight_group_priority=2, **on),
-                  dict(fight_group_fork_depth=-1, **on), dict(fight_group_explore_potions=2, **on)):
+    on = dict(fight_groups=4)
+    for wrong in (dict(fight_groups=-1), dict(fight_group_size=1, **on), dict(fight_group_priority=2, **on)):
         with pytest.raises(ValueError):
             settings(world, eval_seeds=None, **wrong)
     assert settings(world).fight_groups == 0
     common = ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]
     parsed = parser().parse_args([*common, "--fight-groups", "450", "--fight-group-size", "4",
-                                  "--fight-group-priority", "0.25", "--fight-group-fork-depth", "2",
-                                  "--fight-group-explore-potions", "0", "0.05"])
-    assert (parsed.fight_groups, parsed.fight_group_size, parsed.fight_group_priority,
-            parsed.fight_group_fork_depth, parsed.fight_group_explore_potions) == (450, 4, 0.25, 2, [0.0, 0.05])
+                                  "--fight-group-priority", "0.25"])
+    assert (parsed.fight_groups, parsed.fight_group_size, parsed.fight_group_priority) == (450, 4, 0.25)
     defaults = parser().parse_args(common)
     assert (defaults.fight_groups, defaults.fight_group_size, defaults.fight_group_priority) == (0, 8, 0.5)
 
 
-def test_an_iteration_cut_off_in_its_fight_groups_goes_on_from_them(world):
+def test_an_iteration_cut_off_in_its_fight_groups_goes_on_from_them(world, keep_uniform):
     from main.iterate import Driver
 
     calls = []
@@ -400,7 +497,7 @@ def test_an_iteration_cut_off_in_its_fight_groups_goes_on_from_them(world):
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(Driver, "advantages", failing)
         with pytest.raises(RuntimeError, match="cut off"):
-            driver(world, eval_seeds=None, greedy_fights=True, fight_entries=True).run(1)
+            driver(world, eval_seeds=None).run(1)
     directory = world.output / "groups/round-0"
     played = (directory / "summary.json").read_text()
     assert "fight_groups" not in json.loads(played) and not (directory / WAVE).exists()
@@ -410,7 +507,42 @@ def test_an_iteration_cut_off_in_its_fight_groups_goes_on_from_them(world):
     del state["iterations"]["0"]["sample"]
     (world.output / "state.json").write_text(json.dumps(state))
     # Four fights of two segments are too few for a share by their decisions: half the batch.
-    state = driver(world, eval_seeds=None, greedy_fights=True, fight_entries=True, fight_groups=4,
+    state = driver(world, eval_seeds=None, fight_groups=4,
                    fight_group_size=2, source_shares={"act-groups": 1, "fight-groups": 1}).run(1)
     assert state["iterations"]["0"]["sample"]["fight_groups"]["written"] == 4
     assert calls == [0] and state["iterations"]["0"]["complete"]
+
+
+def test_fight_groups_are_priced_at_the_prices_they_were_picked_at(world, keep_uniform):
+    from main.iterate import Driver
+    from main.learn import costs, potion_prices
+
+    cheap, dear = world.root / "cheap.json", world.root / "dear.json"
+    potion_prices.save(costs.Prices(tiers=(1.0, 1.0, 1.0)), cheap)
+    potion_prices.save(costs.Prices(tiers=(20.0, 20.0, 20.0)), dear)
+    on = dict(eval_seeds=None, fight_groups=4, fight_group_size=2,
+              source_shares={"act-groups": 1, "fight-groups": 1})
+
+    def failing(self, iteration):
+        raise RuntimeError("cut off")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Driver, "advantages", failing)
+        with pytest.raises(RuntimeError, match="cut off"):
+            driver(world, potion_prices=str(cheap), **on).run(1)
+    sampled = json.loads((world.output / "state.json").read_text())["iterations"]["0"]["sample"]
+    assert sampled["prices"] == potion_prices.digest(potion_prices.load(cheap))
+    # Picked at the cheap prices, the round's fight groups are not priced at the dear ones.
+    with pytest.raises(ValueError, match="other prices"):
+        driver(world, potion_prices=str(dear), **on).run(1)
+    state = driver(world, potion_prices=str(cheap), **on).run(1)
+    entry = state["iterations"]["0"]
+    assert entry["complete"] and entry["advantages"][WAVE]["prices"]["tiers"] == [1.0, 1.0, 1.0]
+    assert entry["settings"]["potion_prices"] == str(cheap)
+    # They price the fight groups alone.
+    with pytest.raises(ValueError, match="fight groups"):
+        settings(world, potion_prices=str(cheap))
+    parsed = parser().parse_args(["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1",
+                                  "--potion-prices", str(cheap)])
+    assert parsed.potion_prices == str(cheap) and parser().parse_args(
+        ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]).potion_prices is None

@@ -11,7 +11,7 @@ from main.cli import parser
 from main.data.shards import RunShards
 from main.env.protocol import CHARACTERS
 from main.env.saves import FightTracker
-from main.play.fights import FILE, ROW, SAVES, FightLog, fight_rows
+from main.play.fights import FILE, ROW, SAVES, FightLog, fight_rows, state
 from main.play.groups import groups_summary, read_save, sample_groups
 from main.play.rollout import RolloutRunner, play, stand
 from main.play.sampling import Samplers
@@ -34,9 +34,14 @@ class Saving:
         return {"type": "save_result", "success": True}
 
 
-def frame(hp, max_hp=80, *, potions=(), candidates=None):
-    entities = [dict(ref="player", entity_type="player", hp=hp, max_hp=max_hp, act=1, floor=3)]
-    entities += [dict(ref=ref, entity_type="potion", content_id=content) for ref, content in potions]
+def frame(hp, max_hp=80, *, potions=(), candidates=None, cards=(), relics=0, rows=0):
+    entities = [dict(ref="player", entity_type="player", hp=hp, max_hp=max_hp, act=1, floor=3, capacity=3)]
+    entities += [dict(ref=ref, entity_type="potion", content_id=content, owner_ref="player", slot=slot)
+                 for slot, (ref, content) in enumerate(potions)]
+    entities += [dict(ref=f"card:{i}", entity_type="card", zone=zone, card_type=kind, upgraded=upgraded)
+                 for i, (zone, kind, upgraded) in enumerate(cards)]
+    entities += [dict(ref=f"relic:{i}", entity_type="relic") for i in range(relics)]
+    entities += [dict(ref=f"node:{row}", entity_type="map_node", floor=row) for row in range(rows)]
     if candidates is None:
         candidates = [dict(verb="END_TURN", candidate_ref="c0", source_refs=[])]
     return dict(public=dict(phase="combat", entities=entities), legal=dict(candidates=candidates))
@@ -80,12 +85,30 @@ def test_a_fights_record_runs_from_its_first_decision_to_the_first_after_it():
         fight=1, kind="normal", act=1, floor=3, encounter="ENCOUNTER.1", second_boss=False, from_event=False,
         entry_hp=50, entry_max_hp=80, exit_hp=45, exit_max_hp=82, last_hp=40, last_max_hp=80,
         potions_used=["POTION.FIRE"], opening_selection=False, died=False, decisions=3,
-        run_id="r", group="g", character="Silent", seed="S", ascension=2)
+        entry_state=dict(act=1, floor=3, act_floors=None, hp=50, max_hp=80, potions=["POTION.FIRE"], capacity=3,
+                         deck=dict(cards=0, attacks=0, skills=0, powers=0, curses=0, statuses=0, upgraded=0),
+                         relics=0),
+        growth={}, relic_counters={}, run_id="r", group="g", character="Silent", seed="S", ascension=2)
     # A fight an event began has no entry save; died in it, the run's terminal frame has
     # no player: no HP left, the max HP of its last decision.
     assert second["save"] is None and engine.saves == 1
     assert (second["from_event"], second["kind"], second["floor"], second["decisions"]) == (True, "elite", 4, 2)
     assert (second["died"], second["exit_hp"], second["exit_max_hp"], second["last_hp"]) == (True, 0, 82, 30)
+
+
+def test_the_state_a_fight_is_entered_in_counts_the_belt_the_deck_and_the_relics():
+    """What a potion's price may depend on: the deck counts only the deck's cards (not
+    the hand's or the piles'), by the engine's card types; the belt in slot order; the
+    act's floors are its map's rows and one."""
+    cards = [("deck", "Attack", True), ("deck", "Attack", False), ("deck", "Skill", False), ("deck", "Power", True),
+             ("deck", "Curse", False), ("deck", "Status", False), ("hand", "Attack", True), ("draw_pile", "Skill", False)]
+    seen = frame(41, 70, potions=[("potion:0", "POTION.FIRE"), ("potion:1", "POTION.BLOCK")], cards=cards, relics=4,
+                 rows=17)
+    seen["public"]["entities"].append(dict(ref="potion:x", entity_type="potion", content_id="POTION.SHOP", owner_ref="shop"))
+    assert state(seen) == dict(act=1, floor=3, act_floors=17, hp=41, max_hp=70, potions=["POTION.FIRE", "POTION.BLOCK"],
+                               capacity=3, deck=dict(cards=6, attacks=2, skills=1, powers=1, curses=1, statuses=1,
+                                                     upgraded=2), relics=4)
+    assert state(dict(public=dict(entities=[]))) is None
 
 
 def test_a_fight_set_up_by_a_selection_before_its_first_play():
@@ -190,6 +213,15 @@ def test_a_run_keeps_its_fights_records_and_plays_as_it_does_without():
         records[2]["act"], records[2]["floor"], records[2]["kind"], records[2]["encounter"])
     frames = [step["frame"] for macro in again["macros"] for step in macro["steps"]]
     assert stand(frames[0])[:2] == (2, 1)
+    # Stopped at an act with its records kept, a segment says where it stood there.
+    assert again["cut_state"]["act"] == 3 and again["cut_state"]["hp"] == 70
+    # Without entry saves the records are kept alone.
+    alone = played.run(Journey(4, 2, rooms=ROOMS, acts=ACTS), "Regent", "seed", resume=third, until_act=3,
+                       run_id="r:f3", group="r:f3", fight_entries=True, entry_saves=False)
+    assert [record["save"] for record in alone["fight_records"]] == [None] * len(again["fight_records"])
+    assert [record["entry_hp"] for record in alone["fight_records"]] == [r["entry_hp"] for r in again["fight_records"]]
+    assert "cut_state" not in played.run(Journey(4, 2, rooms=ROOMS, acts=ACTS), "Regent", "seed", resume=third,
+                                         until_act=3, run_id="r:f3", group="r:f3")
     # Lost in its last fight, a run's record says so.
     lost = played.run(Doomed(4, 2, rooms=3), "Regent", "seed", fight_entries=True)
     assert lost["status"] == "complete" and lost["victory"] is False
@@ -240,10 +272,9 @@ def test_a_round_with_fight_entries_writes_each_waves_fights_and_their_saves(tmp
         assert not (tmp_path / "plain" / wave / FILE).exists() and not (tmp_path / "plain" / wave / SAVES).exists()
 
 
-def test_fight_entries_are_a_setting_of_the_run_and_go_at_its_cleanup(world):
-    state = driver(world, eval_seeds=None, fight_entries=True).run(1)
+def test_every_wave_of_a_run_records_its_fights_and_they_go_at_its_cleanup(world):
+    state = driver(world, eval_seeds=None).run(1)
     entry = state["iterations"]["0"]
-    assert entry["settings"]["fight_entries"] is True
     # Every segment of these rooms fights twice in its act.
     written = {wave: sum(outcomes.values()) for wave, outcomes in entry["sample"]["outcomes"].items()}
     assert {wave: fights["records"] for wave, fights in entry["sample"]["fights"].items()} == {
@@ -254,7 +285,3 @@ def test_fight_entries_are_a_setting_of_the_run_and_go_at_its_cleanup(world):
         directory = world.output / "groups/round-0" / wave
         assert not (directory / SAVES).exists() and not (directory / FILE).exists()
         assert "fights" in json.loads((directory / "summary.json").read_text())
-    assert settings(world, eval_seeds=None).fight_entries is False
-    arguments = ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]
-    assert parser().parse_args([*arguments, "--fight-entries"]).fight_entries is True
-    assert parser().parse_args(arguments).fight_entries is False

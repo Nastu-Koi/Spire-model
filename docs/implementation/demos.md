@@ -5,7 +5,7 @@
 - **摘要锚点**：从 Spire Codex 公开的 `v0.111.0 / 单人 / 标准 / 胜利` 对局里，只用对局摘要（`.run`）逐节点重建状态，每个决策在原生引擎里从对应的节点边界单独开始。操作回放只用来审计来源和核对结果，不参与生成。本文除最后一节外都讲这一种。
 - **入场存档的战斗**：求解器重打策略在幕组采样里打过的战斗，从这场战斗的入场存档进入（见[下文](#入场存档的战斗)）。
 
-流程：`fetch` 下载 → `sources` 筛选来源 → `anchor run` 生成 → `anchor export` 导出 → `python -m main import-independent` 导入（`main/demos/independent.py`）；`anchor_audit` 和 `map_ambiguity` 用回放核对。Steam 录制另由 `main/demos/recorder/` 导入（见 [steam](steam.md)）。
+流程：`fetch` 下载 → `sources` 筛选来源 → `anchor run` 生成 → `anchor export` 导出 → `python -m main import-independent` 导入（`main/demos/independent.py`）；`anchor_audit` 和 `map_ambiguity` 用回放核对。
 
 | 模块（`spire_codex_data/`） | 内容 |
 | --- | --- |
@@ -29,7 +29,6 @@
 | 持久状态规则 | `anchor-state-v1` |
 | 入场存档的战斗、进入契约 | `entry-battle-v1`、`fight-resume-v1` |
 | 摘要锚点导入 | `independent-import-v6` |
-| Steam 录制格式与导入 | `sts2-run-recorder/v2`、`run-recorder-import-v6` |
 
 局外规则和战斗数据分别使用缓存版本，并绑定原生程序集摘要。已有战斗可用 `anchor run --kinds battle --reuse-battles <旧锚点目录>` 刷新：先要求摘要校验和、求解预算及初始化快照一致，再执行已保存动作。除显式公开历史字段外，逐步观察和完整候选必须完全一致，胜负和结束 HP 也须匹配；当前格式的完整帧再由另一进程独立重放。不兼容或缺失的战斗重新求解，恢复方式写入 `recovery`。旧目录作为只读输入，新样本写入独立输出目录。
 

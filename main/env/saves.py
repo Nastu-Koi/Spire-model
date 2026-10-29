@@ -10,6 +10,16 @@ the same actions play it the same way (`fight_resume_command`,
 (`CliEngine.resume`). Act groups cut runs at both
 (`main/play/groups.py`). `anchor_state` serializes the state with the room already
 entered and does not serve.
+
+The engine returns with a continue save the public history its run had observed as
+the save stands (`public_history/NativeHistory.Snapshot`): the odds of a potion
+drop and of the question rooms, whether the last map point was a shop. It is kept in
+the save under `PUBLIC_HISTORY`, so that it goes wherever the save goes (a segment's
+save, a fight's entry save, a potion point's branches), and handed back when a run
+resumes from the save (`resume_fields`): the run goes on knowing what its own run had
+observed, where without it a loaded save starts the history unknown. A save from an
+engine before it, or written by a run that was itself resumed without one, carries
+unknowns on.
 """
 
 import json
@@ -23,19 +33,36 @@ from main.env.protocol import ProtocolError
 # The engine's kind of a fight, and the map point the fight's node has on the map.
 MAP_POINTS = {"normal": "monster", "elite": "elite", "boss": "boss"}
 
+# Where a save keeps the public history the engine returned with it.
+PUBLIC_HISTORY = "spire_public_history"
+
 
 def continue_save(engine):
-    """The engine's continue save of the run as it stands, as the parsed JSON it writes.
-    The engine writes to a file: a temporary one here, read back and removed."""
+    """The engine's continue save of the run as it stands, as the parsed JSON it writes,
+    with the public history the engine returned beside it under `PUBLIC_HISTORY`. The
+    engine writes to a file: a temporary one here, read back and removed."""
     descriptor, path = tempfile.mkstemp(prefix="spire-entry-", suffix=".json")
     os.close(descriptor)
     try:
         reply = engine.send({"cmd": "write_continue_save", "path": path})
         if reply.get("type") != "save_result" or reply.get("success") is not True:
             raise ProtocolError("write_continue_save: " + str(reply.get("message") or reply))
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        save = json.loads(Path(path).read_text(encoding="utf-8"))
+        if reply.get("public_history") is not None:
+            save[PUBLIC_HISTORY] = reply["public_history"]
+        return save
     finally:
         Path(path).unlink(missing_ok=True)
+
+
+def resume_fields(save):
+    """A save as a command that resumes from it takes it (`resume_save`, `resume_fight`):
+    `save` without the public history it keeps, and that history as `public_history`
+    when it has one. The save given is left as it is."""
+    fields = dict(save={key: value for key, value in save.items() if key != PUBLIC_HISTORY})
+    if save.get(PUBLIC_HISTORY) is not None:
+        fields["public_history"] = save[PUBLIC_HISTORY]
+    return fields
 
 
 class FightTracker:
@@ -108,6 +135,6 @@ def fight_resume_command(row):
     with the save, the encounter, the floor and the map point (`CliEngine.resume_fight`)."""
     if row.get("save") is None:
         raise ProtocolError("The fight has no entry save")
-    return dict(cmd="resume_fight", save=row["save"], encounter=row["encounter"], act_floor=row["floor"],
+    return dict(cmd="resume_fight", **resume_fields(row["save"]), encounter=row["encounter"], act_floor=row["floor"],
                 map_point_type=row["map_point_type"], second_boss=bool(row.get("second_boss")))
 

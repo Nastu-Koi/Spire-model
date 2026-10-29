@@ -173,8 +173,9 @@ def test_the_header_tells_each_kind_of_fight_how_its_groups_split():
     kinds = stats["kinds"]
     assert kinds["normal"] == dict(
         groups=1, segments=4, uniform_groups=1, return_mean=-0.07, within_variance=0.0, death_rate=0.0,
-        death_varies=0, potion_somewhere=0, potions_per_segment=0.0, potion_varies=0, users_minus_others_death=None,
-        users_minus_others_hp_lost=None, n_hp_pairs=0, users_minus_others_cost=None)
+        death_varies=0, all_died=0, growth_per_segment=0, growth_varies=0, potion_somewhere=0,
+        potions_per_segment=0.0, potion_varies=0, users_minus_others_death=None, users_minus_others_hp_lost=None,
+        n_hp_pairs=0, users_minus_others_cost=None)
     elite_kind = kinds["elite"]
     assert (elite_kind["groups"], elite_kind["death_rate"], elite_kind["death_varies"]) == (1, 0.25, 1)
     assert (elite_kind["potion_somewhere"], elite_kind["potions_per_segment"], elite_kind["potion_varies"]) == (1, 0.25, 1)
@@ -196,6 +197,38 @@ def test_the_header_tells_each_kind_of_fight_how_its_groups_split():
     assert stats["groups"] == 4 and stats["uniform_groups"] == 2 and stats["between_share"] is not None
 
 
+def test_a_group_whose_segments_all_died_is_uniform_whatever_potions_they_drank():
+    """A death prices no potion (`costs.cost`): segments that all died, one of them after
+    two potions, come to the same return, so the group teaches nothing, rather than to
+    keep the potions, and is counted among the groups where every segment died."""
+    members = [segment(f"d-{k}", "d", "loss", [("d0", "ab"[k % 2]), (f"d1-{k}", "x")]) for k in range(3)]
+    rows = [record("d-0", "d", kind="boss", act=1, died=True, potions=[FIRE, FIRE]),
+            record("d-1", "d", kind="boss", act=1, died=True), record("d-2", "d", kind="boss", act=1, died=True)]
+    runs, stats = wave_advantages(members, rows, costs.FIXED)
+    assert stats["uniform_groups"] == 1 and stats["kinds"]["boss"]["all_died"] == 1
+    assert {adv for _, _, adv in sum(runs.values(), [])} == {0.0}
+    _, dropped = wave_advantages(members, rows, costs.FIXED, drop_uniform=True)
+    assert dropped["dropped"]["segments"] == 3
+
+
+def test_the_explored_decisions_advantages_are_told_apart_by_the_hp_they_were_made_at():
+    """Each explored decision's advantage goes to the band of its HP share (`HP_BANDS`)."""
+    def explored(index, key, hp):
+        features = [0.0] * len(NAMES)
+        features[NAMES.index("hp_ratio")] = hp
+        return Decision(index, key, ("potion",), features, explored=True)
+
+    members, rows = elite_group()
+    members[2].decisions[1] = explored(1, "f1b", 0.2)  # the potion user, which came out above the mean
+    members[3].decisions[1] = explored(1, "f1c", 0.5)  # the death
+    _, stats = wave_advantages(members, rows, costs.FIXED)
+    bands = stats["explored_by_hp"]
+    assert (bands["hp<0.3"]["decisions"], bands["hp<0.3"]["positive"]) == (1, 1)
+    assert (bands["hp<0.6"]["decisions"], bands["hp<0.6"]["negative"]) == (1, 1)
+    assert bands["hp>=0.6"]["decisions"] == 0
+    assert stats["explored"]["decisions"] == 2
+
+
 # ---- A round's fight groups ----
 
 def sampled_round(tmp_path):
@@ -207,7 +240,7 @@ def sampled_round(tmp_path):
     with Samplers(chain, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
         sample_groups(pool, greedy, seeds, directory, n=2, m=[1, 1], fight_entries=True)
         sample_fight_groups(pool, greedy.variant(greedy_fights=False), directory, 11, cost=fight_cost,
-                            key="test:0", size=3, fork_depth=1)
+                            key="test:0", size=3)
     return policy, directory
 
 
@@ -264,3 +297,17 @@ def test_a_round_without_fight_groups_has_none_to_price(tmp_path):
         sample_groups(pool, runner(policy, greedy_fights=True), seeds, tmp_path / "round", n=1, m=[1, 1])
     with pytest.raises(FileNotFoundError, match="fight groups"):
         advantages(tmp_path / "round", costs.FIXED)
+
+
+def test_prices_with_a_growth_reward_say_what_they_wrap():
+    """The header of fight groups priced with a growth reward says the reward and the
+    prices under it, so that a round at a fit's prices can be told from one at the fixed."""
+    class Fitted:
+        def price(self, potion, fight):
+            return 5.0
+
+        def describe(self):
+            return dict(kind="smoothed", digest="abc")
+
+    assert describe(costs.with_growth(Fitted(), 0.5)) == dict(growth=0.5, prices=dict(kind="smoothed", digest="abc"))
+    assert describe(costs.with_growth(costs.FIXED, 0.5))["prices"] == describe(costs.FIXED)

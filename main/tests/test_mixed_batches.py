@@ -151,8 +151,20 @@ def test_the_kinds_are_tallied_apart_and_the_sampled_ones_together():
     assert report["mix"][FIGHTS]["kl"] == pytest.approx(other["kl"])
     # The top level is over every sampled decision: here half of them had no advantage.
     assert report["kl"] == pytest.approx((alone["kl"] + other["kl"]) / 2) and report["zero_share"] == 0.5
+    # The ratios by kind of decision: counts summed, the largest kept, over the kinds and the flushes.
+    from main.learn.clipped import RATIO_KINDS
+
+    for kind in RATIO_KINDS:
+        assert report["mix"][ACT][f"ratio_samples_{kind}"] == alone[f"ratio_samples_{kind}"]
+        assert report["mix"][ACT][f"ratio_max_{kind}"] == pytest.approx(alone[f"ratio_max_{kind}"])
+        assert report[f"ratio_samples_{kind}"] == alone[f"ratio_samples_{kind}"] + other[f"ratio_samples_{kind}"]
+    assert report["mix"][FIGHTS]["ratio_max_negative"] is None and report["mix"][FIGHTS]["ratio_samples_positive"] == 0
+    mixed(policy, prepared, demos)  # a flush with no sampled decision: nothing to its largest ratios
+    mixed.flush()
     summary = mixed.summary()
-    assert summary["samples"] == len(sampled) + len(fights) and summary["mix"][DEMOS]["samples"] == len(demos)
+    assert summary["samples"] == len(sampled) + len(fights) and summary["mix"][DEMOS]["samples"] == 2 * len(demos)
+    for kind in RATIO_KINDS:
+        assert summary["mix"][ACT][f"ratio_max_{kind}"] == pytest.approx(alone[f"ratio_max_{kind}"])
     # A microbatch of two streams, or of a stream the update does not have, is refused.
     with pytest.raises(ProtocolError, match="several streams"):
         mixed(policy, prepared, sampled[:1] + demos[1:])
@@ -391,9 +403,42 @@ def test_fight_groups_are_a_stream_of_their_own_learned_as_sampled_decisions(wor
         update(learner(), waves, fights=fights, shares=batches.stream_shares(macros), updates=1)
 
 
+def test_a_kind_may_have_a_kl_coefficient_of_its_own():
+    policy, reference, prepared, sampled, _ = setup()
+    fights = [replace(item, source="fights") for item in sampled]
+    kinds = {"act1": ACT, "fights": FIGHTS}
+    one, apart = Mixed(kinds, reference, clip=0.2, kl=0.1), Mixed(kinds, reference, clip=0.2, kl={ACT: 0.1, FIGHTS: 0.0})
+    act, _ = gradients(policy, one, prepared, sampled)
+    again, _ = gradients(policy, apart, prepared, sampled)
+    assert torch.equal(act, again)
+    with_kl, _ = gradients(policy, one, prepared, fights)
+    without, _ = gradients(policy, apart, prepared, fights)
+    plain, _ = gradients(policy, Clipped(reference, clip=0.2, kl=0.0), prepared, sampled)
+    assert torch.equal(without, plain) and (with_kl > without).all()
+    with pytest.raises(ValueError, match="sampled kinds"):
+        Mixed(kinds, reference, clip=0.2, kl={DEMOS: 0.1})
+
+
+def test_frozen_act_groups_teach_only_their_kl_while_the_fight_groups_learn(world):
+    waves = {name: world["waves"][name] for name in ("act1", "act2")}
+    fights = world["waves"]["act3"]
+    metrics, steps = update(learner(), waves, fights=fights, updates=3, kl={ACT: 0.1, FIGHTS: 0.0}, frozen={ACT})
+    mix = metrics["groups"]["mix"]
+    assert mix[ACT]["samples"] > 0 and mix[ACT]["zero_share"] == 1.0 and mix[ACT]["kl"] > 0
+    assert mix[FIGHTS]["samples"] > 0 and mix[FIGHTS]["zero_share"] < 1.0
+    # Every act decision's loss is its KL alone: κ·KL with κ = 0.1.
+    assert mix[ACT]["loss"] == pytest.approx(0.1 * mix[ACT]["kl"], rel=1e-4)
+    with pytest.raises(ValueError, match="sampled kinds"):
+        update(learner(), waves, fights=fights, updates=1, frozen={DEMOS})
+
+
 # ---- The driver ----
 
-def test_an_iteration_learns_the_fights_of_combat_demonstrations_in_its_rounds_batches(tmp_path):
+def test_an_iteration_learns_the_fights_of_combat_demonstrations_in_its_rounds_batches(tmp_path, monkeypatch):
+    import main.iterate
+
+    # The synthetic groups are tiny: their uniform ones are kept, so that no stream is left empty.
+    monkeypatch.setattr(main.iterate, "DROP_UNIFORM", False)
     from types import SimpleNamespace
 
     from main.cli import parser
@@ -408,12 +453,13 @@ def test_an_iteration_learns_the_fights_of_combat_demonstrations_in_its_rounds_b
     def settings(**changes):
         return Settings(**{**dict(checkpoint=str(checkpoint), boundaries=[2, 3],
                                   group_n=2, group_m=[2, 2], runs_per_character=1, seed_root="test", workers=2,
-                                  combat_demos=[str(demos)], source_shares={ACT: 1, DEMOS: 1}), **changes})
+                                  source_shares={ACT: 1, DEMOS: 1}), **changes})
 
+    # The demonstrations a round's solver would have imported (`Driver.demos` with `round_demos`).
+    monkeypatch.setattr(Driver, "demos", lambda self, iteration: [str(demos)])
     world = SimpleNamespace(output=tmp_path / "iterate", checkpoints=tmp_path / "checkpoints/iterate")
     state = Driver(world.output, settings(), checkpoints=world.checkpoints, engine=chain, say=lambda _: None).run(1)
     entry = state["iterations"]["0"]
-    assert entry["settings"]["combat_demos"] == [str(demos)]
     assert entry["settings"]["source_shares"] == {ACT: 1.0, DEMOS: 1.0}
     update = entry["update"]
     decisions = sum(head["decisions"] for head in entry["advantages"].values())
@@ -438,18 +484,16 @@ def test_an_iteration_learns_the_fights_of_combat_demonstrations_in_its_rounds_b
     assert sorted(path.relative_to(demos) for path in demos.rglob("*")) == listed
 
     # What the settings refuse; shares that name a source the update does not have fail at the update.
-    for wrong in (dict(source_shares={"solver": 1}), dict(source_shares={ACT: 0}), dict(source_shares={}),
-                  dict(combat_demos=[])):
+    for wrong in (dict(source_shares={"solver": 1}), dict(source_shares={ACT: 0}), dict(source_shares={})):
         with pytest.raises(ValueError):
             settings(**wrong)
     with pytest.raises(ValueError, match="every kind"):
-        settings(combat_demos=None).group_shares({"act1": 10, "act2": 10, "act3": 10})
-    assert settings(combat_demos=None, source_shares=None).group_shares({"act1": 10, "act2": 30}) == {
+        settings().group_shares({"act1": 10, "act2": 10, "act3": 10})
+    assert settings(source_shares=None).group_shares({"act1": 10, "act2": 30}) == {
         "act1": 0.25, "act2": 0.75}
     common = ["iterate", "--checkpoint", "c", "--output", "o", "--iterations", "1"]
-    args = parser().parse_args([*common, "--combat-demos", "a", "b", "--source-shares", "act-groups=1",
-                                "combat-demos=0.5"])
-    assert args.combat_demos == ["a", "b"] and args.source_shares == [(ACT, 1.0), (DEMOS, 0.5)]
-    assert parser().parse_args(common).combat_demos is None and parser().parse_args(common).source_shares is None
+    args = parser().parse_args([*common, "--source-shares", "act-groups=1", "combat-demos=0.5"])
+    assert args.source_shares == [(ACT, 1.0), (DEMOS, 0.5)]
+    assert parser().parse_args(common).source_shares is None
     with pytest.raises(SystemExit):
         parser().parse_args([*common, "--source-shares", "act-groups:1"])

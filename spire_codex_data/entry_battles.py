@@ -37,6 +37,7 @@ import time
 
 from combat_solver_cli.client import DEFAULT_CONFIG
 from main.env.control import controller_for
+from main.env.saves import resume_fields
 from . import anchor
 from .anchor import BUDGETS, RunProcess, SCHEMA, play_battle, settle
 from .fetch import save_json
@@ -90,7 +91,7 @@ class EntryProcess(RunProcess):
         def start(engine):
             # What the process logged for earlier fights is not this fight's.
             self.logged = os.fstat(engine.stderr.fileno()).st_size
-            reply = engine.send(dict(cmd='resume_fight', save=save, encounter=spot['encounter'], act_floor=spot['floor'],
+            reply = engine.send(dict(cmd='resume_fight', **resume_fields(save), encounter=spot['encounter'], act_floor=spot['floor'],
                                      map_point_type=spot['map_point_type'], second_boss=spot['second_boss']))
             if reply.get('type') == 'error':
                 # A run the process cannot end (`run_not_ended`) is begun again in a new process.

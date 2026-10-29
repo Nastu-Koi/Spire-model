@@ -5,8 +5,9 @@ A wave's digest (`FILE`, beside its shards) holds a line for each segment the wa
 wrote: its run id, group, character, outcome and ascension, and for each of its
 policy macro-actions what the advantages compare and regress on (`FIELDS`): the
 macro-action's place in the segment, its frame as the segments compare it, the
-candidates chosen, where the player stands and what they have, and whether it was
-explored or forked. The sampling process takes it from the frames it decodes to
+candidates chosen, where the player stands and what they have, whether it was
+explored or forked, and the frame's phase (a digest written before it was kept has
+none: its decisions read as of no phase). The sampling process takes it from the frames it decodes to
 write the segment's shard line anyway (`rollout.packed_line`); the advantages read
 it instead of decoding every frame of the round a second time.
 """
@@ -21,7 +22,7 @@ FILE = "decisions.jsonl.gz"
 # that the features fitted on them (`learn.features.summary`) can change without a
 # round sampled again.
 FIELDS = ("index", "key", "action", "act", "floor", "hp", "max_hp", "gold", "deck", "relics", "potions",
-          "fight", "explored", "forked")
+          "fight", "explored", "forked", "phase")
 STATE = ("hp", "max_hp", "gold", "deck", "relics", "potions")
 # What the state counts, by entity type: the cards count only in the deck.
 STATE_COUNTS = {"card": "deck", "relic": "relics", "potion": "potions"}
@@ -57,7 +58,15 @@ def decision(index, macro, frame):
     steps = macro["steps"]
     return [index, frame_key(frame), [step["candidate_ref"] for step in steps], act, floor,
             *(state[key] for key in STATE), macro.get("fight") is not None,
-            any(bool(step.get("explored")) for step in steps), any(bool(step.get("forked")) for step in steps)]
+            explored_mark(steps), any(bool(step.get("forked")) for step in steps), frame["public"].get("phase")]
+
+
+def explored_mark(steps):
+    """A macro-action's `explored` field: false, true, or the name of who proposed its
+    explored candidate (`RolloutRunner.explore_prior`: "prior")."""
+    if not any(step.get("explored") for step in steps):
+        return False
+    return next((step["explored_by"] for step in steps if step.get("explored_by")), True)
 
 
 def frameless(run):

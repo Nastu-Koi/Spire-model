@@ -8,7 +8,7 @@ from collections import deque
 import pytest
 
 from main.env.protocol import ProtocolError, validate_frame
-from main.steam import DECISIONS, ERRORS, RUNS, Controller, live_frame, parse_duration
+from main.steam import DECISIONS, EMPTY_SELECTIONS, ERRORS, RUNS, Controller, live_frame, parse_duration
 from main.tests.test_steam import Policy, offer
 
 
@@ -65,7 +65,6 @@ def decision(token="t1", episode="e1", settings=None, ascension=7, reset_count=0
 
 def controller(bridge, policy, tmp_path, **options):
     clock = Clock()
-    options.setdefault("trained_ascension", 7)
     return Controller(bridge, policy, directory=tmp_path, clock=clock, sleep=clock.sleep, say=lambda _: None,
                       **options), clock
 
@@ -161,13 +160,12 @@ def test_a_stale_execution_is_observed_again_and_a_reset_count_change_restarts_t
     assert [p["token"] for p in bridge.requests("execute")] == ["t1", "t2"] and policy.resets == 2
 
 
-def test_an_ascension_the_checkpoint_was_not_trained_at_is_played_with_one_warning(tmp_path):
+def test_any_ascension_is_played_without_a_warning(tmp_path):
     bridge = Bridge(observe=[decision("t1", ascension=15), decision("t2", ascension=15)],
                     execute=[dict(status="executed")], report=[dict(status="reported")])
-    control, _ = controller(bridge, Resetting("TAKE_CARD_REWARD"), tmp_path, max_decisions=2, trained_ascension=10)
+    control, _ = controller(bridge, Resetting("TAKE_CARD_REWARD"), tmp_path, max_decisions=2)
     assert control.run()["decisions"] == 2
-    kinds = [r["kind"] for r in bridge.requests("report")]
-    assert kinds == ["warning", "decision", "decision"] and "A15" in bridge.requests("report")[0]["message"]
+    assert [r["kind"] for r in bridge.requests("report")] == ["decision", "decision"]
     frame = live_frame(decision(ascension=15))[0]
     assert frame["contract"]["fixed_ascension"] == 15 and validate_frame(frame)
     with pytest.raises(ProtocolError, match="single-player"):
@@ -181,3 +179,37 @@ def test_durations_are_read_in_hours_minutes_and_seconds():
         parse_duration("soon")
     with pytest.raises(ValueError):
         Controller(None, None, directory="x", run_for=0)
+
+
+def selecting(cards):
+    """A combat card selection of one of `cards` that may be skipped, as the bridge sends it."""
+    shown = decision()
+    legal = shown["state"]["legal"]
+    legal.update(scope="card_select", context=[dict(id=f"CARD.{name}", instance_id=f"s{i}", cost=1)
+                                               for i, name in enumerate(cards)],
+                 actions=[dict(command="select_card", args=dict(card_instance_id=f"s{i}")) for i in range(len(cards))],
+                 selection=dict(min=0, max=1, cancelable=True, ordered=True))
+    shown["state"]["combat"] = dict(in_progress=True)
+    return shown
+
+
+def test_a_selection_that_offers_no_card_is_written_down_whole(tmp_path):
+    # No card sent, or cards with bounds that let none be taken: both reach the policy cardless.
+    empty, closed, full = selecting([]), selecting(["FEED"]), selecting(["FEED"])
+    closed["state"]["legal"]["selection"]["max"] = 0
+    bridge = Bridge(observe=[empty, closed, full], execute=[dict(status="executed")],
+                    report=[dict(status="reported")])
+    control, _ = controller(bridge, Policy("CANCEL"), tmp_path, max_decisions=3)
+    assert control.run()["decisions"] == 3
+    assert [record["message"] for record in lines(tmp_path / EMPTY_SELECTIONS)] == [empty, closed]
+
+
+def test_a_skippable_choose_a_card_screen_reads_as_the_engine_offers_it():
+    # The mod asks as the engine's selector is asked: at most one, skipping is finishing
+    # with none, no cancel; so a chosen card cannot be thrown away by a cancel.
+    shown = selecting(["FEED", "ANGER", "HAVOC"])
+    shown["state"]["legal"]["selection"].update(min=0, max=1, cancelable=False)
+    frame, _ = live_frame(shown)
+    assert [c["verb"] for c in frame["legal"]["candidates"]] == ["SELECT_ONE"] * 3 + ["FINISH_SELECTION"]
+    frame, _ = live_frame(shown, selected=["s1"])
+    assert [c["verb"] for c in frame["legal"]["candidates"]] == ["FINISH_SELECTION"]

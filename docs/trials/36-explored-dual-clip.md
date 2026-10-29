@@ -51,7 +51,7 @@
 
 ## 结论与后续
 
-- 探索步改为 A·(1 + log r)：r·A 在 r = 1 处的切线，那里同值同梯度，之后梯度恒为 A·∇log π_θ,T(a)，漂移既不静音也不放大它；|log r| > 3（`EXPLORED_LOG_RATIO`）才停。`Sample` 拆出 `forked`，分叉步照旧双侧裁剪。`Clipped` 另记探索步按优势正负分开的平均对数比值、在窗口外与超过保险界的比例。设计见 [architecture 用药探索](../architecture.md#用药探索)，实现见 [learn 幕组的裁剪目标](../implementation/learn.md#幕组的裁剪目标)。
+- 探索步改为 A·(1 + log r)：r·A 在 r = 1 处的切线，那里同值同梯度，之后梯度恒为 A·∇log π_θ,T(a)，漂移既不静音也不放大它；|log r| > 3（`EXPLORED_LOG_RATIO`）才停。`Sample` 拆出 `forked`，分叉步照旧双侧裁剪。`Clipped` 另记探索步按优势正负分开的平均对数比值、在窗口外与超过保险界的比例。设计见 [architecture 用药探索](../architecture.md#探索步)，实现见 [learn 幕组的裁剪目标](../implementation/learn.md#幕组的裁剪目标)。
 - 双侧裁剪的代码路线对探索步已删除；新做法从 v32 起的两轮试跑（普通战探索率 0、精英与 Boss 0.02）结论未定，记在工单 27。
 
 ## 教训

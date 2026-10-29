@@ -120,6 +120,7 @@ public partial class RunSimulator
             // Loading enters the act and runs its hooks. Reinstall the supplied
             // state silently so owned relics do not grant their pickup effects again.
             runState.Players[0].SyncWithSerializedPlayer(save.Players[0]);
+            RestorePublicHistory(cmd, runState);
             _protocolInitialization = ResumeInitialization;
             _protocolTrainingRun = true;
             _anchorRoomEntered = true;
@@ -137,6 +138,15 @@ public partial class RunSimulator
             InvalidateDecisionProtocol();
             return ErrorWithTrace("ResumeSave failed", ex);
         }
+    }
+
+    // A loaded save starts with an unknown public history. The public_history that
+    // write_continue_save returned with the save, when the command carries it, is what
+    // the run that wrote the save had observed: the resumed run goes on knowing it.
+    static void RestorePublicHistory(JsonElement cmd, RunState runState)
+    {
+        if (cmd.TryGetProperty("public_history", out var history) && history.ValueKind != JsonValueKind.Null)
+            Spire.PublicHistory.NativeHistory.Restore(runState, history);
     }
 
     // A run resumed at the entry of one of its fights: the save written at the fight's
@@ -170,6 +180,7 @@ public partial class RunSimulator
             // Loading enters the act and runs its hooks. Reinstall the supplied
             // state silently so owned relics do not grant their pickup effects again.
             runState.Players[0].SyncWithSerializedPlayer(save.Players[0]);
+            RestorePublicHistory(cmd, runState);
             var wanted = typeElement.GetString()!.Replace("_", "");
             MapPoint? point;
             if (wanted.Equals("boss", StringComparison.OrdinalIgnoreCase))

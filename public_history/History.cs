@@ -102,7 +102,28 @@ public sealed class OddsHistory
                 _rooms[pair.Key] += pair.Value * (_deadlyEvents && pair.Key == "Treasure" ? 2 : 1);
         }
     }
+
+    // What this run has observed so far, for going on from a save of the same moment
+    // in another process (Restore). It holds the public accumulators, unknown ones
+    // as null: a snapshot of a run attached mid-way passes its unknowns on.
+    public OddsSnapshot Snapshot() =>
+        new(Act, _potion, new Dictionary<string, float?>(_rooms), _tutorialRolls, _observedTutorialRolls);
+
+    public void Restore(OddsSnapshot snapshot)
+    {
+        if (snapshot.Act != Act)
+            throw new InvalidOperationException($"A snapshot of act {snapshot.Act} restored in act {Act}");
+        if (!_bases.Keys.All(snapshot.Rooms.ContainsKey) || snapshot.Rooms.Count != _bases.Count)
+            throw new InvalidOperationException("A snapshot names other question rooms");
+        _potion = snapshot.Potion;
+        foreach (var key in _bases.Keys) _rooms[key] = snapshot.Rooms[key];
+        _tutorialRolls = snapshot.TutorialRolls;
+        _observedTutorialRolls = snapshot.ObservedTutorialRolls;
+    }
 }
+
+public sealed record OddsSnapshot(int Act, float? Potion, IReadOnlyDictionary<string, float?> Rooms,
+    int? TutorialRolls, int ObservedTutorialRolls);
 
 public enum Placement { Unknown, Top, Bottom }
 

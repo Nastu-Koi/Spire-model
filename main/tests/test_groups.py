@@ -43,7 +43,7 @@ def test_a_segment_stops_at_the_act_and_the_next_goes_on_from_its_save():
     first = played.run(engine(), "Ironclad", "seed", until_act=2, run_id="Ironclad:seed:act1-0",
                        group="Ironclad:seed:act1")
     assert first["status"] == "complete" and first["outcome"] == "reached" and first["victory"] is None
-    assert first["reached_act"] == 2 and first["segment"] == {"resumed": False, "until_act": 2, "until_boss": None}
+    assert first["reached_act"] == 2 and first["segment"] == {"resumed": False, "until_act": 2}
     assert first["run_id"] == "Ironclad:seed:act1-0" and first["group"] == "Ironclad:seed:act1"
     # The first decision of the second act is not part of the segment; the save stands there.
     assert frames(first) and all(stand(frame)[0] == 1 for frame in frames(first))
@@ -52,14 +52,14 @@ def test_a_segment_stops_at_the_act_and_the_next_goes_on_from_its_save():
 
     second = played.run(engine(), "Ironclad", "seed", resume=first["save"], until_act=3,
                         run_id="Ironclad:seed:act1-0:act2-0", group="Ironclad:seed:act1-0:act2")
-    assert second["segment"] == {"resumed": True, "until_act": 3, "until_boss": None} and second["outcome"] == "reached"
+    assert second["segment"] == {"resumed": True, "until_act": 3} and second["outcome"] == "reached"
     assert second["reached_act"] == 3 and second["save"]["save"]["room"] == 2 * ACTS
     assert stand(frames(second)[0]) == (2, 1, None) and all(stand(frame)[0] == 2 for frame in frames(second))
     validate_run(second, on_policy=True)
 
     last = played.run(engine(), "Ironclad", "seed", resume=second["save"], run_id="Ironclad:seed:act1-0:act2-0:act3-0",
                       group="Ironclad:seed:act1-0:act2-0:act3")
-    assert last["segment"] == {"resumed": True, "until_act": None, "until_boss": None} and last["outcome"] in ("win", "loss")
+    assert last["segment"] == {"resumed": True, "until_act": None} and last["outcome"] in ("win", "loss")
     assert last["victory"] is (last["outcome"] == "win")
     assert stand(frames(last)[0]) == (3, 1, None) and all(stand(frame)[0] == 3 for frame in frames(last))
     assert "save" not in last
@@ -88,39 +88,6 @@ def test_a_segment_is_played_at_its_own_ascension_and_goes_on_at_its_saves():
     assert plain["ascension"] == 0
 
 
-def test_a_segment_stops_at_the_boss_fight_and_the_next_enters_it_again():
-    policy = learner()
-    played = runner(policy)
-    # The third act's boss is the fight of its last room; the segment stops at the
-    # fight's first decision, which belongs to the next segment.
-    first = played.run(engine(), "Defect", "seed", resume=None, until_boss=3, run_id="a", group="g")
-    assert first["outcome"] == "reached" and first["reached_boss"] == 3 and "reached_act" not in first
-    assert first["segment"] == {"resumed": False, "until_act": None, "until_boss": 3}
-    save = first["save"]
-    assert save["at"] == "fight" and save["save"]["room"] == ROOMS - 1
-    assert save["fight"]["kind"] == "boss" and save["fight"]["act"] == 3 and save["fight"]["second_boss"] is False
-    assert save["fight"]["encounter"] == "ENCOUNTER.SYNTHETIC" and save["fight"]["floor"] == ACTS
-    # Every frame of the segment is before the boss fight; the earlier bosses were fought.
-    assert frames(first) and len(first["macros"]) == 2 * (ROOMS - 1)
-    assert first["fights"]["wins"] == ROOMS - 1
-    validate_run(first, on_policy=True)
-
-    last = played.run(engine(), "Defect", "seed", resume=save, run_id="a:boss3-0", group="a:boss3")
-    assert last["segment"] == {"resumed": True, "until_act": None, "until_boss": None}
-    assert last["outcome"] in ("win", "loss") and last["victory"] is (last["outcome"] == "win")
-    # The segment is the boss fight and the decision after it: the fight's selection first.
-    assert frames(last)[0]["public"]["phase"] == "combat" and stand(frames(last)[0])[0] == 3
-    assert last["fights"]["wins"] == 1
-    validate_run(last, on_policy=True)
-
-    # A boss cut before the second act's start: the boss wave then plays on to the act.
-    boss2 = played.run(engine(), "Defect", "seed", until_boss=2, run_id="b", group="g")
-    on = played.run(engine(), "Defect", "seed", resume=boss2["save"], until_act=3, run_id="b:boss2-0", group="b:boss2")
-    assert on["outcome"] == "reached" and on["reached_act"] == 3 and on["save"]["at"] == "act"
-    with pytest.raises(ValueError):
-        played.run(engine(), "Defect", "seed", until_act=2, until_boss=2, run_id="c", group="g")
-
-
 def test_a_run_without_an_outcome_is_only_a_segment_that_reached_its_act():
     policy = learner()
     first = runner(policy).run(engine(), "Silent", "seed", until_act=2, run_id="x", group="g")
@@ -132,17 +99,10 @@ def test_a_run_without_an_outcome_is_only_a_segment_that_reached_its_act():
 
 def test_the_waves_and_their_jobs_are_named_by_where_they_start():
     assert waves((2, 3)) == ["act1", "act2", "act3"] and waves((3,)) == ["act1", "act3"]
-    # A boss cut comes before the next act's start; the wave from it is the boss's.
-    assert cuts((2, 3), (3,)) == [("act", 2), ("act", 3), ("boss", 3)]
-    assert cuts((2, 3), (1, 2, 3)) == [("boss", 1), ("act", 2), ("boss", 2), ("act", 3), ("boss", 3)]
-    assert waves((2, 3), (3,)) == ["act1", "act2", "act3", "boss3"]
-    assert waves((), (3,)) == ["act1", "boss3"] and waves((2,), (1,)) == ["act1", "boss1", "act2"]
+    assert cuts((2, 3)) == [("act", 2), ("act", 3)]
     for wrong in ((), (1,), (3, 2), (2, 2)):
         with pytest.raises(ValueError):
             waves(wrong)
-    for wrong in ((0,), (3, 1), (2, 2)):
-        with pytest.raises(ValueError):
-            waves((2, 3), wrong)
     assert per_wave(8, 2) == [8, 8] and per_wave([4, 8], 2) == [4, 8] and per_wave([5], 1) == [5]
     for wrong in (([4, 8, 2], 2), (0, 1), ([], 1)):
         with pytest.raises(ValueError):
@@ -159,13 +119,6 @@ def test_the_waves_and_their_jobs_are_named_by_where_they_start():
     assert all(spec["resume"] == "saves/x.json.gz" and spec["group"] == "Ironclad:s:act1-0:act2"
                and spec["until_act"] == 3 for _, spec, _ in jobs)
     assert all(spec["until_act"] is None for _, spec, _ in resume_jobs(rows, 1, "act3", None))
-    assert all(spec["until_boss"] == 3 and "until_act" not in spec for _, spec, _ in resume_jobs(rows, 1, "act3", ("boss", 3)))
-    # Forking jobs say each segment's place in its group; without a depth they say nothing.
-    assert all("fork" not in spec for _, spec, _ in jobs)
-    forking = start_jobs({c: [f"{c}-1"] for c in CHARACTERS}, 2, "act1", ("act", 2), fork_depth=2)
-    assert [spec["fork"] for _, spec, _ in forking[:2]] == [dict(index=0, size=2, depth=2), dict(index=1, size=2, depth=2)]
-    assert [spec["fork"] for _, spec, _ in resume_jobs(rows, 3, "act2", ("act", 3), fork_depth=1)] == [
-        dict(index=k, size=3, depth=1) for k in range(3)]
 
 
 def test_act_groups_sample_the_waves_in_turn_and_keep_the_chains_they_won(tmp_path):
@@ -176,7 +129,7 @@ def test_act_groups_sample_the_waves_in_turn_and_keep_the_chains_they_won(tmp_pa
         summary = sample_groups(pool, runner(policy, iteration=1), seeds, directory, n=2, m=[2, 1],
                                 boundaries=BOUNDARIES)
     assert summary == groups_summary(directory)
-    assert summary["waves"] == ["act1", "act2", "act3"] and summary["boundaries"] == [2, 3] and summary["bosses"] == []
+    assert summary["waves"] == ["act1", "act2", "act3"] and summary["boundaries"] == [2, 3]
     assert summary["cuts"] == [["act", 2], ["act", 3]]
     assert (summary["groups"], summary["n"], summary["m"], summary["iteration"]) == (5, 2, [2, 1], 1)
     assert summary["saves"] == {"act1": 10, "act2": 20}
@@ -191,7 +144,7 @@ def test_act_groups_sample_the_waves_in_turn_and_keep_the_chains_they_won(tmp_pa
     assert all(summary[wave]["phases"].get("combat") for wave in summary["waves"])
 
     rows = save_rows(directory, "act1")
-    assert len(rows) == 10 and all(row["act"] == 2 and row["at"] == "act" and row["boss"] is None for row in rows)
+    assert len(rows) == 10 and all(row["act"] == 2 and row["at"] == "act" for row in rows)
     assert all(row["act"] == 3 for row in save_rows(directory, "act2")) and save_rows(directory, "act3") == []
     first_rows = list(read_index(directory / "act1"))
     assert sorted(row["run_id"] for row in first_rows) == sorted(row["run_id"] for row in rows)
@@ -351,32 +304,6 @@ def test_a_wave_cut_off_leaves_no_summary_and_is_gone_on_with(tmp_path):
     assert again["act3"]["resumed"] >= 3 and again["act3"]["written"] == 40 and groups_summary(directory) == again
 
 
-def test_a_round_cut_at_a_boss_fight_plays_the_boss_wave_from_the_fights_saves(tmp_path):
-    policy = learner()
-    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
-    directory = tmp_path / "groups"
-    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
-        summary = sample_groups(pool, runner(policy, iteration=1), seeds, directory, n=2, m=[1, 1, 2],
-                                boundaries=BOUNDARIES, bosses=(3,))
-    assert summary["waves"] == ["act1", "act2", "act3", "boss3"] and summary["bosses"] == [3]
-    assert summary["cuts"] == [["act", 2], ["act", 3], ["boss", 3]] and summary["m"] == [1, 1, 2]
-    third, boss = summary["act3"], summary["boss3"]
-    # The third act's segments stop at its boss fight; the boss wave plays the fight to the end.
-    assert (third["until_act"], third["until_boss"], third["until"]) == (None, 3, ["boss", 3])
-    assert third["outcomes"] == {"reached": 10} and summary["saves"]["act3"] == 10
-    assert (boss["until_act"], boss["until"], boss["segments"], boss["groups"]) == (None, None, 20, 10)
-    assert set(boss["outcomes"]) <= {"win", "loss"} and sum(boss["outcomes"].values()) == 20
-    rows = save_rows(directory, "act3")
-    assert all(row["at"] == "fight" and row["boss"] == 3 and row["act"] is None for row in rows)
-    for window_ in RunShards(directory / "boss3").windows(shards=1):
-        for run in window_:
-            assert run["segment"] == {"resumed": True, "until_act": None, "until_boss": None}
-            # The boss wave's frames are the fight (in the last room of the act) and what follows.
-            assert frames(run)[0]["public"]["phase"] == "combat" and stand(frames(run)[0]) == (3, ACTS, None)
-            assert run["fights"]["wins"] + run["fights"]["losses"] == 1
-            validate_run(run, on_policy=True)
-
-
 def greedy(policy, iteration=0):
     return RolloutRunner(policy.model, policy.vocabulary, version=policy.policy_version, precision="no",
                          ascension=0, temperatures=TEMPERATURES, iteration=iteration, greedy_fights=True)
@@ -387,17 +314,11 @@ def test_a_round_with_greedy_fights_keeps_no_frames_of_its_fights(tmp_path):
     seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
     directory = tmp_path / "groups"
     with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
-        summary = sample_groups(pool, greedy(policy), seeds, directory, n=2, m=2, boundaries=BOUNDARIES,
-                                fork_depth=1)
-        with pytest.raises(ValueError, match="boss"):
-            sample_groups(pool, greedy(policy), seeds, tmp_path / "bosses", n=2, m=2, boundaries=BOUNDARIES,
-                          bosses=(3,))
+        summary = sample_groups(pool, greedy(policy), seeds, directory, n=2, m=2, boundaries=BOUNDARIES)
     assert summary["greedy_fights"] is True and summary["waves"] == ["act1", "act2", "act3"]
     for wave in summary["waves"]:
-        # The round's decisions are those outside the fights: every segment forked at its
-        # first one, the fights' selections counted nowhere.
+        # The round's decisions are those outside the fights, the fights' selections counted nowhere.
         assert summary[wave]["phases"] and "combat" not in summary[wave]["phases"]
-        assert summary[wave]["forked"] == summary[wave]["written"]
         runs = [run for window_ in RunShards(directory / wave).windows(shards=8) for run in window_]
         frameless = 0
         for run in runs:

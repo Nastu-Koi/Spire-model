@@ -468,9 +468,10 @@ class Sample:
     old_log_prob: float | None = None
     temperature: float | None = None
     advantage: float | None = None
-    # A decision of it was explored (a potion use drawn by the exploration) or forked
-    # (taken by rank), not drawn from the policy (`RolloutRunner`): the update learns
-    # the one by its score and holds the other on both sides (`main/learn/grpo.py`).
+    # A decision of it was explored (a candidate outside fights other than the policy's
+    # most likely) or forked (taken at a hindsight fork), not drawn from the policy
+    # (`RolloutRunner`): the update learns the one by its score and holds the other on
+    # both sides (`main/learn/clipped.py`).
     explored: bool = False
     forked: bool = False
     _lengths: tuple[tuple[int, int], ...] | None = field(

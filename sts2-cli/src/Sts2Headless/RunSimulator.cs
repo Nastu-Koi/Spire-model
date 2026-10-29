@@ -953,6 +953,9 @@ public partial class RunSimulator
                 ["path"] = outputPath,
                 ["size"] = saveJson.Length,
                 ["room_type"] = currentRoom?.GetType().Name,
+                // What the run has publicly observed as the save stands; resume_save and
+                // resume_fight take it back (Spire.PublicHistory.NativeHistory.Restore).
+                ["public_history"] = Spire.PublicHistory.NativeHistory.Snapshot(_runState),
             };
         }
         catch (Exception ex)

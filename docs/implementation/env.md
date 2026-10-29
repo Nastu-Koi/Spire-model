@@ -40,7 +40,7 @@
 
 控制器步骤不产生策略损失，作为 `environment_actions` 保留原始帧、动作与 actor。采样与训练只接受 `control_version=public-control-v1` 且宏动作里没有控制器步骤的轨迹。控制规则变了，示范不必重新生成：分片保存了完整候选，对旧分片执行 `reindex`（见 [data](data.md)）。
 
-非战斗阶段的可取消选择不发布 `CANCEL`（`selection_cancel = "combat-or-dead-end-v1"`）；没有任何可选牌、无法完成时仍提供，避免死局。战斗中保持原生取消语义，因为 CombatSolver 在“计划不选任何牌”时依赖它。Steam 端与录制导入用同一规则（`main.demos.recorder.macros.cancel_offered`）。
+非战斗阶段的可取消选择不发布 `CANCEL`（`selection_cancel = "combat-or-dead-end-v1"`）；没有任何可选牌、无法完成时仍提供，避免死局。战斗中保持原生取消语义，因为 CombatSolver 在“计划不选任何牌”时依赖它。Steam 端用同一规则（`main.steam.cancel_offered`）。
 
 ## 奖励
 
@@ -48,7 +48,7 @@
 
 ## 入场存档
 
-指定 `--boundary-bosses` 时，幕组在 Boss 入场切点（该幕第一场 Boss 战的第一个决策，`events` 带 `encounter_started`）让引擎 `write_continue_save` 到临时文件再读回（`saves.continue_save`）；指定 `--fight-entries` 时，每场不是事件引发的战斗都在第一个决策这样写一份（见 [play](play.md#幕组) 的战况与入场存档）。在房间里时引擎存的是进房前的状态（节点从已访问坐标里退回、房间清空；战斗中的存档见下段）；`anchor_state` 序列化的是已进房的状态，不能用。续打用一条命令 `resume_fight`（`saves.fight_resume_command(row)`：存档、遭遇、楼层、节点类型、是否第二 Boss），引擎加载后把节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入遭遇，回复就是战斗的第一个决策帧（`CliEngine.resume_fight`）。重进的战斗与原战斗开局相同：HP、最大 HP、金币、幕、楼层、卡组、遗物及其计数、药水、敌人和它们的随机 HP、开局手牌都一样，动作相同就逐帧相同，是重放；只有公开历史里“上一个节点有没有商店”在加载的对局里是未知。
+记战况的段（`iterate` 的幕组都是）在每场不是事件引发的战斗的第一个决策（`events` 带 `encounter_started`）让引擎 `write_continue_save` 到临时文件再读回（`saves.continue_save`），见 [play](play.md#幕组) 的战况与入场存档。在房间里时引擎存的是进房前的状态（节点从已访问坐标里退回、房间清空；战斗中的存档见下段）；`anchor_state` 序列化的是已进房的状态，不能用。续打用一条命令 `resume_fight`（`saves.fight_resume_command(row)`：存档、遭遇、楼层、节点类型、是否第二 Boss），引擎加载后把节点记为已访问、标训练可用（契约 `initialization=fight-resume-v1`）并进入遭遇，回复就是战斗的第一个决策帧（`CliEngine.resume_fight`）。重进的战斗与原战斗开局相同：HP、最大 HP、金币、幕、楼层、卡组、遗物及其计数、药水、敌人和它们的随机 HP、开局手牌都一样，动作相同就逐帧相同，是重放；只有公开历史里“上一个节点有没有商店”在加载的对局里是未知。
 
 战斗进行中写的存档是进这个房间时的整局状态：`RoomEntrySave` 在 `RunManager.EnterRoom` 进战斗房间之前把整局序列化一份（游戏自己选图进房时也在进房之前存档，无头引擎不存），`write_continue_save` 在战斗进行中写这一份，再把节点退回。开战时对整局的改动（Blood Vial 与 Fake Blood Vial 第一回合回血、Royal Poison 扣血、Maw Bank 进房加金币、Petrified Toad 给药水、Ember Tea 与 Happy Flower 计数）和敌人 HP、洗牌所用的随机数都不在存档里，重进时各发生一次。加格挡、加能量、抽牌（Anchor、Lantern、Bag of Preparation 等）只作用于本场战斗，存档里本来就没有，每次进入各生效一次。战斗结束之后（奖励、战后选图）、其它房间、以及不经过 `EnterRoom` 的事件引发的战斗里，写的仍是当时的状态。序列化不消耗随机数、不改状态，每场战斗不到 1 ms。
 
@@ -74,6 +74,8 @@
 
 引擎进程默认关掉 .NET 运行时按剖析重新编译与后台垃圾回收（`engine.RUNTIME_SETTINGS`：`DOTNET_TieredPGO=0`、`DOTNET_gcConcurrent=0`）。一轮的引擎占满整机核心时，运行时自己的这部分工作也在和对局抢 CPU；关掉后每步引擎 CPU 少约五分之一，同一存档、同一串选择下到达的公开状态逐帧相同。进程环境里显式设的值优先。
 
+`CliEngine.reseed(seed)`（引擎命令 `reseed`，`RunSimulator.Reseed.cs`）在当前决策上[重新播种](../../CONTEXT.md)：局的 12 个随机流与每个玩家的 3 个，各换成以 `seed` 与流名新建的 `Rng` 的状态，就地载入（游戏自己持有的生成器引用不变），计数与种子字符串不变；公开状态与正在作答的帧不变。各幕预先排好的遭遇与事件、Boss、地图、共享遗物袋，以及遗物自己持有的生成器不动。同一种子播两次之后逐帧相同；不播种时引擎行为与没有这条命令时相同。原先只有局外对照的多未来用它，局外对照删除后（[trials 43](../trials/43-prune-iterate-options.md)）训练代码不再调用，引擎命令与 `CliEngine.reseed` 保留。
+
 引擎的回复（每帧几十 KB）与发给它的命令用 orjson 解析、写出：引擎（System.Text.Json）写的数都在 64 位有符号或无符号整数以内（存档里有接近 2^64 的无符号数），也不写 NaN，orjson 读出的值与标准库相同。
 
 ## 公开历史（C#）
@@ -83,7 +85,8 @@
 - 敌人意图在敌方开始行动时保存公开图标及显示数值，切回玩家方、开始抽牌前成为上一回合输入。
 - 牌位只从公开的置顶／置底操作维护；随机插入和洗牌使位置失效；原生插入的 index 从不作为知识来源。`AsyncLocal` 携带原生 Add／Shuffle 调用的公开位置语义，随异步续延流动。已知牌位通过 memory 的卡牌引用及 `known_draw_before` 关系表达。
 - 药水在原生 Roll 生成奖励时更新累计值；强制掉落不改累计，跨幕不重置。问号房间跨幕重置，按 0.111.0 的累计顺序与相关遗物、事件规则计算。商店 blacklist 取决于上一地图点，输入分别提供允许／禁止商店的条件分布。
-- `Capture` 只输出公开历史及当前对象的引用；录制里的实例 ID 由 Python 导入器映射成当前帧的实体引用。读旧摘要或旧录制不读取存档 odds。
+- `Capture` 只输出公开历史及当前对象的引用；Steam Mod 快照里的实例 ID 由 Python 控制端映射成当前帧的实体引用。读旧摘要不读取存档 odds。
+- 快照（`NativeHistory.Snapshot`／`Restore`，`OddsHistory.Snapshot`／`Restore`）：`write_continue_save` 的回复带 `public_history`，记掉药累计值、问号房间各项累计值与所在幕、新手局计数、上一个点是否商店，未知的为 null。`main/env/saves.py` 把它放进存档的 `spire_public_history` 键，随存档走（幕边界存档、战斗入场存档、药价取点及其分支）；`resume_save`、`resume_fight` 前由 `resume_fields` 取出、作为命令的 `public_history` 交回，引擎在加载之后装上，代替 unknown。装回的是写存档那一局观察到的公开历史，不是存档里的 odds；幕不一致或版本不符时报错。战斗内的历史（上一回合意图、已知牌位）不进快照：入场存档在进房之前，开战时它们本来就是空的。
 
 测试：
 
@@ -91,7 +94,7 @@
 dotnet run --project public_history/tests/HistoryTests.csproj
 python -m pytest -q main/tests/test_public_history.py
 dotnet run --project public_history/tests/native/NativeHistoryTests.csproj -- \
-  /absolute/repo /absolute/worker-config.json /absolute/RunRecorder.dll
+  /absolute/repo /absolute/worker-config.json /absolute/SpireTakeover.dll
 python public_history/tests/full_runs.py /absolute/Sts2Headless.dll /tmp/history-full-runs.json
 ```
 

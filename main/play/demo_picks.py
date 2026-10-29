@@ -30,28 +30,12 @@ import random
 from collections import Counter
 from pathlib import Path
 
-from main.play.fight_groups import SHARES, candidates, quotas
+from main.play.fight_groups import SHARES, _drawn, candidates, natural_weights, quotas
 
 DIRECTORY = "demos"  # a round's demonstrations, beside its waves
 SELECTION = "selection.json"
 COUNT = 2000
 OPENING = 0.2  # the share of the count the fights set up by a selection may take first
-
-
-def natural_weights(rows):
-    """Each row's weight: one over the segments its run (character and seed) has in its
-    wave, as many as its fights there name."""
-    segments = {}
-    for row in rows:
-        segments.setdefault((row["wave"], row["character"], row["seed"]), set()).add(row["run_id"])
-    return [1.0 / len(segments[(row["wave"], row["character"], row["seed"])]) for row in rows]
-
-
-def _drawn(pairs, rng):
-    """`(row, weight)` pairs in the order of a draw without replacement at those weights
-    (each the larger of its key u ** (1 / weight) first)."""
-    return [row for _, row in sorted(((rng.random() ** (1.0 / weight), row) for row, weight in pairs),
-                                     key=lambda item: -item[0])]
 
 
 def pick(rows, count, key, opening=OPENING, shares=SHARES):

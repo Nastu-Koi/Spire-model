@@ -27,6 +27,27 @@ def source_share(text):
         raise argparse.ArgumentTypeError(f"{text!r} is not KIND=SHARE") from None
 
 
+def outside_rate(text):
+    """A value of --explore-outside: a rate for every phase, or `PHASE=RATE`, as (phase, rate)."""
+    phase, sep, rate = text.rpartition("=")
+    try:
+        return (phase, float(rate)) if sep else float(rate)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not RATE or PHASE=RATE") from None
+
+
+def kind_number(text):
+    """A value of --fight-group-shares and its kin: `KIND=NUMBER`, as (kind, number)."""
+    kind, sep, number = text.partition("=")
+    try:
+        value = float(number)
+    except ValueError:
+        value = None
+    if not sep or kind not in ("normal", "elite", "boss") or value is None or value < 0:
+        raise argparse.ArgumentTypeError(f"{text!r} is not KIND=NUMBER with KIND normal, elite or boss")
+    return kind, value
+
+
 def parser():
     p = argparse.ArgumentParser(
         description="STS2 Full Attention policy: data → Bootstrap → sampling and evaluation → Steam"
@@ -52,29 +73,6 @@ def parser():
     x.add_argument("paths", nargs="+")
     x.add_argument("--accepted", required=True)
     x.add_argument("--quarantine", required=True)
-    x = sub.add_parser(
-        "import-recorder",
-        help="Import Steam RunRecorder JSONL with complete-run and visibility checks",
-    )
-    x.add_argument(
-        "--bootstrap-only",
-        "--bc-only",
-        dest="bc_only",
-        action="store_true",
-        help="Use valid recorded decisions for Bootstrap, including solver and partial runs; retain unverified provenance",
-    )
-    x.add_argument(
-        "--recorder-version",
-        help="Import only journals with this exact recorder version",
-    )
-    x.add_argument(
-        "paths", nargs="+", help="Journal files, globs, or recorder directories"
-    )
-    x.add_argument(
-        "--output",
-        required=True,
-        help="New directory for accepted data, quarantine and summary",
-    )
     x = sub.add_parser(
         "import-independent",
         help="Import Spire Codex independent supervised samples as Bootstrap runs",
@@ -194,7 +192,8 @@ def parser():
     x = sub.add_parser(
         "iterate",
         help="Improve a policy by iterations of act groups: sample segments cut at the boundary acts, "
-             "several from each start; price each decision against its group; update; evaluate")
+             "several from each start, their fights played greedily; price each decision outside them "
+             "against its group, leaving out the groups whose segments all came to one return; update; evaluate")
     x.add_argument("--checkpoint", required=True,
                    help="The policy to start from, resumed strictly; a run under way goes on "
                         "from its own last update")
@@ -203,10 +202,14 @@ def parser():
                    help="The waves' relative shares of a batch, one per wave in the order of the acts; "
                         "a wave's share is its share of the gradient. By the waves' decisions when not "
                         "given, so that a pass sees every wave once")
-    x.add_argument("--drop-uniform-groups", action="store_true",
-                   help="Leave out of the update the groups whose segments all came to the same return: their "
-                        "decisions get no advantage, the baseline is fitted on the other groups, and the shares "
-                        "and the pass are of the decisions kept")
+    x.add_argument("--growth-bonus", type=float, default=0.0,
+                   help="The HP each growth event takes off a fight's cost where the fight groups are picked and "
+                        "priced: a card grown for the run (Genetic Algorithm and The Scythe played; Feed, Hand of "
+                        "Greed and The Hunt fatal), each copy once a fight, and a relic's carried count left near "
+                        "its trigger; none in a fight the run ends in. 0 counts none; needs --fight-groups")
+    x.add_argument("--win-hp-bonus", type=float, default=0.0,
+                   help="A won run's return is 1 plus this times the share of its maximum HP it ended with, a "
+                        "tie-break among wins (from the fights' records); 0 adds nothing")
     x.add_argument("--output", required=True,
                    help="The records of the iterations (state, rounds' summaries, evaluations); "
                         "an existing one is continued")
@@ -225,9 +228,6 @@ def parser():
     x.add_argument("--engine-root")
     x.add_argument("--boundary-acts", type=int, nargs="+", default=[2, 3],
                    help="The acts a run is cut at, each cut a wave played from the save there")
-    x.add_argument("--boundary-bosses", type=int, nargs="*", default=[],
-                   help="The acts whose boss fight a run is also cut at: the wave from there enters the "
-                        "fight again from the save at its entry")
     x.add_argument("--group-n", type=int, default=8, help="Segments from each seed in the first wave")
     x.add_argument("--group-m", type=int, nargs="+", default=[8],
                    help="Segments from each save, one number or one for each later wave")
@@ -235,37 +235,46 @@ def parser():
                    help="Play each (character, seed) group of a round at one ascension of this window, "
                         "the window's ascensions taking turns; the checkpoint's without it. Evaluations "
                         "stay at the checkpoint's")
-    x.add_argument("--fork-depth", type=int, default=0,
-                   help="Decisions with a choice at the start of every segment at which its group parts in "
-                        "two, half taking the policy's most likely candidate and half its second; 0 forks none")
-    x.add_argument("--fight-entries", action="store_true",
-                   help="Every wave of a round also writes a record of each fight its segments played "
-                        "(fights.jsonl) and the entry save of each fight not begun by an event (fights/), "
-                        "kept until the iteration's cleanup")
     x.add_argument("--fight-groups", type=int, default=0,
                    help="After a round's act waves, play this many of the fights they recorded again from their "
                         "entry saves, each --fight-group-size times to the fight's end, the fights drawn at the "
                         "fight temperature: normal, elite and boss 3:4:4, part of each kind by deaths and cost "
-                        "and the rest evenly. Needs --greedy-fights and --fight-entries; 0 plays none")
+                        "and the rest evenly; 0 plays none")
     x.add_argument("--fight-group-size", type=int, default=8, help="Segments from each fight of the fight groups")
+    x.add_argument("--fight-group-kind-size", type=kind_number, nargs="+", default=[],
+                   help="KIND=SEGMENTS pairs: the kinds of fight whose groups are of a size of their own (boss=16); "
+                        "the others take --fight-group-size")
+    x.add_argument("--fight-group-shares", type=kind_number, nargs="+", default=[],
+                   help="KIND=SHARE for each of normal, elite and boss: how the fight groups share their fights "
+                        "among the kinds (3:4:4 without it)")
+    x.add_argument("--fight-pool", nargs="+", default=[],
+                   help="Fight evaluation sets (fight-eval's format) whose entry saves the fight groups also play: "
+                        "--fight-pool-share of their fights, shared among the kinds as the round's are, drawn evenly")
+    x.add_argument("--fight-group-natural", action="store_true",
+                   help="Pick the round's own fights at their natural weights (one over their run's segments in their "
+                        "wave): every run once in each act rather than the act groups' fan-out crowding the last act")
+    x.add_argument("--fight-pool-share", type=float, default=0.0,
+                   help="The share of the fight groups' fights taken from --fight-pool; 0 takes none")
     x.add_argument("--fight-group-priority", type=float, default=0.5,
                    help="The share of each kind of fight the fight groups pick by priority (deaths first, then "
                         "by cost); the rest is drawn evenly")
-    x.add_argument("--fight-group-fork-depth", type=int, default=0,
-                   help="Decisions with a choice at the start of every fight segment at which its group parts "
-                        "in two, as --fork-depth does for the act groups; 0 forks none")
-    x.add_argument("--fight-group-explore-potions", type=float, nargs="+", default=[0.0],
-                   help="Potion exploration of the fight groups' segments, given as --explore-potions is")
-    x.add_argument("--combat-demos", nargs="+", metavar="DIR",
-                   help="Directories of combat demonstrations (imports of the solver's fights) whose fights every "
-                        "update learns in the same batches as the act groups, every macro-action by its NLL with no "
-                        "KL; held-out seeds included. A pass takes the demonstrations' share of its batches, the "
-                        "fights repeated when that is more than they hold and a part of them drawn when less")
+    x.add_argument("--fight-hindsight", type=int, default=0,
+                   help="After a round's fight groups, fork this many of their segments, died or not (3:4:4 by "
+                        "kind): each replayed to its first decision in danger with a potion (one arm drinks each "
+                        "potion, two draw), the one from its second round on whose two most likely actions are "
+                        "closest (two arms take each) and a round's first (four draw), all to the fight's end; "
+                        "learned beside the fight groups. Needs --fight-groups; 0 forks none")
+    x.add_argument("--fight-hindsight-shares", type=kind_number, nargs="+", default=[],
+                   help="KIND=SHARE for each of normal, elite and boss: how the hindsight trunks are shared among "
+                        "the kinds (3:4:4 without it); a share of 0 forks none of the kind")
+    x.add_argument("--potion-prices",
+                   help="Prices of a fit (fit-prices' prices.json) the fight groups are picked and priced at; the "
+                        "fixed 7/9/11 (the last fight 1/1/1) without. An iteration keeps the prices it was sampled at")
     x.add_argument("--round-demos", type=int, default=0,
                    help="The BC phase: after its advantages a round hands this many of the fights it recorded to the "
                         "solver (normal, elite and boss 3:4:4 at their natural frequency, the fights set up by a "
                         "selection first) and its update learns the solver's won fights of the last --demo-buffer "
-                        "rounds. Needs --greedy-fights and --fight-entries; 0 hands none")
+                        "rounds; 0 hands none")
     x.add_argument("--demo-buffer", type=int, default=3,
                    help="The rounds whose demonstrations an update learns, this one and those before it")
     x.add_argument("--demo-opening", type=float, default=0.2,
@@ -274,37 +283,41 @@ def parser():
                    help="Runs the solver fights at once (two native processes each; one per physical core)")
     x.add_argument("--source-shares", nargs="+", type=source_share, metavar="KIND=SHARE",
                    help="Relative shares of an update's batch by kind of source, naming every kind the update has: "
-                        "act-groups, combat-demos (act-groups=1 combat-demos=1 for as many demonstrated "
-                        "macro-actions as priced act decisions). By their decisions when not given")
+                        "act-groups, fight-groups, combat-demos (act-groups=1 fight-groups=1 for as many priced fight "
+                        "decisions as act decisions). By their decisions when not given")
     x.add_argument("--clip", type=float, default=0.2, help="The ratio's clip ε")
-    x.add_argument("--kl", type=float, default=0.01, help="The coefficient of the KL to the reference")
-    x.add_argument("--reference-every", type=int,
-                   help="Renew the KL's reference every this many iterations with the policy of that moment; "
-                        "every --evaluate-every iterations by default, 0 keeps --checkpoint as the reference throughout")
+    x.add_argument("--kl", type=float, default=0.01,
+                   help="The coefficient of the KL to the reference: the policy as it stood at the last "
+                        "--evaluate-every boundary, the checkpoint before the first")
+    x.add_argument("--fight-kl", type=float,
+                   help="The KL coefficient of the fight groups' samples; --kl's by default")
+    x.add_argument("--passes", type=int, default=1,
+                   help="Passes an update makes over its round, all at the round's sampled log-probabilities")
+    x.add_argument("--freeze-outside", action="store_true",
+                   help="The act waves' advantages are 0: only their KL to the reference pulls, while the fights learn")
     x.add_argument("--learning-rates",
                    help="JSON file of the rates this run trains at (muon, backbone, embedding, head); "
                         "the checkpoint's without it")
     x.add_argument("--min-entropy", type=float,
                    help="Stop after an iteration whose update leaves the policy's mean entropy below this")
-    x.add_argument("--explore-potions", type=float, nargs="+", default=[0.0],
-                   help="Probability that a sampled fight decision which could use a potion draws one of its "
-                        "USE_POTION candidates instead of a sample from the policy: one value for every fight, "
-                        "two for normal fights and for elite and boss fights, three for each kind; 0 explores nothing")
-    x.add_argument("--greedy-fights", action="store_true",
-                   help="Play every decision inside a fight by the policy's most likely action and draw only the "
-                        "rest: the fights are kept without frames, and the advantages and the update are of the "
-                        "decisions outside them. Not with --explore-potions or --boundary-bosses")
-    x.add_argument("--updates", default="round",
-                   help="Updates per iteration: `round` (a pass over the round) or a number of optimizer steps")
+    x.add_argument("--explore-outside", type=outside_rate, nargs="+", default=[0.0],
+                   help="Probability that a sampled decision outside fights of the act groups takes a candidate "
+                        "other than the policy's most likely (half the time the second, otherwise one of the rest "
+                        "at random): one value for every phase, or PHASE=RATE pairs; 0 explores nothing")
+    x.add_argument("--explore-prior", type=outside_rate, nargs="+", default=[0.0],
+                   help="Probability that a sampled decision outside fights of the act groups asks the --prior "
+                        "network for its most likely candidate and takes it where the policy's most likely differs; "
+                        "one value for every phase, or PHASE=RATE pairs; 0 asks nothing")
+    x.add_argument("--prior", help="Checkpoint of the network --explore-prior asks, of the policy's vocabulary")
+    x.add_argument("--explored-on-tree", action="store_true",
+                   help="Only the explored decisions outside fights that their group's tree prices learn; "
+                        "the others get no advantage")
+    x.add_argument("--explored-centered", action="store_true",
+                   help="Center the advantages of the explored decisions outside fights that learn by phase in each "
+                        "wave: what is left is which proposals did better than the others")
     x.add_argument("--batch", type=int,
                    help="Macro-actions of one optimizer step, a multiple of the profile's logical batch whose "
                         "batches are accumulated into it; the logical batch by default. The rates stay as given")
-    x.add_argument("--weight-cap", type=float, default=10.0,
-                   help="What one sampled decision of a small character and phase group may weigh, "
-                        "in even shares of its wave; 0 for no cap")
-    x.add_argument("--phase-weights", choices=["group", "even"], default="group",
-                   help="How a wave's decisions share its weight: every (character, phase) group alike, "
-                        "or every decision alike")
     x.add_argument("--window-shards", type=int, default=8)
     x.add_argument("--evaluate-every", type=int, default=5, help="Iterations between evaluations")
     x.add_argument("--eval-seeds", help="Seed file of the evaluations; without it none is made")
@@ -335,6 +348,11 @@ def parser():
     x.add_argument("--precision", choices=sorted(PRECISIONS),
                    help="Precision of the network's global layers: bf16 (autocast) or fp32; default the checkpoint's")
     x.add_argument("--per-kind", type=int, help="Play only the first this many fights of each kind: a trial")
+    x.add_argument("--prices", help="Also report the fights at a fit's prices (prices.json): report-prices.json, "
+                                    "the policy's fights alone")
+    x.add_argument("--growth-bonus", type=float, default=0.0,
+                   help="Price the fights with this growth reward (iterate --growth-bonus): its item `growth` and "
+                        "the cost without it beside the cost")
     x.add_argument("--engine-root")
     x.add_argument("--output", required=True, help="New directory: fights.jsonl, metadata.json, report.json, report.txt")
     x.add_argument("--max-steps", type=int, default=10000)
@@ -349,6 +367,34 @@ def parser():
     x.add_argument("--fights", help="The set's directory; the first evaluation's by default")
     x.add_argument("--solver", help="Output of `entry_battles run` on the set; the set's solver/ if it has one")
     x.add_argument("--text", action="store_true", help="Print the tables instead of the JSON")
+    x.add_argument("--prices", help="Report at a fit's prices (prices.json) instead of the fixed ones: the "
+                                    "policy's fights alone, no solver")
+    x.add_argument("--growth-bonus", type=float, default=0.0, help="As fight-eval's")
+    x = sub.add_parser("fit-prices",
+                       help="Fit the potions' prices on pairs of greedy continuations of the checkpoint's own runs "
+                            "(kept and taken out), from the map after a fight to the next act's start; each step "
+                            "kept in the output, a second call goes on. Run with setsid: the memory guard ends the "
+                            "process group")
+    x.add_argument("--checkpoint", required=True)
+    x.add_argument("--previous", default="fixed",
+                   help="The prices the fit moves from: fixed (7/9/11, the last fight 1/1/1) or a prices.json")
+    x.add_argument("--output", required=True,
+                   help="Directory: points/, branches/, branches.jsonl.gz, fitted.json, prices.json, report.json")
+    x.add_argument("--seed-root", required=True, help="What the source runs' seeds are derived from")
+    x.add_argument("--exclude-seeds", nargs="*", default=[],
+                   help="Seed files the source runs leave out (evaluation and test sets)")
+    x.add_argument("--ascensions", type=int, nargs=2, default=[0, 5], metavar=("LOWEST", "HIGHEST"))
+    x.add_argument("--source-runs-per-character", type=int, default=100)
+    x.add_argument("--pairs", type=int, default=10000,
+                   help="Pairs to draw, a third in each act, half with the belt full; low HP weighs double")
+    x.add_argument("--repeat", type=int, default=30, help="Points whose continuation as saved is played twice")
+    x.add_argument("--precision", choices=sorted(PRECISIONS))
+    x.add_argument("--engine-root")
+    x.add_argument("--max-steps", type=int, default=10000)
+    x.add_argument("--workers", type=int, default=64)
+    x.add_argument("--processes", type=int)
+    x.add_argument("--memory-floor", type=float, default=2.5,
+                   help="GB of available memory below which the process group is ended; 0 for none")
     x = sub.add_parser("infer")
     x.add_argument("--checkpoint", required=True)
     x.add_argument(
@@ -358,7 +404,7 @@ def parser():
     )
     x.add_argument("--top-k", type=int, default=5)
     x = sub.add_parser(
-        "play-steam", help="Control a running Steam game through steam_recorder"
+        "play-steam", help="Control a running Steam game through the SpireTakeover mod"
     )
     x.add_argument("--checkpoint", required=True)
     x.add_argument("--bridge-dir", required=True)

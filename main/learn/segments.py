@@ -1,6 +1,7 @@
 """The segments of a round of act groups (`main/play/groups.py`) and what they came to.
 
-A segment's return R is ±1 where its run ended (won or lost) and, for a segment that
+A segment's return R is ±1 where its run ended (won or lost), a win with what `wins`
+adds to it (`returns`: the HP left, `groups.win_bonuses`), and, for a segment that
 reached the cut of its wave, the mean return of the group played on from its save
 (the Monte-Carlo value of the state it reached, passed back up the chain from the
 last wave); a segment that reached the cut but has no finished segment after it
@@ -33,6 +34,8 @@ from main.play import digests
 
 RETURNS = {"win": 1.0, "loss": -1.0}
 RIDGE = 1.0
+# How the tree values a node (`tree`): by the segments that did not explore there.
+TREE = "explored-apart"
 
 
 @dataclass(slots=True)
@@ -41,9 +44,12 @@ class Decision:
     key: str  # the frame as the segments compare it
     action: tuple  # what was chosen, a candidate per step
     features: list
-    explored: bool = False  # drawn by exploration rather than from the policy (`RolloutRunner.explore_potions`)
-    forked: bool = False  # taken by its rank in the policy's order (`RolloutRunner.run(fork=)`)
+    # Drawn by exploration rather than from the policy (`RolloutRunner.explore_outside`, a
+    # hindsight fork's potion): true, or who proposed it ("prior", `RolloutRunner.explore_prior`).
+    explored: bool | str = False
+    forked: bool = False  # given at a hindsight fork (`RolloutRunner.run(hindsight=)`)
     fight: bool = False  # made inside a fight
+    phase: str | None = None  # the frame's phase; none in a digest written before it was kept
 
 
 @dataclass(slots=True)
@@ -78,11 +84,12 @@ def _digested(entry):
     """A segment as its wave's digest has it (`play.digests`)."""
     character = entry["character"]
     decisions = []
+    count = len(digests.STATE)
     for index, key, action, act, floor, *rest in entry["decisions"]:
-        *state, fight, explored, forked = rest
+        state, (fight, explored, forked, *phase) = rest[:count], rest[count:]
         decisions.append(Decision(index, key, tuple(action),
                                   summary(character, act, floor, dict(zip(digests.STATE, state)), fight),
-                                  explored, forked, bool(fight)))
+                                  explored, forked, bool(fight), phase[0] if phase else None))
     return Segment(entry["run_id"], entry["group"], character, entry["outcome"], decisions, entry.get("ascension"),
                    entry.get("frameless", 0))
 
@@ -131,16 +138,18 @@ def read_waves(directory, waves, processes=None):
     return found
 
 
-def returns(waves):
+def returns(waves, wins=None):
     """{segment id: return} over the waves of a round, `waves` being (name, segments)
-    pairs in order. A segment that reached its cut takes the mean return of the group
-    played from its save in the next wave; one whose group has no finished segment
-    has no return and is left out."""
+    pairs in order. A segment that won adds what `wins` ({segment id: bonus}) gives it
+    to its 1. A segment that reached its cut takes the mean return of the group played
+    from its save in the next wave; one whose group has no finished segment has no
+    return and is left out."""
     table, children, following = {}, defaultdict(list), None
+    wins = wins or {}
     for name, wave_segments in reversed(list(waves)):
         for segment in wave_segments:
             if segment.outcome in RETURNS:
-                value = RETURNS[segment.outcome]
+                value = RETURNS[segment.outcome] + (wins.get(segment.run_id, 0.0) if segment.outcome == "win" else 0.0)
             elif segment.outcome == "reached" and following is not None:
                 played = children.get(f"{segment.run_id}:{following}")
                 if not played:
@@ -156,7 +165,13 @@ def returns(waves):
 
 def tree(members, table):
     """The advantages on the shared prefix of one group: {(segment id, macro index):
-    (node value, advantage)} and the counts of the tree's nodes."""
+    (node value, advantage)} and the counts of the tree's nodes. A node's value is the
+    mean return of the segments that reached it and did not explore there: an explored
+    action is one the policy all but never takes, and counted as much as the policy's
+    own it would lower the value when worse, handing the policy's actions an advantage
+    of no choice of theirs (ticket 33: +0.01 to +0.03 at the nodes with an explored
+    sibling); the explored ones are measured against it too. A node every segment
+    explored at takes the mean of all."""
     found, counts = {}, Counter()
 
     def visit(reached, depth):
@@ -169,7 +184,8 @@ def tree(members, table):
         for same in by_frame.values():
             if len(same) < 2:
                 continue
-            value = sum(table[s.run_id] for s in same) / len(same)
+            plain = [s for s in same if not s.decisions[depth].explored] or same
+            value = sum(table[s.run_id] for s in plain) / len(plain)
             by_action = defaultdict(list)
             for segment in same:
                 by_action[segment.decisions[depth].action].append(segment)

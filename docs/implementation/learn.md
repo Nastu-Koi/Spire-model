@@ -13,11 +13,12 @@
 | `streams.py` | 采样数据的流，不属于哪一种训练：份额上限后的组权重或等权（`buffer_weights`）、有优势的对局（`priced`）、一路的批（`batches`）与读取进程数（`stream_feeders`）、几路合成一批（`sizes`、`Joint`） |
 | `clipped.py` | 裁剪目标，不属于哪一种训练：温度化策略的裁剪比值加对参考策略的 KL（`Clipped`；`Reference` 是载入的参考策略连同它的词表摘要，或采样时记下的分布；`with_advantages` 给一路的样本挂上优势） |
 | `groups.py` | 幕组的优势（GRPO）：分叉树上的动作级优势；分叉后的组内岭回归基线（`segments.fit`）；可选剔掉全组同结果的组 |
-| `batches.py` | 幕组批（GRPO）：各波一路，各波的份额与一遍的更新次数；混合批里各类来源的份额（`stream_shares`） |
+| `batches.py` | 幕组批（GRPO）：各波一路，各波的份额与一遍的更新次数；混合批里各类来源的份额，一类几路时按决策数分（`stream_shares`） |
 | `grpo.py` | 幕组的更新（GRPO）：一遍各波的流按份额合成的批，按裁剪目标更新（`group_update`）；同一批里可以另放战斗组与战斗示范（[混合批](#混合批)） |
 | `mixed.py` | 混合批的目标：按样本所在的流分派，采样样本（幕组、战斗组）走裁剪目标加 KL，示范走 NLL（`Likelihood`），按来源分开计数（`Mixed`） |
 | `combat_demos.py` | 战斗示范作为更新的一路：示范目录只取战斗（`fights`），按一遍的配额整场重复或抽一部分（`draw`），等权的流（`batches`） |
 | `costs.py` | 战斗代价：由一场战斗的战况按求解器的记账算代价（`cost`）与回报（`fight_return`）；战斗的 HP 去向（`relief`：幕末回血、整局最后一场或都不是）；可替换的价格对象（`Prices`，固定价 `FIXED`） |
+| `potion_prices.py` | 药价模型：入场状态的特征（`features`），线性价（`LinearPrices`）与平滑限幅（`Smoothed`），价格文件的读写（`load`、`save`）；配对续打的标签与拟合（`pairs`、`labels`、`fit`：按来源对局分折的岭回归、逐幕倒推、与只用基准价的对照），确定性（`determinism`） |
 | `fight_groups.py` | 战斗组的优势：段的回报按传入的价格由战况现算，组内均值作基线，共享前缀上用分叉树给动作级优势；可选剔掉全组同结果的组；头里按战斗种类记组内诊断 |
 | `fight_report.py` | 战斗评估的报表：由战斗评估集的逐场行按价格现算代价，分种类的平均代价与死亡率、用药、危急帧（`summary`），与求解器逐场的差距（`gap`），行为差异表（`behavior`），同一个集的两次打法逐场比较（`paired_plays`） |
 | `history.py` | 逐更新遥测（`updates.jsonl`）、逐轮汇总（`history.jsonl`）、状态（`status.json`） |
@@ -42,22 +43,22 @@
 
 ## 幕组的优势
 
-`groups.py`（`advantages(目录)` 给轮里每一波写一份 `advantages.json.gz`：`format=rollout-advantages-v1`、`kind=act-groups`，头里记 `wave`、`ridge`、切点（`boundaries`、`bosses`）、`policy_version`、各波写出的段数（`written`）、`runs`、`decisions`、优势的摘要（`advantage`：个数、均值、标准差、范围）与 `stats`，剔掉全组同结果的组时另记 `drop_uniform_groups: true`，正文是每段各决策的（宏动作序号、基线、优势）；每一波都已有头、且 kind、ridge、切点、`policy_version`、各波 `written` 与是否剔除全部相同时直接读回头，不重算）：
+`groups.py`（`advantages(目录)` 给轮里每一波写一份 `advantages.json.gz`：`format=rollout-advantages-v1`、`kind=act-groups`，头里记 `wave`、`ridge`、切点（`boundaries`、`bosses`）、`policy_version`、各波写出的段数（`written`）、`runs`、`decisions`、优势的摘要（`advantage`：个数、均值、标准差、范围）与 `stats`，剔掉全组同结果的组时另记 `drop_uniform_groups: true`，有剩血奖励时另记 `win_hp_bonus`，正文是每段各决策的（宏动作序号、基线、优势）；每一波都已有头、且 kind、ridge、切点、`policy_version`、各波 `written`、是否剔除与剩血奖励全部相同时直接读回头，不重算）：
 
-- 回报（`segments.returns`）：终局通关 +1、死亡 −1；到达边界幕的段取下一波从它那份存档续打的组的回报均值，一波波往前传（第一波的回报是第二波组均值的均值）；下一波没有一条完成的段不给优势，训练时跳过。
-- 读各段（`segments.read_waves`）：每个决策要的是（序号、帧指纹、动作、状态摘要、是否探索步、是否分叉步、是否在战斗中），每段另记不留帧的宏动作数（`Segment.frameless`）。一波的决策摘要（`decisions.jsonl.gz`，采样进程交出段时记下，见 [play](play.md#采样对局的格式)）覆盖索引里的每一段时只读它，逐行转成段、同一段以后一行为准，段按索引的（分片，行）排，与读分片的顺序相同；v35 round-0（126 万决策）整步约 11 s，主进程峰值约 2 GB。摘要缺段的波（摘要出现之前采的轮、续跑时被打断在分片与摘要之间、帧读不出位置）整波退回读分片：要把帧全部解码一遍（一轮约 4 GB gzip，约 1,000 CPU·秒，时间几乎都在 `json` 解码与帧指纹上），各波的分片进同一个进程池，每个分片一个任务、只带该分片的索引行，`processes` 个进程（默认 CPU 数的一半，即物理核数：再多只有超线程的收益）按摘要的同一写法（`digests.decision`）算出决策；分片逐局读（`RunShards.runs`），一个进程手里只有一局解码后的帧；fork 前先 `gc.collect()` 加 `gc.freeze()`，否则进程里的回收会把驱动的堆页各复制一份；这些进程只活这一步，不像读取进程那样从服务进程起（见[数据供给](#数据供给)）。同一轮读分片 16 个进程约 80 s、32 个约 64 s。
-- 分叉树（`segments.tree`，给出每个节点的均值与动作级优势）：同一组的段按“到第 k 步为止帧相同”归并，帧的同一性是 `public` 与 `legal` 的指纹。到达者 ≥ 2 的节点上，决策的优势 = 选同一动作者的回报均值 − 节点全部到达者的均值；只有一种动作的节点记 0。动作是宏动作各步所选候选的元组。
+- 回报（`segments.returns`）：终局通关 +1、死亡 −1；给了 `win_hp_bonus` β 时（`iterate --win-hp-bonus`），通关的段另加 [剩血奖励](../../CONTEXT.md) β × 剩余 HP / 最大生命，HP 取这一段最后一场战斗的战况（`groups.win_bonuses`：战后 HP，对局随这场结束时取这场最后一个决策的；要求这一轮记了战况，否则报错），死亡不加；到达边界幕的段取下一波从它那份存档续打的组的回报均值，一波波往前传（第一波的回报是第二波组均值的均值）；下一波没有一条完成的段不给优势，训练时跳过。
+- 读各段（`segments.read_waves`）：每个决策要的是（序号、帧指纹、动作、状态摘要、是否探索步、是否分叉步、是否在战斗中、帧的阶段）；加阶段之前写的摘要读出来没有阶段（`Decision.phase` 为 None），每段另记不留帧的宏动作数（`Segment.frameless`）。一波的决策摘要（`decisions.jsonl.gz`，采样进程交出段时记下，见 [play](play.md#采样对局的格式)）覆盖索引里的每一段时只读它，逐行转成段、同一段以后一行为准，段按索引的（分片，行）排，与读分片的顺序相同；v35 round-0（126 万决策）整步约 11 s，主进程峰值约 2 GB。摘要缺段的波（摘要出现之前采的轮、续跑时被打断在分片与摘要之间、帧读不出位置）整波退回读分片：要把帧全部解码一遍（一轮约 4 GB gzip，约 1,000 CPU·秒，时间几乎都在 `json` 解码与帧指纹上），各波的分片进同一个进程池，每个分片一个任务、只带该分片的索引行，`processes` 个进程（默认 CPU 数的一半，即物理核数：再多只有超线程的收益）按摘要的同一写法（`digests.decision`）算出决策；分片逐局读（`RunShards.runs`），一个进程手里只有一局解码后的帧；fork 前先 `gc.collect()` 加 `gc.freeze()`，否则进程里的回收会把驱动的堆页各复制一份；这些进程只活这一步，不像读取进程那样从服务进程起（见[数据供给](#数据供给)）。同一轮读分片 16 个进程约 80 s、32 个约 64 s。
+- 分叉树（`segments.tree`，给出每个节点的均值与动作级优势）：同一组的段按“到第 k 步为止帧相同”归并，帧的同一性是 `public` 与 `legal` 的指纹。到达者 ≥ 2 的节点上，决策的优势 = 选同一动作者的回报均值 − 节点均值；节点均值只取没在这一步探索的到达者（全都探索时取全部），探索枝也对它算（理由见 [architecture 幕组的回报与优势](../architecture.md#幕组的回报与优势)）。只有一种动作的节点记 0。动作是宏动作各步所选候选的元组。头的身份多 `tree`（`segments.TREE`，现为 `explored-apart`），按旧算法写的优势会重算。
 - 分叉之后：优势 = (R − 组内均值) − βᵀ(φ − 组内摘要均值)，β 按岭回归（`ridge` 默认 1.0）在组内去均值的数据上拟合，每波分开。文件里的 `value` 就是这个基线（树节点上是节点均值）。
-- 剔除（`advantages(…, drop_uniform=True)`，`iterate --drop-uniform-groups`）：[全组同结果的组](../architecture.md#幕组的回报与优势)（`uniform`：组内各段的 `table[run_id]` 全相等）的段不写进正文，与没有回报的段一样被 `batches.priced` 略过；分叉树与岭回归只用保留的组，所以保留的组的优势与“这一波只有它们”时相同。下游不用改：分片按索引行读，略过的行不解析（但仍要解压），`seen`、份额、`pass_updates` 都按头里的 `decisions` 算。一波的组全被剔掉时这一波没有有优势的决策，更新报错（`priced_waves`）。
-- greedy 战斗的轮（`iterate --greedy-fights`，见 [play 温度与战斗边界](play.md#温度与战斗边界)）：战斗不留帧，不是策略宏动作，所以段的决策、分叉树、岭回归与优势都只有战斗外的决策，优势表里没有战斗决策。更新同样不用改：`batches.priced` 的 `RunShards` 按索引行的 `phases` 数宏动作，`data.samples` 只取有帧的宏动作，战斗决策不进批、不算 KL，也不计入份额、`pass_updates` 与损失缩放的 ΣN；`with_advantages` 照旧要求每个进批的样本都有优势，缺了就报错。同组各段的战斗按 argmax 打，引擎在动作给定时确定，所以各段只在战斗外的动作不同（或 bf16 合批翻转了某个近似并列的战斗决策）时分开，分叉树一直覆盖到那里。
-- 头里的 `stats`：组数、段数、决策数、回报均值、组间方差占比（单因素方差分析）、全组同结果的组数、树的节点与覆盖比例、回归的组内 R² 与各特征权重；`explored` 与 `forked` 是探索步与分叉步（[play 幕组](play.md#幕组)）各自的数量、优势均值与正负个数；`fights` 是有优势的战斗决策数（`decisions`）与因不留帧而排除的战斗宏动作数（`excluded`，取自摘要行的 `frameless`）：greedy 战斗的轮前者为 0，否则后者为 0。剔除时多 `dropped`（剔掉的组数、段数、决策数）；`groups`、`return_mean`、`between_share`、`uniform_groups` 和 `by_ascension` 的组数、段数、平均回报仍按全部有回报的组算（与不剔除的轮可比），`segments`、`decisions`、`tree`、`baseline`、`explored`、`forked`、`fights` 按保留的。分叉步落在树上时（同组各段在这一帧相同：开局与幕开头续打的组的第一个分叉步是这样，之后的取决于引擎随机性有没有先把段分开），两枝等大时它的优势是本枝与另一枝回报均值之差的一半，按符号对称。
+- 剔除（`advantages(…, drop_uniform=True)`，`iterate` 固定开，`iterate.DROP_UNIFORM`）：[全组同结果的组](../architecture.md#幕组的回报与优势)（`uniform`：组内各段的 `table[run_id]` 全相等）的段不写进正文，与没有回报的段一样被 `batches.priced` 略过；分叉树与岭回归只用保留的组，所以保留的组的优势与“这一波只有它们”时相同。下游不用改：分片按索引行读，略过的行不解析（但仍要解压），`seen`、份额、`pass_updates` 都按头里的 `decisions` 算。一波的组全被剔掉时这一波没有有优势的决策，更新报错（`priced_waves`）。
+- greedy 战斗的轮（`iterate` 的幕组都是，见 [play 温度与战斗边界](play.md#温度与战斗边界)）：战斗不留帧，不是策略宏动作，所以段的决策、分叉树、岭回归与优势都只有战斗外的决策，优势表里没有战斗决策。更新同样不用改：`batches.priced` 的 `RunShards` 按索引行的 `phases` 数宏动作，`data.samples` 只取有帧的宏动作，战斗决策不进批、不算 KL，也不计入份额、`pass_updates` 与损失缩放的 ΣN；`with_advantages` 照旧要求每个进批的样本都有优势，缺了就报错。同组各段的战斗按 argmax 打，引擎在动作给定时确定，所以各段只在战斗外的动作不同（或 bf16 合批翻转了某个近似并列的战斗决策）时分开，分叉树一直覆盖到那里。
+- 头里的 `stats`：组数、段数、决策数、回报均值、组间方差占比（单因素方差分析）、全组同结果的组数、树的节点与覆盖比例、回归的组内 R² 与各特征权重；`explored` 与 `forked` 是探索步与分叉步（[play 幕组](play.md#幕组)）各自的数量、优势均值与正负个数；`explored_outside` 是其中战斗外的探索步（[局外探索](../architecture.md#局外探索)）的同样几项，另加 `on_tree`：它们里由分叉树定价的个数（同组另一段在同一帧选了别的），`by_source`：按提议来源（`prior` 为先验的提议，`rule` 为局外探索自己的规则）分记的同样几项与其中树上的（`on_tree`，同样几项），`learned`：`all`，或 `--explored-on-tree` 时 `on_tree`（这时不由树定价的局外探索步优势置 0，统计取置 0 之前的；头的身份多 `explored_on_tree`，设置不同就重算）；`--explored-centered` 时多 `centered`：参与学习的局外探索步（`--explored-on-tree` 时只算树上的）按阶段各减去的均值与个数（统计取去均值之前的；头的身份多 `explored_centered`）；`fights` 是有优势的战斗决策数（`decisions`）与因不留帧而排除的战斗宏动作数（`excluded`，取自摘要行的 `frameless`）：greedy 战斗的轮前者为 0，否则后者为 0。剔除时多 `dropped`（剔掉的组数、段数、决策数）；有剩血奖励时多 `win_bonus`（这一波通关的段数、缺战况的段数、奖励的均值与范围）；`groups`、`return_mean`、`between_share`、`uniform_groups` 和 `by_ascension` 的组数、段数、平均回报仍按全部有回报的组算（与不剔除的轮可比），`segments`、`decisions`、`tree`、`baseline`、`explored`、`forked`、`fights` 按保留的。分叉步落在树上时（同组各段在这一帧相同：开局与幕开头续打的组的第一个分叉步是这样，之后的取决于引擎随机性有没有先把段分开），两枝等大时它的优势是本枝与另一枝回报均值之差的一半，按符号对称。
 
 ## 幕组批
 
-`batches.py`：每一波一路（路、份额权重、合批是 `streams.py` 的，不属于 GRPO），每个逻辑批按份额从各路取样本（`streams.sizes` 取整后加起来等于批大小）；`streams.priced` 只取有优势的段（到达边界幕而下一波没完成的段没有，`--drop-uniform-groups` 剔掉的组的段也没有）。
+`batches.py`：每一波一路（路、份额权重、合批是 `streams.py` 的，不属于 GRPO），每个逻辑批按份额从各路取样本（`streams.sizes` 取整后加起来等于批大小）；`streams.priced` 只取有优势的段（到达边界幕而下一波没完成的段没有，剔掉的全组同结果的组的段也没有）。
 
-- **份额权重**（`streams.buffer_weights`，`--phase-weights`）：默认 `group`，一波里按角色×阶段组等权、组内平分，单个决策不超过均匀份额的 `--weight-cap` 倍（默认 10；只出现几次的阶段按上限给，让出的份额分给其余组），这是示范 BC 的阶段平衡规则（`data.group_weights` 按（角色，阶段，来源）分组，一波只有 `rollout` 一个来源），战斗决策分到的权重远低于它在决策里的占比；`even` 让每条决策权重相同，是波内的无偏策略梯度。整波之和为 1。
-- **份额与权重**（`wave_shares`）。整轮当作一个数据集：一波的组权重乘它占整轮决策数的比例 N_波 / ΣN，训练器按 ΣN / B 缩放，所以一条决策每进一次批的权重都是 1/B，与波无关；它进批的次数由份额定。份额默认按各波有优势的决策数定（`--wave-shares` 给每波一个相对数可改，`1 1 1` 即各波相等），`--updates round` 是 ⌈ΣN / B⌉ 次更新（`pass_updates`），这时每一路约走完一遍（各路的配额取整、用完了都重新开始，个别样本多看或少看一次）、每条决策约看一次、权重相同，各波对梯度的贡献与决策数成正比。份额大于决策占比的波在一遍里被重复看（`Joint`），每次权重不变，所以**一波的份额就是它在梯度里的占比**；份额小于决策占比的波只有一部分样本进批。
+- **份额权重**（`streams.buffer_weights`）：`group`，一波里按角色×阶段组等权、组内平分，单个决策不超过均匀份额的 `streams.WEIGHT_CAP` 倍（10；只出现几次的阶段按上限给，让出的份额分给其余组），这是示范 BC 的阶段平衡规则（`data.group_weights` 按（角色，阶段，来源）分组，一波只有 `rollout` 一个来源），战斗决策分到的权重远低于它在决策里的占比；`even`（战斗示范用）让每条决策权重相同。整波之和为 1。
+- **份额与权重**（`wave_shares`）。整轮当作一个数据集：一波的组权重乘它占整轮决策数的比例 N_波 / ΣN，训练器按 ΣN / B 缩放，所以一条决策每进一次批的权重都是 1/B，与波无关；它进批的次数由份额定。份额默认按各波有优势的决策数定（`--wave-shares` 给每波一个相对数可改，`1 1 1` 即各波相等），一遍是 ⌈ΣN / B⌉ 次更新（`pass_updates`），这时每一路约走完一遍（各路的配额取整、用完了都重新开始，个别样本多看或少看一次）、每条决策约看一次、权重相同，各波对梯度的贡献与决策数成正比。份额大于决策占比的波在一遍里被重复看（`Joint`），每次权重不变，所以**一波的份额就是它在梯度里的占比**；份额小于决策占比的波只有一部分样本进批。
 - **主机不等 GPU**：训练线程发射核函数、GPU 执行，两者只有在主机不同步时才重叠，所以一步里不做同步：批张量先钉住再异步拷（`encoding.batch._move`、`given`），裁剪目标的统计留在设备上累加（`Clipped.flush`／`means`），一步的逐样本行、正确率、梯度范数与统计打成一条异步拷进钉住内存（`trainer._Readback`），在下一步的反向发射之后才读回并记入 `updates.jsonl`。后果：非有限梯度晚一步才被发现，这一遍更新失败，磁盘上的策略仍是上一份归档，续跑重做这一遍。在一步里加代码时注意这几种写法会让主机等 GPU：从可分页内存拷到设备、从 Python 列表建设备张量、把设备上的数转成 Python 数。试过的其它提速做法见 [trials](../trials/route.md)。
 - **读取进程让出 CPU**：读取进程与其打包进程 `os.nice(+5)`（`loader.FEEDER_NICE`），更新期几十个进程不与训练线程抢核。
 - **读取进程**：每一路有自己的读取进程，数量按该路在批里的份额定：⌈份额 × profile 的 `loader_feeders`⌉、至少 2 个（`streams.stream_feeders`），各路之和可以超过 `loader_feeders`；每个读取进程照旧带 `loader_workers` 个打包进程。一路只有一个读取进程时，它解码下一批分片的间隙整条路停住，联合批跟着等最慢的一路，所以占批多的一路要多给。
@@ -71,17 +72,18 @@
 L = −min(r·A, clip(r, 1 − ε, 1 + ε)·A) + κ·KL
 
 - **优化温度化的策略**。宏动作按它记下的温度 T（`Sample.temperature`）从 π_T 抽出；argmax 与温度无关，greedy 评估不受影响，所以直接把 π_T 当作被优化的策略：r = π_θ,T(a) / π_old,T(a)，π_old,T(a) 是采样时记的 `old_log_prob`。这样更新是同策略的，不需要按 π/π_T 修正权重。宏动作的比值按整个宏动作算（各步之和）；宏动作几乎都只有一个决策。
-- **探索步按得分推，分叉步双侧裁剪**。探索步（`explored`，见 [play 温度与战斗边界](play.md#温度与战斗边界)）记下的 `old_log_prob` 是策略自己对该动作的 π_T，比值从 1 起算；`Sample.explored` 标出它的宏动作，`Clipped` 对它用 A·(1 + log r)（r·A 在 r = 1 处的切线），梯度不随一遍里的漂移变化，只在 |log r| 超过 `EXPLORED_LOG_RATIO`（3，即 20 倍）时停（`clip_fraction` 把这种情况算作裁剪）。分叉步（`Sample.forked`）只在比值落在 1 ± ε 内时推，出了区间两侧都不推（也算作裁剪）。其余样本仍是单侧裁剪。一个宏动作两种都有时按探索步。探索步不用窗口的理由见 [architecture 用药探索](../architecture.md#用药探索)，原先的双侧裁剪见 [trials](../trials/route.md)。
+- **探索步按得分推，分叉步双侧裁剪**。探索步（`explored`，见 [play 温度与战斗边界](play.md#温度与战斗边界)）记下的 `old_log_prob` 是策略自己对该动作的 π_T，比值从 1 起算；`Sample.explored` 标出它的宏动作，`Clipped` 对它用 A·(1 + log r)（r·A 在 r = 1 处的切线），梯度不随一遍里的漂移变化，只在 |log r| 超过 `EXPLORED_LOG_RATIO`（3，即 20 倍）时停（`clip_fraction` 把这种情况算作裁剪）。分叉步（`Sample.forked`）只在比值落在 1 ± ε 内时推，出了区间两侧都不推（也算作裁剪）。其余样本仍是单侧裁剪。一个宏动作两种都有时按探索步。探索步不用窗口的理由见 [architecture 探索步](../architecture.md#探索步)，原先的双侧裁剪见 [trials](../trials/route.md)。
 - **探索步的遥测**。`Clipped` 在设备上另记探索步的条数、对数比值之和（按优势正负分开）、在 1 ± ε 之外与超过保险界的条数；`updates.jsonl` 每步、`history.jsonl` 每轮记 `explored`、`explored_log_ratio`、`explored_up_log_ratio`／`explored_down_log_ratio`（优势为正／负的探索步被看到时的平均对数比值，即一遍里此前的漂移把它们带到了哪里）、`explored_outside_clip`、`explored_beyond`；没有探索步时为 null。各波优势头的 `stats.explored` 记探索步数、优势均值与正负个数。
 - **没有信号就不动**。A = 0 的宏动作没有策略梯度：全赢或全输的组不会像加权 BC 那样把策略往它已偏好的动作拉（优势加权回归正是在这里削尖策略的，见 [trials](../trials/24-awr.md)）。
 - **裁剪**。比值在优势推的方向上越过 1 ± ε 后不再推；`clip_fraction` 是裁剪项起作用（A ≠ 0）的比例。对数比值先截在 ±20，防止溢出。
-- **KL**。宏动作内各决策在合法动作上的 KL(π_θ,T ‖ π_ref,T) 之和，精确计算；π_ref 是参考策略：这次运行的起点，每 `--reference-every k` 次迭代换成当时的策略（默认 k 等于评估间隔，参考就是评估过的检查点；0 则整次运行固定为起点）；每次更新载入、同批前向一次、不求导，词表必须与当前策略相同。它抵消自采样的有限样本漂移。参考前向与策略前向排在同一条流上：旁路流要给参考前向单独一个缓存池，训练步峰值时显存放不下两个池。
-- **参考就是采样策略时不跑参考**。一段 k 次迭代的第一次（`reference_every` 为 k 时的第 0、k、2k… 次），参考检查点就是采这一轮的策略：驱动载入参考后比较它的 `policy_digest` 与轮 summary 的 `policy_digest`，相同且轮 summary 的 `distributions` 为真（每段每个有选择的步都记了采样分布）时，换成 `clipped.Reference.recorded()`：`prepare_replay` 把各步的 `log_probs` 按槽位排成 `Replay.reference`（非合法槽位 −inf），`Clipped` 拿它当 π_ref,T，不载参考模型、不做参考前向。记下的分布与 `old_log_prob` 出自同一次采样前向（采样精度、编码表、CUDA graph），比值本来就用它；与训练端现算的差是跨批噪声。更新记录多 `reference_recorded`。
+- **KL**。宏动作内各决策在合法动作上的 KL(π_θ,T ‖ π_ref,T) 之和，精确计算；π_ref 是参考策略：这次运行的起点，每 `--evaluate-every k` 次迭代换成当时的策略（参考就是评估过的检查点）；每次更新载入、同批前向一次、不求导，词表必须与当前策略相同。它抵消自采样的有限样本漂移。参考前向与策略前向排在同一条流上：旁路流要给参考前向单独一个缓存池，训练步峰值时显存放不下两个池。
+- **参考就是采样策略时不跑参考**。一段 k 次迭代的第一次（`evaluate_every` 为 k 时的第 0、k、2k… 次），参考检查点就是采这一轮的策略：驱动载入参考后比较它的 `policy_digest` 与轮 summary 的 `policy_digest`，相同且轮 summary 的 `distributions` 为真（每段每个有选择的步都记了采样分布）时，换成 `clipped.Reference.recorded()`：`prepare_replay` 把各步的 `log_probs` 按槽位排成 `Replay.reference`（非合法槽位 −inf），`Clipped` 拿它当 π_ref,T，不载参考模型、不做参考前向。记下的分布与 `old_log_prob` 出自同一次采样前向（采样精度、编码表、CUDA graph），比值本来就用它；与训练端现算的差是跨批噪声。更新记录多 `reference_recorded`。
 - **不除组内标准差**：回报二值、组小，除标准差会放大 1 胜 3 负这类组。
 - **步长**。一轮优势里的可用信号远小于噪声，按 BC 的学习率走一遍会让策略在噪声上漂移。小学习率（`--learning-rates configs/learning-rates-grpo.json`，BC 的十分之一）配较大的 κ（如 0.1）让一轮用完全部样本、同时把一轮的 KL 压在小量级。一步的样本数另由 `--batch` 定：Muon 的步幅与梯度大小无关，一步方向的信噪比随样本数涨，但一遍的步数随之减少；噪声主导时一遍的位移缩到 1/√k、累积的信噪比不变（见 [architecture](../architecture.md#更新裁剪目标)）。试过的步长与其它学法见 [trials](../trials/route.md)。
 - 熵仍按温度 1 报。`--min-entropy x`：一次迭代的更新让策略在局外幕组决策上的平均熵（`iterate.guarded_entropy`：有混合批时取 `mix` 里 `act-groups` 的熵，示范不是策略自己的选择；没有时取整批的熵）低于 x 时，这次迭代做完（评估、清理、`history.jsonl`）后停下（`Halt`），`state.json` 记 `halted` 与原因，`status.json` 记 `halted`。
 
 没有监督锚，漂移由 KL 约束。每次更新记 `ratio_mean`、`clip_fraction`、`kl`、`zero_share`（A = 0 的比例）与各波的 `act1_zero_share`、`act1_loss`……；`history.jsonl` 记一遍的均值。
+- **比值按样本类别记**。`ratio_mean` 把所有样本混在一起，一个比值到 e^20 的样本就能把均值抬到上万，看不出它是哪类。`Clipped` 另把样本分成四类：探索步、分叉步、A < 0 的普通样本、A > 0 的普通样本（A = 0 的不算），每类记条数（`ratio_samples_<类>`）、比值超过 `OVER`（10）的条数（`ratio_over_<类>`）和最大比值（`ratio_max_<类>`，没有这类样本时为 null）。最大值跨微批与跨来源取最大，不求和（`clipped.MAXIMA`、`combine`；混合批按 `Mixed.maxima` 定位）。只有 A < 0 的普通样本，比值越大推得越重：r·A 比裁剪项小，min 取它。其余三类出了各自的范围就不推。`history.jsonl` 按来源记 `act_groups_ratio_max_negative`、`fight_groups_ratio_over_explored` 这类键（`iterate.MIX_METRICS`），`updates.jsonl` 每步有全部条目。
 
 ## 混合批
 
@@ -90,12 +92,12 @@ L = −min(r·A, clip(r, 1 − ε, 1 + ε)·A) + κ·KL
 | 来源（`mixed.KINDS`） | 路 | 目标 | KL |
 | --- | --- | --- | --- |
 | 局外幕组 `act-groups` | 各波一路 | 裁剪目标 | 有 |
-| 战斗组 `fight-groups` | `fights=` 给的目录一路，读法与一波相同（`streams.priced`） | 裁剪目标 | 有 |
+| 战斗组 `fight-groups` | `fights=` 给的目录一路，或 {路名: 目录} 几路（战斗组 `fight-groups` 与回溯分叉 `fight-hindsight`），读法与一波相同（`streams.priced`） | 裁剪目标 | 有 |
 | 战斗示范 `combat-demos` | `demos=` 给的数据集一路（`combat_demos.fights`） | 每个宏动作在温度 1 下的 NLL（`mixed.Likelihood`，与 BC 相同） | 无 |
 
 - **分派**。`Joint` 把各路的批分开打包，一个微批只属于一路。`Mixed` 按微批样本的 `source`（路名：波名、`fight-groups`、`combat-demos`）找到它的类，交给该类的目标；一个微批混了几路，或路名不是这次更新的，就报错。示范样本没有温度、对数概率与优势，也不需要，裁剪目标的检查只对采样样本。参考策略的前向只跑采样样本的微批。示范不算 KL：KL 约束的是采样样本把策略带离参考的漂移，示范的标签不是策略的样本。
-- **同一尺度**。每路的样本权重是路内份额权重 × 该路决策数 / ΣN（ΣN 是各路决策数之和），训练器按 ΣN / B 缩放，所以任何一类的一个宏动作每进一次批，平均权重都是 1/B，类与类之间没有系数。示范路内等权（每个宏动作 1/D，D 是示范池的宏动作数）；幕组各波照旧按 `--phase-weights`。
-- **份额**（`batches.stream_shares`）。先在类之间分，再把幕组那一份按 `--wave-shares`（默认按决策数）分给各波。类的份额默认按决策数（幕组与战斗组是有优势的决策数，示范是示范池的宏动作数），也可以给相对数（`sources`，要列全这次更新有的类）。例如 BC 阶段的 `act-groups=1 combat-demos=1`：每个逻辑批一半局外、一半示范。只有幕组时，类的份额是 1，各波的份额与只按波算的逐位相同。
+- **同一尺度**。每路的样本权重是路内份额权重 × 该路决策数 / ΣN（ΣN 是各路决策数之和），训练器按 ΣN / B 缩放，所以任何一类的一个宏动作每进一次批，平均权重都是 1/B，类与类之间没有系数。示范路内等权（每个宏动作 1/D，D 是示范池的宏动作数）；幕组各波照旧按角色×阶段组等权。
+- **份额**（`batches.stream_shares`）。先在类之间分，再把幕组那一份按 `--wave-shares`（默认按决策数）分给各波；别的类有几路时（战斗组与回溯分叉），这一类的份额按各路的决策数分。类的份额默认按决策数（幕组与战斗组是有优势的决策数，示范是示范池的宏动作数），也可以给相对数（`sources`，要列全这次更新有的类）。例如 BC 阶段的 `act-groups=1 combat-demos=1`：每个逻辑批一半局外、一半示范。只有幕组时，类的份额是 1，各波的份额与只按波算的逐位相同。
 - **一遍**。`iterate` 让一遍把局外各波各看一次：⌈ΣN_局外 / 每批的局外样本数⌉ 个逻辑批（`batches.pass_updates`；只有幕组时就是 ⌈ΣN / B⌉）。其余各路按份额取，用完了从头再来（`streams.Joint`）。
 - **示范的配额与抽取**（`combat_demos.draw`）。一遍要的示范宏动作数 Q = 逻辑批数 × 每批的示范样本数。
   - Q 多于示范池 D 时，每场先整场取 ⌊Q / D⌋ 遍，余下的从按 `demo_key` 打乱的场次里整场取，取到够数为止；Q 少于 D 时只有后一步。
@@ -105,19 +107,22 @@ L = −min(r·A, clip(r, 1 − ε, 1 + ε)·A) + κ·KL
 - **记录**。`Mixed` 在设备上按类累计：裁剪目标的各项或示范的 NLL 之和，加正确率的计数。
   - `means` 的顶层是全部采样样本（幕组与战斗组合起来）的裁剪目标统计，与只有幕组时同一口径；`mix` 按类给样本数、正确率与该类目标的统计（采样类是 `ratio_mean`、`clip_fraction`、`kl`、`zero_share` 与探索步各项，示范是 `nll`）。
   - 训练器按路报的损失与熵按权重合成每类的 `loss`、`entropy`（`mixed.by_kind`）。
-  - 一遍的结果（`groups`）另记：每类的决策数、份额与每批的样本数（`mix`）；示范的抽取（`demos`：目录、场数、宏动作数、配额、key、整遍数、补足的场数与宏动作数、实际抽出数 `drawn` 与重复倍数 `repeats`、进批的批数与样本数）；战斗组那一路的进批情况（`fights`）。
+  - 一遍的结果（`groups`）另记：每类的决策数、份额与每批的样本数（`mix`）；示范的抽取（`demos`：目录、场数、宏动作数、配额、key、整遍数、补足的场数与宏动作数、实际抽出数 `drawn` 与重复倍数 `repeats`、进批的批数与样本数）；战斗组那一路的进批情况（`fights`），战斗组一类有几路时另记每一路的（`fight_streams`）。
 - **只有幕组时与之前逐步一致**。同种子、同批时，每一步的损失、KL、裁剪比例、各波损失与参数更新都与之前的幕组更新逐位相同（`test_mixed_batches.py` 里留着之前的实现作对照）；一遍的均值改为按步累加，只差浮点舍入。
-- `iterate` 的更新接示范（`--combat-demos`、`--round-demos`）与这一轮的战斗组（`--fight-groups`）。
+- `iterate` 的更新接示范（`--round-demos`）与这一轮的战斗组（`--fight-groups`）及其回溯分叉（`--fight-hindsight`）。
+- **按类的 KL 系数与冻结**。`group_update(kl=)` 可以是一个数，也可以是 {类: 系数}（`Mixed`；没列的采样类为 0）；系数为 0 的类不跑参考前向，KL 记 0（`Clipped`）。`frozen={act-groups}` 让这一类各路的优势全取 0（`clipped.with_advantages(frozen=True)`，仍查优势表，缺优势照样报错），只剩 KL 的梯度。`iterate --fight-kl`、`--freeze-outside` 接这两项。
+- **多遍**。`iterate --passes P` 让驱动连调 P 次 `group_update`，参考相同；每遍的比值都对采样时的 `old_log_prob` 算，后面几遍的漂移由裁剪拦住（与 PPO 的多轮相同）。示范的抽取 key 每遍不同。更新记录的 `passes` 逐遍记 KL、裁剪比例、比值均值、损失与按类的 KL／裁剪比例。
 
 ## 战斗代价
 
 `costs.py`：由一场战斗的战况算[战斗代价](../../CONTEXT.md)与战斗段的回报，记账取自 CombatSolver 0.44（`CombatBeamSolver.HealthResourceCost`、`ActEndingBossPolicy`、`PotionUsePolicy`），定价见 [ADR 0001](../adr/0001-separate-combat-training.md)：
 
-代价 = w·(入场 HP − 战后 HP) + (入场最大生命 − 战后最大生命) + Σ 药价 + 100·死亡，回报 = −代价 / 100
+代价 = w·(入场 HP − 战后 HP) + (入场最大生命 − 战后最大生命) + Σ 药价 + 100·死亡 − 奖励·成长事件数，回报 = −代价 / 100
 
-`cost(战况, 价格)` 给分项（`Cost`：`hp`、`max_hp`、`potions`、`death`，`.total` 是合计），`fight_return(战况, 价格)` 给回报。
+`cost(战况, 价格)` 给分项（`Cost`：`hp`、`max_hp`、`potions`、`death`、`growth`，`.total` 是合计），`fight_return(战况, 价格)` 给回报。
 
-- **只读战况**：`kind`、`act`、`second_boss`、`ascension`、入场与战后的 HP 与最大生命、`potions_used`（content id）、`died`；`floor`、`run_id` 只进报错信息。回报不落盘，用到时按当时的价格现算，所以换价格不用重新采样。
+- **只读战况**：`kind`、`act`、`second_boss`、`ascension`、入场与战后的 HP 与最大生命、`potions_used`（content id）、`died`、`growth`、`relic_counters`；`floor`、`run_id` 只进报错信息。回报不落盘，用到时按当时的价格现算，所以换价格不用重新采样。
+- **[成长奖励](../../CONTEXT.md)**（工单 15）：价格对象套一层 `Growing(价格, 奖励)`（`with_growth(价格, 奖励)`，奖励为 0 时原样返回价格），`growth` 项 = −奖励 × `growth_events(战况)`；死在这场或 `relief` 为 `run_ending` 时为 0。成长事件数是战况 `growth` 各卡的次数之和，加上 `relic_counters` 里落在 `RELIC_WINDOWS` 窗口内的遗物数：开心小花（3）、开心小花？？？（5）、摆动球（3）、花粉核心（4）、铁棒（4）、金纸（5）要正好在阈值 − 1；双截棍、钢笔尖、音叉、星系尘埃（都是 10）在阈值 − 3 到 − 1 之间。这 10 件是游戏代码里把计数写进存档、由战斗内出牌或回合推进计数的遗物；其余存档计数的（茶、钓鱼竿、石之剑等）与战斗内操作无关，苦无一类每回合清零，都不算。`Growing` 也进 `potion_prices.to_json`（`kind=growing`），所以价格摘要随奖励变；没有成长字段的旧战况算 0。
 - **HP 的去向**（`relief`，照搬求解器的 `ActEndingBossPolicy.ResolveHpRelief`：非最后一幕的 Boss 为 ActClearHeal；最后一幕有第二个 Boss 而这场不是它时为 None；其余 Boss 为 RunEnding）：
   - 普通与精英战 `none`，w = 1；
   - 第一、二幕的 Boss `act_clear_heal`，幕末回血，w = 1/5；
@@ -126,36 +131,54 @@ L = −min(r·A, clip(r, 1 − ε, 1 + ε)·A) + κ·KL
 - **价格对象**：`Prices(tiers, final, free)` 的 `price(药水, 战况)` 按求解器的药水档（`tier`：`HIGH` 六种、`ELEVATED` 七种，其余为基础档）取 `tiers`，整局最后一场取 `final`；`free` 里的药水处处为 0。`FIXED` 是 7／9／11 与 1／1／1。有 `price(药水, 战况)` 的任何对象都能代替它（药水价值拟合的价格表）；它拿到的是整条战况，可以按幕或别的字段定价。
 - **零价药水**：求解器把稀有度为 5 的药水，以及有未熔化的石化蟾蜍（每场战斗开始给一块）时的药水形状石头，定为 0。5 是 `PotionRarity.Token`（枚举 None、Common、Uncommon、Rare、Event、Token）。帧里的药水实体不带稀有度；引擎的 `content_info` 命令（`{"cmd": "content_info", "ids": ["POTION.…"]}`，静态内容属性，与对局无关）对药水回 `rarity`（枚举名）。对 `public_catalog` 列出的 66 种药水全部查过：Token 只有 `POTION.POTION_SHAPED_ROCK`（石头本身就是 Token），所以蟾蜍那一条已被稀有度覆盖，`free` 默认是 `TOKEN` = {石头}。游戏更新后用同一命令重查。
 - **战后 HP**：取战后第一个决策的值（含战后回血遗物）。死亡时 HP 项照算到 0（不管记录的 `exit_hp`），再加 100。最终 Boss 打赢时对局随之结束、没有战后决策，记录的 `exit_hp`、`exit_max_hp` 为 null：这时用这场最后一个决策时的 `last_hp`、`last_max_hp` 代替（掉血按 w = 1 照算，与求解器在最终 Boss 按完整 HP 比较一致）；连这两项也没有才记 0。其余战斗缺战后 HP 或最大生命报错。
+- **死亡不计药价**：死在这场战斗里时药价项为 0。死了整局就结束，腰带里的药跟着作废，喝掉和留着一样不值钱；照计的话，同样是死，喝过药的段回报更低，各段全死的组也会因用药数不同而不算全同组，只教"别用药"。
 - 最大生命的增减不打折，增加记为负代价。死亡惩罚与回报的除数是常数 `DEATH`、`SCALE`。
 - **复活不计价**：求解器给复活每点恢复的 HP 加价 9（`DeathSavePremium`），这里不照搬，因为复活约 24 HP 就是 216，比死亡惩罚还大，回报会把被复活排在死亡之后。复活只按掉到它恢复后的 HP 计掉血；它用掉的瓶中精灵本该按药价计，但它不是 USE_POTION，引擎也不报防死事件，现在不进代价（战斗组实跑里有一组 8 条段中 7 条触发过）。
+
+## 药价模型
+
+`potion_prices.py`，取点与续打见 [play 药价拟合的取点与续打](play.md#药价拟合的取点与续打)，命令 `fit-prices`。
+
+- **标签**：同一战后选图点上，原样续打与去掉一瓶药的续打配成一对。差 = 后续战斗代价之差（`UNPRICED`：不计药价）+ 到下一幕开头时手中药水的价值之差（`held_value`：按价格对象在那时的入场状态上逐瓶计价）。第三幕的续打打到终局，手里的药记 0；先死或没到下一幕的也记 0。
+- **特征**（`features`）：幕、腰带满否、缺血比例（每幕一个斜率）、离本幕 Boss 的层数、持药数、难度、牌组的张数与攻击／技能／能力／升级／诅咒与状态张数、遗物数、角色。层数取入场状态的 `act_floors`，缺时按 17／16／15。
+- **形式**（`Design`、`LinearPrices`）：价 = 基准价[幕, 腰带满否] + 斜率项（按训练对标准化）+ 角色偏移 + 档偏移（较高、最高）+ 药水偏移。药水偏移只对训练对里出现过的药水，其余药水只有档偏移。整局最后一场按 `final`（1／1／1），免费药水为 0，与 `costs.FIXED` 相同。
+- **拟合**（`fit`）：岭回归，基准价不罚；状态、角色、档、药水四组各有一个惩罚，由五折交叉验证在 `GRID`（对数的倍数）里选，一折是若干整局来源对局（`folds_of`），同一局的点不跨折。
+- **逐幕倒推**：第一、二幕的标签要用下一幕的价格。第一轮按 `previous`（上一次的价格）计，之后每轮按上一轮的拟合计，直到拟合值在训练对上的最大变化小于 0.05 HP（默认最多 6 轮）。第三幕的标签不依赖模型，第二幕随后稳定，再是第一幕。
+- **对照**：同样分折，只用基准价（每个幕与腰带的均值）的留出误差。拟合不比它准时，只保留基准价（报告的 `kept` 为 `base`）。
+- **报告**：对数、点数、来源对局数、轮数、选中的惩罚、两种留出误差、各幕的对数与平均标签、每一列的系数与标准误（`(XᵀX+Λ)⁻¹XᵀX(XᵀX+Λ)⁻¹` 乘残差方差）。
+- **平滑**（`Smoothed`）：用于战斗的价格 = 新旧价格在这场战斗上取平均，限在旧价的 ±30%（`CAP`）之内。整局最后一场与免费药水保持旧价。旧价是另一个价格对象，第一次是 `costs.FIXED`，所以每次重拟在外面再包一层。
+- **价格文件**：`to_json`／`from_json`，`kind` 为 `fixed`、`linear`、`smoothed`；`digest` 是规范 JSON 的 SHA-256，迭代记它来核对一次迭代前后是否同价。代码的列和文件里的列不一致时报错，要重拟。
 
 ## 战斗组的优势
 
 `fight_groups.py`：`advantages(轮目录, 价格, drop_uniform=False)` 给一轮的[战斗组](play.md#战斗组)写 `fight-groups/advantages.json.gz`。文件格式与幕组各波相同（`format=rollout-advantages-v1`），`kind=fight-groups`，头里记 `wave`、`prices`、`policy_version`、这一波写出的段数（`written`）、`runs`、`decisions`、优势的摘要（`advantage`）与 `stats`；剔除全同组时另记 `drop_uniform_groups: true`。`prices` 是价格对象的描述：`Prices` 记它的三项表，别的价格对象记它自己 `describe()` 的返回值，没有这个方法就记类名。正文是每段各决策的（宏动作序号、基线、优势）。更新读它与读幕组的一波相同（`streams.priced`、`batches.priced_waves`），混合批可以把 `fight-groups/` 当作一路直接读。
 
 - **回报**：每条战斗段的 R = `costs.fight_return(战况, 价格)`（[战斗代价](#战斗代价)），战况取这一波 `fights.jsonl` 里该段的那一行；每段必须恰好一行，缺行或多行都报错。回报不落盘，每次调用都按传入的价格从战况现算，并重写优势文件（只读一波的决策摘要与战况，几秒），所以换价格（药水价值拟合）不用重新采样。`iterate` 传的是 `iterate.PRICES`，现在是 `costs.FIXED`，挑选战斗用的代价也是它。
-- **基线与分叉树**：组内均值是基线。同组各段从同一份入场存档开始，续打在动作给定时是确定的，所以各段在第一次选了不同动作之前帧都相同。分叉树（`segments.tree`，与幕组共用）覆盖这段共享前缀：到达者 ≥ 2 的节点上，优势 = 选同一动作者的回报均值 − 节点全部到达者的均值；只有一种动作的节点记 0。分叉之后，优势 = R − 组内均值，不做状态回归：ADR 0001 定的是只用组内均值作基线，而且同一场战斗里幕、楼层、卡组这些状态摘要几乎不变。文件里的 `value` 就是这个基线（树节点上是节点均值）。
-- **全组同结果的组**（组内各段的 R 全相等）：每个决策的优势都显式记为 0，基线是 R，不受均值舍入的影响。`drop_uniform=True`（`iterate --drop-uniform-groups`，与幕组共用一个开关）把这类组整组剔掉：它的段不写进正文，更新时被略过。
+- **基线与分叉树**：组内均值是基线。同组各段从同一份入场存档开始，续打在动作给定时是确定的，所以各段在第一次选了不同动作之前帧都相同。分叉树（`segments.tree`，与幕组共用）覆盖这段共享前缀：到达者 ≥ 2 的节点上，优势 = 选同一动作者的回报均值 − 节点均值（同幕组：只取没在这一步探索的到达者）；只有一种动作的节点记 0。分叉之后，优势 = R − 组内均值，不做状态回归：ADR 0001 定的是只用组内均值作基线，而且同一场战斗里幕、楼层、卡组这些状态摘要几乎不变。文件里的 `value` 就是这个基线（树节点上是节点均值）。
+- **全组同结果的组**（组内各段的 R 全相等）：每个决策的优势都显式记为 0，基线是 R，不受均值舍入的影响。`drop_uniform=True`（`iterate` 固定开，与幕组共用一个开关）把这类组整组剔掉：它的段不写进正文，更新时被略过。
 - **剔除后各统计按哪些组算**：组数、全同组数、回报均值、组间方差占比、组内方差与 `kinds` 仍按全部组算；`segments`、`decisions`、`tree`、`explored`、`forked` 只按保留的组算；`dropped` 记剔掉的组数、段数与决策数。
 - **头里的 `stats`**：
   - 组数、段数、决策数、回报均值、组间方差占比（`groups.share`）、组内回报方差（`within_variance`：只算至少两段的组，各组的离差平方和相加，再除以各组自由度之和）、全同组数；
   - `tree`：节点数、覆盖的决策数与比例、分叉节点数与比例，与幕组相同；
-  - `explored`、`forked`：探索步与分叉步的数量、优势均值与正负个数。
+  - `explored`、`forked`：探索步与分叉步的数量、优势均值与正负个数；
+  - `explored_by_hp`：探索步按做决策时的 HP 占比分三档（`hp<0.3`、`hp<0.6`、`hp>=0.6`，即低于 30%、30%–60%、60% 及以上；取决策状态摘要的 `hp_ratio`），各档的数量、优势均值与正负个数，看强制用药在危急时的结果。
+- **回溯分叉**（`advantages(…, wave=HINDSIGHT)`）：[回溯分叉](play.md#回溯分叉)那一波按同样的算法定价，每个分叉点一组。各臂从同一帧开始，所以分叉点的决策由分叉树给优势：选同一动作的臂的回报均值 − 全组均值；之后的决策是 R − 组均值。重放的前缀不在段里，没有优势。头里另记 `hindsight`（`hindsight_diagnostics`）：`places` 按分叉点类型记组数、生死有分歧的组数与组内代价极差的平均；有喝药臂也有照常选的臂的组，按战斗种类（`kinds`）、分叉点类型（`drinks`）与药水（`potions`）记组数（药水记臂数）、照常选的臂的死亡率，以及组内"喝药臂 − 照常选的臂"的死亡率差与代价差在组间的平均；`uncertain` 按战斗种类记"取第一名的臂 − 取第二名的臂"的代价差与死亡率差的平均，以及第一名代价更低的组数。臂由这一波 `picks.json` 的分叉点给出（`play.fight_groups.arms`）。
 - **`kinds`：按战斗种类（普通、精英、Boss）各一份组内诊断**。每份先记组数、段数、全同组数、回报均值与组内回报方差，另有以下几项：
-  - `death_rate`：先算每组内死亡段的比例，再在组间取平均；`death_varies`：生死有分歧的组数；
+  - `death_rate`：先算每组内死亡段的比例，再在组间取平均；`death_varies`：生死有分歧的组数；`all_died`：各段全死的组数。死亡不计药价，这类组只在最大生命的增减上可能有差别，通常是全同组；
   - `potion_somewhere`：有段用过药的组数；`potions_per_segment`：先算每组内每段的用药数均值，再在组间取平均；
+  - `growth_per_segment`：先算每组内每段的成长事件数（`costs.growth_events`，与奖励多少无关）均值，再在组间取平均；`growth_varies`：组内各段成长事件数不全相同的组数；
   - `potion_varies`：同一组里既有用药段又有不用药段的组数。在这些组上，先算组内"用药段 − 不用药段"的差，再在组间取平均，分别得到 `users_minus_others_death`（死亡率之差）与 `users_minus_others_cost`（战斗代价之差，HP）；
   - `users_minus_others_hp_lost`：掉血之差，只比活下来且有战后决策的段，两边都有这样的段的组才算；这样的组数是 `n_hp_pairs`；
   - 用药段指战况 `potions_used` 非空的段，即策略主动用了药；瓶中精灵被触发这类不经策略的消耗不算。其余定义与 ADR 0001 前置测量里战斗组的统计相同；前置测量按药水数的减少认用药，瓶中精灵被触发也算在内，在战斗最后一个决策用的药则漏掉。
 
 ## 战斗评估报表
 
-`fight_report.py`：由[战斗评估集](play.md#战斗评估集)的逐场行给报表。命令 `fight-eval` 打完即出，`fight-compare` 从写下的逐场行重出。代价按传入的价格现算（命令用 `costs.FIXED`），换价格不用重打。
+`fight_report.py`：由[战斗评估集](play.md#战斗评估集)的逐场行给报表。命令 `fight-eval` 打完即出，`fight-compare` 从写下的逐场行重出。代价按传入的价格现算（命令用 `costs.FIXED`），换价格不用重打。`fight-eval --prices <prices.json>` 另写一份按那套价格算的 `report-prices.json`／`.txt`，`fight-compare --prices` 按那套价格重出报表。这两处都只算策略一方：求解器的战况没有入场状态，拟合的价格算不了。
 
 - **口径**（`record`）：行的战况加上种类、幕、楼层、第二 Boss、难度，交给 `costs.cost`。整局最后一场打赢的，对局随之结束，战后 HP 一律取这场最后一个决策的：策略一方本来就只有这个，求解器报告里的终局 HP 不用，两边同一口径。
 - **`summary`**：分普通、精英、Boss 与全部（`all`），给：
   - 场数、打完的场数、死亡数与死亡率；
-  - 平均代价与标准误，分项（`hp`、`max_hp`、`potions`、`death`）的平均；
+  - 平均代价与标准误，分项（`hp`、`max_hp`、`potions`、`death`、`growth`）的平均，以及不含成长奖励的平均代价（`cost_without_growth`，与没有这一项的轮次可比）；
   - 每场用药数、用过药的场数及其占比；
   - 死时持药未用（`held_at_death`）：不算整局最后一场（那里药价固定为 1，不拟合），死亡场次中入场时腰带里有能喝的药、整场一瓶没用的场数与占比。瓶中精灵不算：它只会自己触发，引擎只给 AnyTime、CombatOnly 两种药水 USE_POTION 候选。药水价值拟合要等这一项和精英战的用药占比过了门槛再做（门槛见 `.scratch/training-plan` 工单 10）；
   - 危急帧：个数、出现危急帧的场数、在危急帧上用药的次数与比例，策略在温度 1 与战斗温度下的平均用药概率（求解器一方没有概率）。
@@ -175,25 +198,32 @@ L = −min(r·A, clip(r, 1 − ε, 1 + ε)·A) + κ·KL
 
 | 步骤 | 做什么 | 写到 |
 | --- | --- | --- |
-| `sample` | 一轮幕组（[play](play.md#幕组)），各波依次；给了 `--fight-groups` 时之后再采战斗组（[play 战斗组](play.md#战斗组)）；被打断的轮（种子相同）从所在的波续跑，不整轮重采；没完成的段按 `Settings.quarantine` 的比例容忍（2%，不是命令行参数），超出或最后一波没写出任何段则这一步失败，战斗组的段同样按这个比例单独核对 | `groups/round-N/<波>/`、`groups/round-N/fight-groups/`，种子在 `seeds/iteration-NNNN.json`，难度窗口的分配在 `seeds/iteration-NNNN-ascensions.json` |
-| `advantages` | 每波的回报与优势（[幕组的优势](#幕组的优势)），记各波的组数、组间方差占比、全组同结果的组数、树覆盖、组内 R²、`fights`（有优势与排除的战斗决策数），以及 `dropped`（`--drop-uniform-groups` 剔掉的组数、段数、决策数；不剔除时为 null）；轮里有战斗组时另算它的优势（[战斗组的优势](#战斗组的优势)，价格是 `iterate.PRICES`），记在 `fight-groups` 下 | `groups/round-N/<波>/advantages.json.gz`、`groups/round-N/fight-groups/advantages.json.gz` |
+| `sample` | 一轮幕组（[play](play.md#幕组)），各波依次；给了 `--fight-groups` 时之后再采战斗组（[play 战斗组](play.md#战斗组)），再给了 `--fight-hindsight` 时之后再采回溯分叉（[play 回溯分叉](play.md#回溯分叉)）；被打断的轮（种子相同）从所在的波续跑，不整轮重采；没完成的段按 `Settings.quarantine` 的比例容忍（2%，不是命令行参数），超出或最后一波没写出任何段则这一步失败，战斗组与回溯分叉的段同样按这个比例各自核对 | `groups/round-N/<波>/`、`groups/round-N/fight-groups/`、`groups/round-N/fight-hindsight/`，种子在 `seeds/iteration-NNNN.json`，难度窗口的分配在 `seeds/iteration-NNNN-ascensions.json` |
+| `advantages` | 每波的回报与优势（[幕组的优势](#幕组的优势)），记各波的组数、组间方差占比、全组同结果的组数、树覆盖、组内 R²、`fights`（有优势与排除的战斗决策数），以及 `dropped`（剔掉的全组同结果的组数、段数、决策数）；轮里有战斗组时另算它的优势（[战斗组的优势](#战斗组的优势)，价格是 `iterate.PRICES`），记在 `fight-groups` 下；有回溯分叉时同样另算，记在 `fight-hindsight` 下 | `groups/round-N/<波>/advantages.json.gz`、`groups/round-N/fight-groups/advantages.json.gz`、`groups/round-N/fight-hindsight/advantages.json.gz` |
 | `demos` | 给了 `--round-demos N` 时（BC 阶段）：从这一轮各波的战况里挑 N 场交给求解器（[play 战斗示范的挑选](play.md#战斗示范的挑选)，key 同 `demo_key`），求完、导出、导入（[demos 逐轮的战斗示范](demos.md#逐轮的战斗示范)）；记挑选的账、求解器的 `summary.json`、导入的组数与宏动作数、数据目录与秒数。`selection.json` 已在就沿用，导入已完成就不再求解 | `groups/round-N/demos/`（`selection.json`、`solved/`、`imported/`） |
-| `update` | 一遍[裁剪目标](#幕组的裁剪目标)的更新（批见[幕组批](#幕组批)）；有战斗组时同一批里另放战斗组，给了 `--combat-demos` 或 `--round-demos` 时另放战斗示范（[混合批](#混合批)） | 检查点目录的 `current/`、`iteration-NNNN/` |
+| `update` | 一遍[裁剪目标](#幕组的裁剪目标)的更新（批见[幕组批](#幕组批)）；有战斗组时同一批里另放战斗组，给了 `--round-demos` 时另放战斗示范（[混合批](#混合批)） | 检查点目录的 `current/`、`iteration-NNNN/` |
 | `evaluation` | 第 N 次迭代后、N + 1 是 `--evaluate-every`（默认 5）的倍数时，用 `--eval-seeds` 每角色前 `--eval-runs-per-character` 个种子 greedy 评估，只写去掉帧的对局文件；不给 `--eval-seeds` 不评估，同一 `policy_version` 只评一次 | `evaluation/iteration-NNNN/report.json` |
-| `cleanup` | 删这次更新之后没有人再读的东西（`demos/` 见 `--round-demos`）：到这次为止各轮每波的 `accepted/` 分片、`saves/`、`index.jsonl.gz`、`advantages.json.gz`、`decisions.jsonl.gz`，以及 `--fight-entries` 写的 `fights/` 与 `fights.jsonl`、战斗组 `fight-groups/` 的分片、索引、决策摘要、`fights.jsonl`、`picks.json` 与 `advantages.json.gz`（战斗组最后一次被读是在 `advantages` 步；更新还不读它）（留 `summary.json`、`saves.jsonl`、`quarantine/`，以及轮目录的 `metadata/` 和续跑时挪到轮目录下的 `interrupted/`）；策略归档只留评估过的（关键存档点）、到期待评估的、下一次更新的 KL 参考和这次的；输出目录下的 `interrupted/` 整个删 | 记下释放的空间 |
+| `cleanup` | 删这次更新之后没有人再读的东西（`demos/` 见 `--round-demos`）：到这次为止各轮每波的 `accepted/` 分片、`saves/`、`index.jsonl.gz`、`advantages.json.gz`、`decisions.jsonl.gz`，以及各波的战况 `fights/` 与 `fights.jsonl`、战斗组 `fight-groups/` 与回溯分叉 `fight-hindsight/` 的分片、索引、决策摘要、`fights.jsonl`、`picks.json` 与 `advantages.json.gz`（战斗组最后一次被读是在 `update` 步）（留 `summary.json`、`saves.jsonl`、`quarantine/`，以及轮目录的 `metadata/` 和续跑时挪到轮目录下的 `interrupted/`）；策略归档只留评估过的（关键存档点）、到期待评估的、下一次更新的 KL 参考和这次的；输出目录下的 `interrupted/` 整个删 | 记下释放的空间 |
 
-- `--fork-depth D`（默认 0）：每段开头前 D 个有选择的决策按段在组里的序号取策略排第一或第二的候选（分叉步，见 [architecture](../architecture.md#幕组的回报与优势)）；`sample` 记录多 `forked`（每波分叉步数），轮的 summary 记 `fork_depth`。训练样本 `Sample.forked` 标出分叉步，裁剪目标对它们双侧裁剪。
-- 一轮的形状：`--runs-per-character`（默认 200）是每角色的种子数，`--boundary-acts`（默认 `2 3`）、`--boundary-bosses`（默认无；如 `3` 在第三幕 Boss 入场再切一级，波 `boss3`）、`--group-n`（8）、`--group-m`（8，或每个后续波一个数，后续波数 = 切点数）。每轮的组不复用。
+- 一轮的形状：`--runs-per-character`（默认 200）是每角色的种子数，`--boundary-acts`（默认 `2 3`）、`--group-n`（8）、`--group-m`（8，或每个后续波一个数，后续波数 = 切点数）。每轮的组不复用。
 - `--ascensions LO HI`：[难度窗口](../architecture.md#幕组的回报与优势)。每个（角色，种子）的组在 [LO, HI] 里分到一个难度：各角色的种子按顺序轮流取窗口里的各级，起点由（种子根，迭代，角色）的哈希定（`env.seeds.round_ascensions`），每级组数至多差一、可复现；分配写在 `seeds/iteration-NNNN-ascensions.json` 与轮目录的 `metadata/ascensions.json`，种子或分配变了的被打断的轮挪开重采。`sample` 记录多 `by_ascension`（每波按难度的段数与结果），`advantages` 的每波多 `by_ascension`（每个难度的组数、段数、全组同结果的组数、平均回报、探索步的优势）。评估仍按检查点的难度。不给时整轮按检查点的难度。
-- `--explore-potions`：用药探索率（[play 温度与战斗边界](play.md#温度与战斗边界)）。一个数用于所有战斗，两个数分普通战与精英／Boss 战，三个数分普通、精英、Boss；默认 0，不探索。
-- `--greedy-fights`（默认关）：[greedy 战斗](../architecture.md#采样温度)，采样时战斗内的决策取最可能的动作、战斗不留帧，优势与更新只有战斗外的决策（[幕组的优势](#幕组的优势)）；`--fork-depth` 的分叉落在战斗外。与非零的 `--explore-potions`、`--boundary-bosses` 互斥（`Settings` 报错）。设置记为 `greedy_fights`；`sample` 记录与轮的 summary 记 `greedy_fights`，`sample` 的 `decisions` 只数战斗外的宏动作，`advantages` 的每波多 `fights`（有优势的战斗决策数，应为 0；排除的战斗宏动作数），`update` 记录（也写进检查点的 `progress`）记这一轮是否 `greedy_fights`。
-- `--fight-entries`（默认关）：每波另写各段每场战斗的战况（`fights.jsonl`）与非事件战斗的入场存档（`fights/`），段的打法不变（见 [play 幕组](play.md#幕组)）。设置记为 `fight_entries`；`sample` 记录多 `fights`（每波的记录数、按种类、死亡数、存档数与字节、写入秒数）。这些文件在这次迭代的清理步删除，要用的步骤须在清理之前读。
-- `--fight-groups N`（默认 0）：[战斗组采样](../architecture.md#战斗组采样)，在 `sample` 步里于幕组各波之后打（`iterate.play_round` 调 `fight_groups.sample_fight_groups`，runner 是这一轮的副本 `variant(greedy_fights=False, explore_potions=--fight-group-explore-potions)`，挑选的代价是 `iterate.fight_cost`：固定药价下的[战斗代价](#战斗代价)，随机数的 key 是 `<seed-root>:<迭代>`）。要求同时给 `--greedy-fights` 与 `--fight-entries`（`Settings` 报错）。`--fight-group-size`（8，至少 2）、`--fight-group-priority`（0.5，在 [0, 1]）、`--fight-group-fork-depth`（0）、`--fight-group-explore-potions`（0，格式同 `--explore-potions`）。设置记为 `fight_groups`、`fight_group_size`、`fight_group_priority`、`fight_group_fork_depth`、`fight_group_explore_potions`。`sample` 记录多 `fight_groups`：`groups`、`segments`、`written`、`failed`、`outcomes`、`picks`（候选数、事件战斗数、挑出数、每类的可挑场数、死亡数、配额、优先与均匀各几场、短缺数，以及短缺的类）、`decisions`、`explored`、`forked`、`fights`（战况的写出数）、`seconds`、`collector`；轮 summary 多 `fight_groups`（这一波的 summary）。这一波不在轮的 `waves` 里。`advantages` 步另算它的优势，记录多 `fight-groups`：`runs`、`decisions`、`advantage`、`prices`、`groups`、`return_mean`、`between_share`、`within_variance`、`uniform_groups`、`dropped`、`tree_share`、`branching_share`、`explored`、`forked`、`kinds`（各项见[战斗组的优势](#战斗组的优势)）。`update` 把这一波作为来源 `fight-groups` 与幕组各波放进同一批（`grpo.group_update(fights=…)`，同一裁剪目标与 KL），份额按 `--source-shares` 或决策数；更新记录多 `fights`（批数、样本数、零优势比例、数据范围）。轮里的采样分布记下了、且战斗组也记下时，KL 的参考用记下的分布（`Reference.recorded()`）。轮的 summary 已在、但没有 `fight_groups` 时（之前没开、后来开了），`sample` 步若还没记下，会只补采战斗组。
-- `--combat-demos DIR…`（默认无）：[混合批](#混合批)，每次更新在同一批里另放这些示范目录的战斗，每个宏动作按 NLL 学、不算 KL。驱动每次迭代经 `Driver.demos(迭代)` 取目录（这个设置的目录，加上 `--round-demos` 时最近 `--demo-buffer` 轮的导入），抽取的 key 是 `Driver.demo_key(迭代)`（`<seed-root>:<迭代>`）。示范目录不在轮目录里，清理步不动它；示范的种子不进检查点的 `training_seeds`。`--source-shares KIND=SHARE…`：各类来源（`act-groups`、`fight-groups`、`combat-demos`）在批里的相对份额，要列全这次更新有的类，不给时按决策数（示范按示范池的宏动作数）；BC 阶段的 1:1 是 `act-groups=1 combat-demos=1`。一遍是 ⌈ΣN_局外 / 每批的局外样本数⌉ 个逻辑批（`--updates round`），局外各波各看一次。设置记为 `combat_demos`、`source_shares`。`update` 记录多 `mix`（每类的决策数、份额、每批的样本数、进批的样本数、`loss`、`entropy`、`accuracy`，采样类另有 `kl`、`clip_fraction`、`ratio_mean`、`zero_share` 与探索步各项，示范另有 `nll`），有示范时多 `demos`（抽取，见[混合批](#混合批)）；`shares`、`sizes`、`losses` 含示范那一路，`decisions` 是各路决策数之和，`seen` 只是采样样本的；`history.jsonl` 每类多 `<类>_<项>`（如 `act_groups_kl`、`combat_demos_loss`、`combat_demos_accuracy`），有示范时多 `combat_demos_repeats`；顶层的 `kl`、`clip_fraction` 等是采样样本的，即局外的。
-- `--round-demos N`（默认 0）：BC 阶段，每轮在 `advantages` 之后、`update` 之前多一步 `demos`（见上表），要求同时给 `--greedy-fights` 与 `--fight-entries`（`Settings` 报错）。`--demo-buffer`（3，至少 1）：更新学这一轮与之前共几轮的导入；`--demo-opening`（0.2，在 [0, 1]）：开局是选择的战斗先抽的份额上限；`--demo-workers`（16）：求解器同时打的局数。设置记为 `round_demos`、`demo_buffer`、`demo_opening`、`demo_workers`。`history.jsonl` 多 `demo_fights`、`demo_opening`、`demo_runs`、`demo_macros`、`demo_seconds`。清理步删掉到这次为止各轮的 `demos/solved/samples/` 与导出，导入（`demos/imported/`）在第 N 次清理时删掉第 N − `demo_buffer` + 1 轮及更早的；`selection.json` 与求解器的报告保留。求解这一步按毫秒计时，采样进程闲着、引擎已退出，内存约为采样进程 4 GB 加求解器至多 8.5 GB。
-- `--clip`、`--kl`：[裁剪目标](#幕组的裁剪目标)的 ε 与 κ。`--reference-every k`：KL 的参考每 k 次迭代换成当时的策略（第 N 次迭代用检查点目录的 `iteration-{k·⌊N/k⌋ − 1}`，N < k 用起点检查点），清理时留下下一次更新要用的那份（上一段的参考若没被评估过，换段后删除），更新记录的 `reference` 记下用的是哪份；不给时 k 取 `--evaluate-every`，`0` 让参考始终是 `--checkpoint`。`--learning-rates <json>` 给这次运行各组的学习率（不给时沿用检查点的），写进这次运行保存的检查点。
+- `--explore-outside`：局外探索率（[play 温度与战斗边界](play.md#温度与战斗边界)），一个数用于全部局外阶段，或 `PHASE=RATE` 若干对（`cli.outside_rate`、`commands.explore_outside`）；默认 0，不探索。设置记为 `explore_outside`（率不为 0 的阶段）。只给幕组：`play_round` 里战斗组、回溯分叉与局外对照的 runner 副本都是 `explore_outside=0`。`advantages` 的每波在有局外探索步时多 `explored_outside`（见[幕组的优势](#幕组的优势)）。
+- `--explore-prior`、`--prior`：先验提议的率（格式同 `--explore-outside`）与先验的检查点（[play 温度与战斗边界](play.md#温度与战斗边界)）；率不为 0 时必须给检查点，驱动在加载策略后加载它（`Driver.load_prior`，推理用，词表必须与策略相同）、交给 `Samplers(prior=)` 与 runner。只给幕组，三种副本都是 `explore_prior=0`。设置记为 `explore_prior` 与 `prior`。
+- `--explored-on-tree`：只学由分叉树定价的局外探索步（`groups.advantages(explored_on_tree=)`），设置记为 `explored_on_tree`。
+- `--explored-centered`：参与学习的局外探索步优势按波按阶段去均值（`groups.advantages(explored_centered=)`），设置记为 `explored_centered`。
+- 幕组固定为 [greedy 战斗](../architecture.md#采样温度)：采样时战斗内的决策取最可能的动作、战斗不留帧，优势与更新只有战斗外的决策（[幕组的优势](#幕组的优势)）；`sample` 记录与轮的 summary 记 `greedy_fights`，`sample` 的 `decisions` 只数战斗外的宏动作，`advantages` 的每波多 `fights`（有优势的战斗决策数，应为 0；排除的战斗宏动作数），`update` 记录（也写进检查点的 `progress`）记这一轮是否 `greedy_fights`。
+- 每波固定另写各段每场战斗的战况（`fights.jsonl`）与非事件战斗的入场存档（`fights/`），段的打法不变（见 [play 幕组](play.md#幕组)）；`sample` 记录多 `fights`（每波的记录数、按种类、死亡数、存档数与字节、写入秒数）。这些文件在这次迭代的清理步删除，要用的步骤须在清理之前读。
+- `--fight-groups N`（默认 0）：[战斗组采样](../architecture.md#战斗组采样)，在 `sample` 步里于幕组各波之后打（`iterate.play_round` 调 `fight_groups.sample_fight_groups`，runner 是这一轮的副本 `variant(greedy_fights=False, explore_outside=0, explore_prior=0)`，挑选的代价是 `iterate.fight_cost`：这次运行的药价（`fight_prices`：固定价，或 `--potion-prices` 的价格文件）下的[战斗代价](#战斗代价)，随机数的 key 是 `<seed-root>:<迭代>`）。`--fight-group-size`（8，至少 2）、`--fight-group-priority`（0.5，在 [0, 1]）。设置记为 `fight_groups`、`fight_group_size`、`fight_group_priority`。`sample` 记录多 `fight_groups`：`groups`、`segments`、`written`、`failed`、`outcomes`、`picks`（候选数、事件战斗数、挑出数、每类的可挑场数、死亡数、配额、优先与均匀各几场、短缺数，以及短缺的类）、`decisions`、`explored`、`forked`、`fights`（战况的写出数）、`seconds`、`collector`；轮 summary 多 `fight_groups`（这一波的 summary）。这一波不在轮的 `waves` 里。`advantages` 步另算它的优势，记录多 `fight-groups`：`runs`、`decisions`、`advantage`、`prices`、`groups`、`return_mean`、`between_share`、`within_variance`、`uniform_groups`、`dropped`、`tree_share`、`branching_share`、`explored`、`forked`、`explored_by_hp`、`kinds`（各项见[战斗组的优势](#战斗组的优势)）。`update` 把这一波作为来源 `fight-groups` 与幕组各波放进同一批（`grpo.group_update(fights=…)`，同一裁剪目标与 KL），份额按 `--source-shares` 或决策数；更新记录多 `fights`（批数、样本数、零优势比例、数据范围）。轮里的采样分布记下了、且战斗组也记下时，KL 的参考用记下的分布（`Reference.recorded()`）。轮的 summary 已在、但没有 `fight_groups` 时（之前没开、后来开了），`sample` 步若还没记下，会只补采战斗组。
+- `--win-hp-bonus β`（默认 0，在 [0, 1)）：[剩血奖励](../../CONTEXT.md)，HP 取自各波的战况。设置记为 `win_hp_bonus`；`advantages` 的每波多 `win_bonus`。
+- `--growth-bonus h`（默认 0）：[成长奖励](../../CONTEXT.md)，每个成长事件从战斗代价里减 h HP（`fight_prices` 套 `costs.with_growth`），战斗组的挑选与回报都按它；要求有战斗组（`Settings` 报错）。设置记为 `growth_bonus`，`sample` 记下的价格摘要含它。`fight-eval`、`fight-compare` 也有 `--growth-bonus`，报表按同样的奖励出。
+- `--fight-hindsight N`（默认 0）：[回溯分叉](play.md#回溯分叉)，在 `sample` 步里于战斗组之后打（`fight_groups.sample_hindsight`，runner 是这一轮的副本 `variant(greedy_fights=False, explore_potions=0)`，key 是 `<seed-root>:<迭代>`），每轮 N 条主干（战斗组的段，按种类 3:4:4，不论死活）。要求有战斗组（`Settings` 报错）。设置记为 `fight_hindsight`。`sample` 记录多 `fight_hindsight`（格式同 `fight_groups`，`picks` 是分叉的账）；`advantages` 记录多 `fight-hindsight`（同 `fight-groups` 各项，另有 `hindsight`）；`update` 把它作为战斗组那一类的第二路 `fight-hindsight` 放进同一批，两路按决策数分这一类的份额，更新记录多 `fight_streams`。KL 的参考用记下的分布，要求战斗组与回溯分叉也都记下了分布。轮的 summary 已在、但没有 `fight_hindsight` 时，`sample` 步若还没记下，会只补采回溯分叉。
+- `--fight-group-shares normal=2 elite=4 boss=5`、`--fight-group-kind-size boss=16`、`--fight-pool <集…>` 与 `--fight-pool-share 0.5`、`--fight-hindsight-shares normal=0 elite=1 boss=1`：战斗组各种类的配比、各种类的组大小、外部入场池与它的份额、回溯分叉主干的配比（[play 战斗组](play.md#战斗组)）。设置记为 `fight_group_shares`、`fight_group_kind_size`、`fight_pool`、`fight_pool_share`、`fight_hindsight_shares`；都取默认时战斗组与回溯分叉的 `plan` 与原来相同，旧轮次续跑不重采。
+- `--potion-prices <prices.json>`（默认无，即固定价）：`fit-prices` 写的价格文件（[药价模型](#药价模型)），战斗组的挑选与优势都按它计价。要求同时有战斗组，`Settings` 当场读一遍文件。设置记为 `potion_prices`；有战斗组时 `sample` 记录多 `prices`（价格的摘要），`advantages` 步发现当前价格与采样时不同就报错：一次迭代的战斗组要按挑选时的价格算回报。
+- 战斗示范与[混合批](#混合批)：每次更新在同一批里另放示范目录的战斗，每个宏动作按 NLL 学、不算 KL。驱动每次迭代经 `Driver.demos(迭代)` 取目录（`--round-demos` 时最近 `--demo-buffer` 轮的导入），抽取的 key 是 `Driver.demo_key(迭代)`（`<seed-root>:<迭代>`）；示范的种子不进检查点的 `training_seeds`。`--source-shares KIND=SHARE…`：各类来源（`act-groups`、`fight-groups`、`combat-demos`）在批里的相对份额，要列全这次更新有的类，不给时按决策数（示范按示范池的宏动作数）；BC 阶段的 1:1 是 `act-groups=1 combat-demos=1`。一遍是 ⌈ΣN_局外 / 每批的局外样本数⌉ 个逻辑批，局外各波各看一次。设置记为 `source_shares`。`update` 记录多 `mix`（每类的决策数、份额、每批的样本数、进批的样本数、`loss`、`entropy`、`accuracy`，采样类另有 `kl`、`clip_fraction`、`ratio_mean`、`zero_share` 与探索步各项，示范另有 `nll`），有示范时多 `demos`（抽取，见[混合批](#混合批)）；`shares`、`sizes`、`losses` 含示范那一路，`decisions` 是各路决策数之和，`seen` 只是采样样本的；`history.jsonl` 每类多 `<类>_<项>`（如 `act_groups_kl`、`combat_demos_loss`、`combat_demos_accuracy`），有示范时多 `combat_demos_repeats`；顶层的 `kl`、`clip_fraction` 等是采样样本的，即局外的。
+- `--round-demos N`（默认 0）：BC 阶段，每轮在 `advantages` 之后、`update` 之前多一步 `demos`（见上表）。`--demo-buffer`（3，至少 1）：更新学这一轮与之前共几轮的导入；`--demo-opening`（0.2，在 [0, 1]）：开局是选择的战斗先抽的份额上限；`--demo-workers`（16）：求解器同时打的局数。设置记为 `round_demos`、`demo_buffer`、`demo_opening`、`demo_workers`。`history.jsonl` 多 `demo_fights`、`demo_opening`、`demo_runs`、`demo_macros`、`demo_seconds`。清理步删掉到这次为止各轮的 `demos/solved/samples/` 与导出，导入（`demos/imported/`）在第 N 次清理时删掉第 N − `demo_buffer` + 1 轮及更早的；`selection.json` 与求解器的报告保留。求解这一步按毫秒计时，采样进程闲着、引擎已退出，内存约为采样进程 4 GB 加求解器至多 8.5 GB。
+- `--clip`、`--kl`：[裁剪目标](#幕组的裁剪目标)的 ε 与 κ。KL 的参考每 `--evaluate-every k` 次迭代换成当时的策略（第 N 次迭代用检查点目录的 `iteration-{k·⌊N/k⌋ − 1}`，N < k 用起点检查点），清理时留下下一次更新要用的那份，更新记录的 `reference` 记下用的是哪份。`--learning-rates <json>` 给这次运行各组的学习率（不给时沿用检查点的），写进这次运行保存的检查点。
 - `--config <profile>`：采样温度换成 profile 里的（严格续训时其余设置仍须与检查点一致；给了 `--learning-rates` 时学习率不在比较之列）。
-- `--wave-shares`：各波在批里的相对份额，按波的顺序每波一个数；不给时按各波的决策数（见[幕组批](#幕组批)）。`--drop-uniform-groups`：全组同结果的组的决策不进更新（[幕组的优势](#幕组的优势)；战斗组同此，见[战斗组的优势](#战斗组的优势)），默认份额、`--updates round` 的步数与损失缩放的 ΣN 都按剔除后的决策数；设置记为 `drop_uniform_groups`。`--updates`：`round`（ΣN / B 个加载批，默认）或一个优化器步数。`--batch N`：一个优化器步的宏动作数，必须是 profile 逻辑批 B 的整数倍；训练器把 k = N / B 个加载批的梯度累加后走一步（`Learner.fit(accumulate=k)`），损失缩放是 ΣN / N，一条决策每进一次批的权重是 1/N，一遍的步数是 ⌈ΣN / B / k⌉。加载端仍按 B 打包，内存不变。更新记录多 `batch`、`accumulate`，`pass_updates` 是优化器步数；`updates.jsonl` 每步一行，`samples` 是 k 个批的合计，各波的 `zero_share` 取这一步最后一个加载批的。
+- `--wave-shares`：各波在批里的相对份额，按波的顺序每波一个数；不给时按各波的决策数（见[幕组批](#幕组批)）。全组同结果的组的决策固定不进更新（[幕组的优势](#幕组的优势)；战斗组同此，见[战斗组的优势](#战斗组的优势)），默认份额、一遍的步数（ΣN / B 个加载批）与损失缩放的 ΣN 都按剔除后的决策数。`--batch N`：一个优化器步的宏动作数，必须是 profile 逻辑批 B 的整数倍；训练器把 k = N / B 个加载批的梯度累加后走一步（`Learner.fit(accumulate=k)`），损失缩放是 ΣN / N，一条决策每进一次批的权重是 1/N，一遍的步数是 ⌈ΣN / B / k⌉。加载端仍按 B 打包，内存不变。更新记录多 `batch`、`accumulate`，`pass_updates` 是优化器步数；`updates.jsonl` 每步一行，`samples` 是 k 个批的合计，各波的 `zero_share` 取这一步最后一个加载批的。
 - `--window-shards`（默认 8）：更新时每一路的窗口是 `window_shards // 路数` 个分片（至少 1；路数是波数，有示范时加一），再在该路的读取进程之间平分。
 - 采样种子由 `--seed-root` 与迭代号派生（`env.seeds.round_seeds`，十六位十六进制，每角色等量）；避开 `--exclude-seeds`、`--eval-seeds` 和检查点记下的训练种子（`env.seeds.excluded_seeds`），按原样、按游戏读法（O 作 0、I 作 1）和按 `split_group` 三种写法核对。
 - 检查点目录：`--checkpoints`，默认 `checkpoints/` 加 `--output` 在 `runs/` 下的相对路径（`runs/grpo/train/v1` → `checkpoints/grpo/train/v1`）；输出不在 `runs/` 下时必须给出，也不能放进 `runs/`。`state.json` 记下它（`checkpoints`），续跑给了别的目录就报错；记有更新而检查点目录里没有 `current/` 时报错（否则会从起点检查点载入，丢掉已做的更新）；输出目录里还有旧布局的 `policy/` 时报错并提示搬到哪里。更新记录的 `policy`、`reference` 记检查点的实际路径。
@@ -213,4 +243,4 @@ L = −min(r·A, clip(r, 1 − ε, 1 + ε)·A) + κ·KL
 ## 已知的坑
 
 - 分叉之后一段的全部决策共用一个段回报，共享前缀只覆盖很少的决策；单个决策（例如用一瓶药）分到的信用很小。
-- 全赢或全输的组里，分叉后的优势只剩岭回归项；它的组内 R² 很小，这部分是噪声，但量级也小。`--drop-uniform-groups` 把这类组整组剔掉，代价是它们的决策也不再受 KL 约束。
+- 全赢或全输的组里，分叉后的优势只剩岭回归项；它的组内 R² 很小，这部分是噪声，但量级也小。驱动把这类组整组剔掉，代价是它们的决策也不再受 KL 约束。

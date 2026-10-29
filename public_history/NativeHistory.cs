@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Threading;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Commands;
@@ -84,6 +85,51 @@ public static class NativeHistory
     private static RunHistory Track(RunState run) => Runs.GetValue(run, r => new(r, false));
     private static void FreshRun(RunState state) { lock (Gate) { Runs.Remove(state); Runs.Add(state, new(state, true)); } }
     private static void LoadedRun(RunState state) { lock (Gate) { Runs.Remove(state); Runs.Add(state, new(state, false)); } }
+
+    /// The run's public history as it stands, written beside a save of this moment so
+    /// that the run going on from that save in another process knows what this one
+    /// observed (Restore). Unknowns stay null.
+    public static Dictionary<string, object?> Snapshot(RunState run)
+    {
+        lock (Gate)
+        {
+            var history = Track(run);
+            var odds = history.Odds.Snapshot();
+            return new()
+            {
+                ["version"] = OddsHistory.Version, ["act"] = odds.Act, ["potion"] = odds.Potion,
+                ["rooms"] = odds.Rooms.ToDictionary(p => p.Key, p => (object?)p.Value),
+                ["tutorial_rolls"] = odds.TutorialRolls, ["observed_tutorial_rolls"] = odds.ObservedTutorialRolls,
+                ["previous_point_had_shop"] = history.PreviousPointHadShop,
+            };
+        }
+    }
+
+    /// A run loaded from a save goes on with the public history its own run had
+    /// observed when the save was written (Snapshot), in place of an unknown prefix.
+    /// What it installs was observed, not read from the save's odds.
+    public static void Restore(RunState run, JsonElement snapshot)
+    {
+        if (snapshot.ValueKind != JsonValueKind.Object)
+            throw new InvalidOperationException("A public history snapshot is an object");
+        string? version = snapshot.TryGetProperty("version", out var v) ? v.GetString() : null;
+        if (version != OddsHistory.Version)
+            throw new InvalidOperationException($"Public history snapshot {version}, engine {OddsHistory.Version}");
+        static JsonElement Field(JsonElement o, string name) => o.TryGetProperty(name, out var e) ? e
+            : throw new InvalidOperationException("A public history snapshot lacks " + name);
+        static float? Single(JsonElement e) => e.ValueKind == JsonValueKind.Null ? null : e.GetSingle();
+        static int? Integer(JsonElement e) => e.ValueKind == JsonValueKind.Null ? null : e.GetInt32();
+        var rooms = Field(snapshot, "rooms").EnumerateObject().ToDictionary(p => p.Name, p => Single(p.Value));
+        var odds = new OddsSnapshot(Field(snapshot, "act").GetInt32(), Single(Field(snapshot, "potion")), rooms,
+            Integer(Field(snapshot, "tutorial_rolls")), Field(snapshot, "observed_tutorial_rolls").GetInt32());
+        var shop = Field(snapshot, "previous_point_had_shop");
+        lock (Gate)
+        {
+            var history = Track(run);
+            history.Odds.Restore(odds);
+            history.PreviousPointHadShop = shop.ValueKind == JsonValueKind.Null ? null : shop.GetBoolean();
+        }
+    }
     private static void EnterAct(RunManager __instance, int actIndex)
     { lock (Gate) { if (__instance.DebugOnlyGetState() is RunState run) Track(run).Odds.EnterAct(actIndex); } }
     private static void PointEntered(RunState __instance, RoomType initialRoomType)

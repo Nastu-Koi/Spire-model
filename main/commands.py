@@ -175,20 +175,6 @@ def run_audit(args, runtime):
     emit(audit_files(args.paths, args.accepted, args.quarantine))
 
 
-def run_import_recorder(args, runtime):
-    from main.demos.recorder.journal import import_recordings
-
-    summary = import_recordings(
-        args.paths,
-        args.output,
-        bc_only=args.bc_only,
-        recorder_version=args.recorder_version,
-    )
-    emit(summary)
-    if not summary["accepted_runs"]:
-        return 2
-
-
 def run_import_independent(args, runtime):
     from main.demos.independent import import_samples
 
@@ -362,6 +348,16 @@ def run_compare(args, runtime):
     emit(compare_evaluations(args.directories, head=args.head))
 
 
+def explore_outside(values):
+    """--explore-outside's (or --explore-prior's) values as `Settings.explore_outside`
+    takes them: one rate, or {phase: rate}."""
+    if len(values) == 1 and not isinstance(values[0], tuple):
+        return values[0]
+    if not all(isinstance(value, tuple) for value in values):
+        raise ValueError("--explore-outside and --explore-prior take one rate or PHASE=RATE pairs, not both")
+    return dict(values)
+
+
 def run_iterate(args, runtime):
     from main.iterate import Driver, Settings
 
@@ -369,20 +365,25 @@ def run_iterate(args, runtime):
         checkpoint=args.checkpoint, runs_per_character=args.runs_per_character, seed_root=args.seed_root,
         exclude_seeds=args.exclude_seeds, workers=args.workers, processes=args.processes,
         max_steps=args.max_steps, engine_root=args.engine_root, config=args.config,
-        wave_shares=args.wave_shares, drop_uniform_groups=args.drop_uniform_groups,
-        boundaries=args.boundary_acts, bosses=args.boundary_bosses, group_n=args.group_n, group_m=args.group_m,
-        fork_depth=args.fork_depth, ascensions=args.ascensions, fight_entries=args.fight_entries,
-        min_entropy=args.min_entropy, clip=args.clip, kl=args.kl, reference_every=args.reference_every,
-        learning_rates=args.learning_rates, explore_potions=args.explore_potions,
-        greedy_fights=args.greedy_fights, fight_groups=args.fight_groups, fight_group_size=args.fight_group_size,
-        fight_group_priority=args.fight_group_priority, fight_group_fork_depth=args.fight_group_fork_depth,
-        fight_group_explore_potions=args.fight_group_explore_potions,
-        combat_demos=args.combat_demos, source_shares=dict(args.source_shares) if args.source_shares else None,
+        wave_shares=args.wave_shares, win_hp_bonus=args.win_hp_bonus,
+        boundaries=args.boundary_acts, group_n=args.group_n, group_m=args.group_m, ascensions=args.ascensions,
+        min_entropy=args.min_entropy, clip=args.clip, kl=args.kl, learning_rates=args.learning_rates,
+        fight_kl=args.fight_kl, passes=args.passes, freeze_outside=args.freeze_outside,
+        explore_outside=explore_outside(args.explore_outside),
+        explore_prior=explore_outside(args.explore_prior), prior=args.prior, explored_on_tree=args.explored_on_tree,
+        explored_centered=args.explored_centered,
+        fight_groups=args.fight_groups, fight_group_size=args.fight_group_size,
+        fight_group_priority=args.fight_group_priority, fight_hindsight=args.fight_hindsight,
+        fight_group_shares=dict(args.fight_group_shares) or None,
+        fight_group_kind_size={kind: int(n) for kind, n in args.fight_group_kind_size} or None,
+        fight_pool=list(args.fight_pool), fight_pool_share=args.fight_pool_share,
+        fight_group_natural=args.fight_group_natural,
+        fight_hindsight_shares=dict(args.fight_hindsight_shares) or None,
+        potion_prices=args.potion_prices, growth_bonus=args.growth_bonus,
+        source_shares=dict(args.source_shares) if args.source_shares else None,
         round_demos=args.round_demos, demo_buffer=args.demo_buffer, demo_opening=args.demo_opening,
         demo_workers=args.demo_workers,
-        eval_precision=args.eval_precision, batch=args.batch,
-        updates=args.updates, weight_cap=args.weight_cap, phase_weights=args.phase_weights,
-        window_shards=args.window_shards,
+        eval_precision=args.eval_precision, batch=args.batch, window_shards=args.window_shards,
         evaluate_every=args.evaluate_every,
         eval_seeds=args.eval_seeds, eval_runs_per_character=args.eval_runs_per_character,
         eval_workers=args.eval_workers)
@@ -470,7 +471,7 @@ def run_fight_eval(args, runtime):
     """The policy plays every fight of a fight evaluation set greedily, from its entry
     save to its end, in the engines of sampling processes; each fight's row and the
     report go to the output."""
-    from main.learn.costs import FIXED
+    from main.learn.costs import FIXED, with_growth
     from main.learn.fight_report import priced, report, text
     from main.play.fight_eval import load_set, play_set, solver_rows
 
@@ -498,45 +499,157 @@ def run_fight_eval(args, runtime):
         timing = samplers.timing
     seconds = time.monotonic() - began
     directory.mkdir(parents=True, exist_ok=True)
+    # The fixed prices the rounds compare at, with the growth reward when one is given.
+    prices = with_growth(FIXED, args.growth_bonus)
     with open(directory / "fights.jsonl", "w", encoding="utf-8") as stream:
         for row in rows:
-            stream.write(json.dumps(priced(row, FIXED) if row["status"] == "complete" and row["record"] else row,
+            stream.write(json.dumps(priced(row, prices) if row["status"] == "complete" and row["record"] else row,
                                     ensure_ascii=False, allow_nan=False) + "\n")
     metadata = dict(checkpoint=str(args.checkpoint), policy_version=learner.policy_version,
                     policy_digest=runner.digest, precision=precision, fights=str(args.fights), played=len(rows),
                     workers=args.workers, processes=args.processes, danger_temperature=temperature,
+                    growth_bonus=args.growth_bonus,
                     seconds=round(seconds, 1), collector=timing)
     (directory / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     solver = _fight_solver(args.solver, args.fights)
-    found = dict(report(rows, solver_rows(solver, fights) if solver else None, FIXED),
+    found = dict(report(rows, solver_rows(solver, fights) if solver else None, prices),
                  checkpoint=str(args.checkpoint), precision=precision, seconds=round(seconds, 1),
                  solver_dir=None if solver is None else str(solver))
     (directory / "report.json").write_text(json.dumps(found, ensure_ascii=False, indent=2) + "\n")
     (directory / "report.txt").write_text(text(found), encoding="utf-8")
+    if args.prices:
+        # The same fights at a fit's prices, beside the fixed ones the rounds compare at.
+        again = _priced_report(rows, args.prices, growth=args.growth_bonus)
+        (directory / "report-prices.json").write_text(json.dumps(again, ensure_ascii=False, indent=2) + "\n")
+        (directory / "report-prices.txt").write_text(text(again), encoding="utf-8")
     emit(found)
+
+
+def _priced_report(rows, spec, second=None, growth=0.0):
+    """A fight evaluation's report at the prices `spec` names (`potion_prices.load`), the
+    policy's fights alone: a fitted price needs the state a fight was entered in, which
+    the solver's fights do not record. With `second`, another play of the set beside it;
+    with `growth`, the growth reward (`costs.with_growth`)."""
+    from main.learn import costs, potion_prices
+    from main.learn.fight_report import paired_plays, report
+
+    prices = costs.with_growth(potion_prices.load(spec), growth)
+    found = dict(report(rows, None, prices), prices=spec, prices_digest=potion_prices.digest(prices))
+    if second is not None:
+        found["second"] = report(second, None, prices)["summary"]
+        found["paired"] = paired_plays(rows, second, prices)
+    return found
 
 
 def run_fight_compare(args, runtime):
     """The report of one fight evaluation again, from its rows (at the fixed prices,
     against the solver's fights if there are any); of two, also fight by fight."""
-    from main.learn.costs import FIXED
+    from main.learn.costs import FIXED, with_growth
     from main.learn.fight_report import paired_plays, report, text
     from main.play.fight_eval import load_set, read_rows, solver_rows
 
     if not 1 <= len(args.results) <= 2:
         raise ValueError("Compare one fight evaluation, or two of the same set")
     played = [read_rows(Path(directory) / "fights.jsonl") for directory in args.results]
+    if args.prices:
+        found = _priced_report(played[0], args.prices, played[1] if len(played) == 2 else None,
+                               growth=args.growth_bonus)
+        if args.text:
+            print(text(found), end="")
+        else:
+            emit(found)
+        return
     fights_dir = args.fights or json.loads((Path(args.results[0]) / "metadata.json").read_text())["fights"]
     solver = _fight_solver(args.solver, fights_dir)
-    found = report(played[0], solver_rows(solver, load_set(fights_dir)[0]) if solver else None, FIXED)
+    prices = with_growth(FIXED, args.growth_bonus)
+    found = report(played[0], solver_rows(solver, load_set(fights_dir)[0]) if solver else None, prices)
     found["solver_dir"] = None if solver is None else str(solver)
     if len(played) == 2:
-        found["second"] = report(played[1], None, FIXED)["summary"]
-        found["paired"] = paired_plays(played[0], played[1], FIXED)
+        found["second"] = report(played[1], None, prices)["summary"]
+        found["paired"] = paired_plays(played[0], played[1], prices)
     if args.text:
         print(text(found), end="")
     else:
         emit(found)
+
+
+def _guard_memory(floor_gb):
+    """End this process group when the machine's available memory falls below
+    `floor_gb` (a fit plays as many engines as a round): run it with `setsid`."""
+    import os
+    import signal
+    import threading
+
+    def watch():
+        while True:
+            with open("/proc/meminfo") as stream:
+                info = dict(line.split(":", 1) for line in stream)
+            available = int(info["MemAvailable"].split()[0]) / 2 ** 20
+            if available < floor_gb:
+                print(json.dumps(dict(watchdog="killed", available_gb=round(available, 2))), flush=True)
+                os.killpg(os.getpgrp(), signal.SIGKILL)
+            time.sleep(3)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def run_fit_prices(args, runtime):
+    """Fit the potions' prices (`main/learn/potion_prices.py`) on pairs of continuations
+    of the checkpoint's own runs (`main/play/potion_value.py`): source runs, the points
+    drawn from them, their continuations played, the prices fitted and moved from the
+    previous ones (`Smoothed`). Each step is kept in the output and taken from there
+    when asked again."""
+    from main.env.seeds import excluded_seeds, round_ascensions, round_seeds
+    from main.learn import potion_prices
+    from main.play import potion_value
+
+    if args.workers < 1 or (args.processes is not None and args.processes < 1):
+        raise ValueError("Sampling needs positive numbers of engines and processes")
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    if args.memory_floor:
+        _guard_memory(args.memory_floor)
+    learner, manifest = Learner.load(args.checkpoint, args.device, inference=True)
+    previous = potion_prices.load(args.previous)
+    excluded = excluded_seeds(args.exclude_seeds, manifest["progress"].get("training_seeds", []))
+    seeds = round_seeds(args.seed_root, 0, args.source_runs_per_character, excluded)
+    levels = round_ascensions(args.seed_root, 0, seeds, tuple(args.ascensions))
+    precision = args.precision or learner.config.precision
+    # The policy's own runs: fights greedy as in the rounds, the rest at its temperature.
+    runner = RolloutRunner(learner.model, learner.vocabulary, precision=precision, version=learner.policy_version,
+                           max_steps=args.max_steps, ascension=learner.config.ascension,
+                           temperatures=learner.config.temperatures, greedy_fights=True, iteration=None)
+    started = {(character, str(seed)) for character in seeds for seed in seeds[character]}
+    points_dir = output / potion_value.POINTS
+    began = time.monotonic()
+    with Samplers(lambda: potion_value.PointEngine(CliEngine(root=args.engine_root), points_dir, started),
+                  learner.model, learner.vocabulary, engines=args.workers, processes=args.processes) as samplers:
+        source = potion_value.play_sources(samplers, runner, seeds, levels, output)
+        drawn_path = output / "points.json"
+        if drawn_path.is_file():
+            drawn = json.loads(drawn_path.read_text())
+        else:
+            found = [potion_value.read_point(path) for path in sorted(points_dir.glob("*.json.gz"))]
+            points, strata = potion_value.draw(found, args.pairs // 3)
+            drawn = dict(points=points, strata=strata)
+            drawn_path.write_text(json.dumps(drawn, ensure_ascii=False) + "\n")
+        branches = potion_value.branch_saves(drawn["points"], output / potion_value.BRANCHES)
+        results = potion_value.play_branches(samplers, runner, drawn["points"], branches, output, repeat=args.repeat)
+    played = time.monotonic() - began
+    fitted, report = potion_prices.fit(drawn["points"], results, previous, info=dict(
+        checkpoint=str(args.checkpoint), policy_version=learner.policy_version, seed_root=args.seed_root))
+    prices = potion_prices.Smoothed(previous, fitted)
+    potion_prices.save(fitted, output / "fitted.json")
+    potion_prices.save(prices, output / "prices.json")
+    report = dict(report, checkpoint=str(args.checkpoint), policy_version=learner.policy_version,
+                  previous=args.previous, previous_digest=potion_prices.digest(previous),
+                  prices_digest=potion_prices.digest(prices), source=source, strata=drawn["strata"],
+                  branches=len(results), failed=sum(row["status"] != "complete" for row in results),
+                  determinism=potion_prices.determinism(results), seconds=round(time.monotonic() - began, 1),
+                  playing_seconds=round(played, 1))
+    (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n")
+    emit({key: report[key] for key in ("pairs", "points", "kept", "held_out_error", "base_held_out_error",
+                                       "determinism", "failed", "seconds", "prices_digest")})
 
 
 COMMANDS = {
@@ -545,7 +658,6 @@ COMMANDS = {
     "smoke": run_smoke,
     "init": run_init,
     "audit": run_audit,
-    "import-recorder": run_import_recorder,
     "import-independent": run_import_independent,
     "reindex": run_reindex,
     "inspect": run_inspect,
@@ -558,4 +670,5 @@ COMMANDS = {
     "fight-set": run_fight_set,
     "fight-eval": run_fight_eval,
     "fight-compare": run_fight_compare,
+    "fit-prices": run_fit_prices,
 }

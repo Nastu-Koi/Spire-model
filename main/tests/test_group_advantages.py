@@ -13,7 +13,8 @@ from main.data.shards import RunShards
 from main.env.protocol import CHARACTERS
 from main.learn import advantage, batches
 from main.learn.features import NAMES
-from main.learn.groups import advantages, headers, share, wave_advantages
+from main.learn.groups import advantages, headers, share, wave_advantages, win_bonuses
+from main.learn import segments as segments_module
 from main.learn.segments import Decision, Segment, fit, read_waves, returns, tree
 from main.play import digests
 from main.play.digests import where
@@ -64,6 +65,19 @@ def test_a_segments_return_is_what_the_group_played_from_its_save_came_to():
     assert returns([("act1", first), ("act3", last)]) == {s.run_id: (1.0 if s.outcome == "win" else -1.0) for s in last} | {"f1": -1.0}
 
 
+def test_a_win_adds_its_bonus_to_its_one_and_the_chain_passes_it_back():
+    last = [segment("f0:act3-0", "f0:act3", "win", []), segment("f0:act3-1", "f0:act3", "win", []),
+            segment("f0:act3-2", "f0:act3", "loss", [])]
+    first = [segment("f0", "g", "reached", []), segment("f1", "g", "loss", [])]
+    # A loss takes no bonus even where one is given; a win without one is 1.
+    wins = {"f0:act3-0": 0.08, "f0:act3-2": 0.05, "f1": 0.1}
+    table = returns([("act1", first), ("act3", last)], wins)
+    assert (table["f0:act3-0"], table["f0:act3-1"], table["f0:act3-2"], table["f1"]) == (1.08, 1.0, -1.0, -1.0)
+    assert table["f0"] == pytest.approx((1.08 + 1.0 - 1.0) / 3)
+    # Two wins at other HP are no longer a uniform pair.
+    assert returns([("act3", last[:2])], wins) != returns([("act3", last[:2])])
+
+
 def test_the_tree_compares_actions_at_the_frames_the_segments_share():
     # Four segments share the first frame; two chose a, two chose b. The a pair sees
     # the same second frame and chooses alike; the b pair's second frames differ.
@@ -80,6 +94,29 @@ def test_the_tree_compares_actions_at_the_frames_the_segments_share():
     assert found[("s0", 1)] == (0.0, 0.0) and found[("s1", 1)] == (0.0, 0.0)  # one action: nothing to compare
     assert ("s2", 1) not in found and ("s3", 1) not in found
     assert counts == {"nodes": 2, "decisions": 6, "branching_nodes": 1, "branching_decisions": 4}
+
+
+def test_a_node_is_valued_by_the_segments_that_did_not_explore_there():
+    # Three segments follow the policy at the shared frame, one explores and loses: the
+    # policy's actions are measured against their own mean, the explored one against it too.
+    members = [
+        segment("s0", "g", "win", [decision(0, "f0", "a")]),
+        segment("s1", "g", "loss", [decision(0, "f0", "a")]),
+        segment("s2", "g", "win", [decision(0, "f0", "b")]),
+        segment("s3", "g", "loss", [decision(0, "f0", "x")]),
+    ]
+    members[3].decisions[0].explored = "prior"
+    table = {"s0": 1.0, "s1": -1.0, "s2": 1.0, "s3": -1.0}
+    found, _ = tree(members, table)
+    third = pytest.approx(1 / 3)
+    assert found[("s0", 0)] == (third, pytest.approx(-1 / 3)) and found[("s1", 0)] == found[("s0", 0)]
+    assert found[("s2", 0)] == (third, pytest.approx(2 / 3))
+    assert found[("s3", 0)] == (third, pytest.approx(-4 / 3))
+    # Where every segment explored, the node takes the mean of all.
+    for member in members:
+        member.decisions[0].explored = True
+    found, _ = tree(members, table)
+    assert found[("s2", 0)] == (0.0, 1.0) and found[("s3", 0)] == (0.0, -1.0)
 
 
 def test_the_baseline_is_fitted_within_groups_and_its_corrections_sum_to_zero():
@@ -231,7 +268,7 @@ def test_a_round_keeps_a_digest_of_its_decisions_and_the_advantages_need_nothing
     seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
     with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
         sample_groups(pool, runner(policy), seeds, tmp_path / "groups", n=2, m=2, boundaries=BOUNDARIES,
-                      shard_samples=20, fork_depth=1)
+                      shard_samples=20)
     waves = ["act1", "act2", "act3"]
     # Every segment a wave wrote has its line in the wave's digest.
     for wave in waves:
@@ -251,7 +288,11 @@ def test_a_round_keeps_a_digest_of_its_decisions_and_the_advantages_need_nothing
         patched.setattr(RunShards, "runs", unread)
         assert read_waves(tmp_path / "groups", waves, processes=1) == from_shards
         written = advantages(tmp_path / "groups", processes=2)
-    assert all(written[wave]["stats"]["forked"]["decisions"] > 0 for wave in waves)
+    # Each decision keeps its frame's phase; a digest written before it was kept reads as of none.
+    assert all(d.phase for wave in waves for s in from_shards[wave] for d in s.decisions)
+    line = json.loads(gzip.open(tmp_path / "groups" / "act1" / digests.FILE, "rt").readline())
+    line["decisions"] = [entry[:-1] for entry in line["decisions"]]
+    assert all(d.phase is None for d in segments_module._digested(line).decisions)
     kept = {wave: unzipped(tmp_path / "groups" / wave / advantage.FILE) for wave in waves}
     # The same advantage files, to the byte, as from the shards.
     for wave in waves:
@@ -274,26 +315,6 @@ def test_a_wave_whose_digest_misses_a_segment_is_read_from_its_shards(tmp_path):
     with gzip.open(path, "wt") as stream:
         stream.writelines(lines[:-1])
     assert read_waves(tmp_path / "groups", waves, processes=1) == complete
-
-
-def test_a_forked_round_compares_the_two_halves_of_every_group_at_its_first_choice(tmp_path):
-    policy = learner()
-    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
-    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
-        summary = sample_groups(pool, runner(policy), seeds, tmp_path / "groups", n=2, m=2, boundaries=BOUNDARIES,
-                                fork_depth=1)
-    assert summary["fork_depth"] == 1
-    # Every segment forked once: at its first decision with a choice.
-    assert all(summary[wave]["forked"] == summary[wave]["written"] for wave in summary["waves"])
-    written = advantages(tmp_path / "groups", processes=2)
-    for wave in written:
-        stats = written[wave]["stats"]
-        assert stats["forked"]["decisions"] == stats["segments"]
-        # The two segments of every group share their first frame and part there, one
-        # each way: the tree has a node with two actions in every group.
-        assert stats["tree"]["branching_nodes"] >= stats["groups"]
-        # Each half is measured against the other: their advantages are opposite.
-        assert stats["forked"]["positive"] == stats["forked"]["negative"]
 
 
 def test_a_round_with_greedy_fights_prices_and_trains_the_decisions_outside_them_alone(tmp_path):
@@ -343,3 +364,112 @@ def test_a_round_with_greedy_fights_prices_and_trains_the_decisions_outside_them
     plain = advantages(tmp_path / "plain", processes=2)
     assert all(plain[wave]["stats"]["fights"]["decisions"] > 0 and plain[wave]["stats"]["fights"]["excluded"] == 0
                for wave in waves)
+
+
+def test_a_win_is_raised_by_the_share_of_its_maximum_hp_its_last_fight_left(tmp_path):
+    from main.play.fights import fight_rows
+    from main.tests.test_groups import greedy
+
+    policy = learner()
+    seeds = {character: [f"{character}-seed", f"{character}-other"] for character in CHARACTERS}
+    directory = tmp_path / "groups"
+    with Samplers(engine, policy.model, policy.vocabulary, engines=4, processes=2) as pool:
+        sample_groups(pool, greedy(policy), seeds, directory, n=2, m=2, boundaries=BOUNDARIES, fight_entries=True)
+    waves = ["act1", "act2", "act3"]
+    segments = read_waves(directory, waves, processes=1)
+    won = [s.run_id for s in segments["act3"] if s.outcome == "win"]
+    assert won, "the round needs a win"
+    bonuses = win_bonuses(directory, waves, 0.1)
+    rows = [row for wave in waves for row in fight_rows(directory, wave)]
+    for run_id in won:
+        row = max((row for row in rows if row["run_id"] == run_id), key=lambda row: row["fight"])
+        hp = row["exit_hp"] if row["exit_hp"] is not None else row["last_hp"]
+        top = row["exit_max_hp"] if row["exit_max_hp"] is not None else row["last_max_hp"]
+        assert bonuses[run_id] == pytest.approx(0.1 * hp / top) and 0 < bonuses[run_id] <= 0.1
+    written = advantages(directory, processes=1, win_hp_bonus=0.1)
+    head = written["act3"]
+    assert head["win_hp_bonus"] == 0.1 and head["stats"]["win_bonus"]["wins"] == len(won)
+    assert head["stats"]["win_bonus"]["missing"] == 0
+    assert head["stats"]["win_bonus"]["mean"] == pytest.approx(sum(bonuses[r] for r in won) / len(won), abs=1e-5)
+    # Asked again without the bonus, the round is priced anew, a win back at 1.
+    plain = advantages(directory, processes=1)
+    assert "win_hp_bonus" not in plain["act3"] and "win_bonus" not in plain["act3"]["stats"]
+    assert advantages(directory, processes=1) == plain
+
+
+def test_a_win_bonus_needs_the_fights_records(tmp_path):
+    from main.tests.test_groups import greedy
+
+    policy = learner()
+    seeds = {character: [f"{character}-seed"] for character in CHARACTERS}
+    directory = tmp_path / "groups"
+    with Samplers(engine, policy.model, policy.vocabulary, engines=2) as pool:
+        sample_groups(pool, greedy(policy), seeds, directory, n=1, m=1, boundaries=BOUNDARIES)
+    with pytest.raises(ValueError, match="fight entries"):
+        advantages(directory, processes=1, win_hp_bonus=0.1)
+
+
+def test_the_explored_decisions_outside_fights_are_counted_apart_with_those_the_tree_prices():
+    # One group of two segments: at their shared first frame one explored the other
+    # action outside fights (the tree prices it); the second segment explored once more
+    # past the fork, and once inside a fight, which is not counted outside.
+    first = segment("s0", "g", "win", [decision(0, "k0", "a"), decision(1, "k1", "b")])
+    second = segment("s1", "g", "loss", [decision(0, "k0", "x"), decision(1, "k2", "y"), decision(2, "k3", "z")])
+    second.decisions[0].explored = second.decisions[1].explored = True
+    second.decisions[2].explored, second.decisions[2].fight = True, True
+    table = {"s0": 1.0, "s1": -1.0}
+    _, stats = wave_advantages([first, second], table, ridge=0.01)
+    assert stats["explored"]["decisions"] == 3
+    outside = stats["explored_outside"]
+    assert outside["decisions"] == 2 and outside["on_tree"] == 1 and outside["negative"] == 2
+
+
+def test_the_explored_decisions_that_learn_can_be_centered_by_phase():
+    # Two groups whose segments explored at their shared first frame (on the tree) and
+    # once past it (off it, so not learning with `explored_on_tree`); the first frames
+    # are of two phases.
+    def group(name, phase, outcomes):
+        members = []
+        for number, (outcome, action) in enumerate(outcomes):
+            first = Decision(0, f"{name}0", (action,), [0.0] * len(NAMES), phase=phase)
+            later = Decision(1, f"{name}1-{number}", ("y",), [0.0] * len(NAMES), explored=True, phase="map")
+            first.explored = action != "a"
+            members.append(segment(f"{name}{number}", name, outcome, [first, later]))
+        return members
+
+    members = group("g", "event", [("win", "a"), ("loss", "a"), ("win", "x"), ("loss", "z")]) + \
+        group("h", "shop", [("win", "a"), ("loss", "z")])
+    table = {s.run_id: 1.0 if s.outcome == "win" else -1.0 for s in members}
+    plain, _ = wave_advantages(members, table, ridge=0.01, explored_on_tree=True)
+    runs, stats = wave_advantages(members, table, ridge=0.01, explored_on_tree=True, explored_centered=True)
+    # The event's explored decisions on the tree come to +1 and −1 against the node's 0:
+    # their mean is 0 already; the shop's one is −2 against the one that followed the policy, alone in its phase.
+    assert [plain[r][0][2] for r in ("g2", "g3", "h1")] == [pytest.approx(1.0), pytest.approx(-1.0), pytest.approx(-2.0)]
+    assert [runs[r][0][2] for r in ("g2", "g3", "h1")] == [pytest.approx(1.0), pytest.approx(-1.0), pytest.approx(0.0)]
+    assert stats["explored_outside"]["centered"] == {"event": dict(decisions=2, mean=0.0),
+                                                     "shop": dict(decisions=1, mean=-2.0)}
+    # What does not learn, and what is not explored, keeps its own.
+    assert all(runs[r][1][2] == 0.0 for r in runs)
+    assert [runs[r][0] for r in ("g0", "g1", "h0")] == [plain[r][0] for r in ("g0", "g1", "h0")]
+    assert "centered" not in wave_advantages(members, table, ridge=0.01, explored_on_tree=True)[1]["explored_outside"]
+
+
+def test_only_the_trees_explored_decisions_outside_fights_learn_when_asked_and_are_told_apart_by_proposer():
+    # As above; the explored decision on the tree was the prior's proposal, the one past
+    # the fork the policy's own rule.
+    first = segment("s0", "g", "win", [decision(0, "k0", "a"), decision(1, "k1", "b")])
+    second = segment("s1", "g", "loss", [decision(0, "k0", "x"), decision(1, "k2", "y"), decision(2, "k3", "z")])
+    second.decisions[0].explored, second.decisions[1].explored = "prior", True
+    second.decisions[2].explored, second.decisions[2].fight = True, True
+    table = {"s0": 1.0, "s1": -1.0}
+    every, stats = wave_advantages([first, second], table, ridge=0.01)
+    priced, kept = wave_advantages([first, second], table, ridge=0.01, explored_on_tree=True)
+    by = stats["explored_outside"]["by_source"]
+    assert by["prior"]["decisions"] == 1 and by["prior"]["on_tree"]["decisions"] == 1
+    assert by["rule"]["decisions"] == 1 and by["rule"]["on_tree"]["decisions"] == 0
+    assert stats["explored_outside"]["learned"] == "all" and kept["explored_outside"]["learned"] == "on_tree"
+    # The statistics are the same either way; the explored decision off the tree alone
+    # has no advantage, the one inside a fight keeps its own, and so does every other.
+    assert kept["explored_outside"]["by_source"] == by
+    assert every["s1"][1][2] != 0 and priced["s1"][1][2] == 0
+    assert priced["s1"][0] == every["s1"][0] and priced["s1"][2] == every["s1"][2] and priced["s0"] == every["s0"]

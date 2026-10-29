@@ -44,7 +44,7 @@ A10_SECOND_BOSS = dict(kind="boss", act=3, ascension=10, second_boss=True)
 def test_the_hp_weight_and_the_price_of_each_tier_by_kind_of_fight(where, relieved, weight, prices):
     assert relief(fight(**where)) == relieved
     lost = fight(**where, exit_hp=40)
-    assert cost(lost, FIXED) == (pytest.approx(20 * weight), 0.0, 0.0, 0.0)
+    assert cost(lost, FIXED) == (pytest.approx(20 * weight), 0.0, 0.0, 0.0, 0.0)
     for potion, price in zip((BASE, ELEVATED, HIGH), prices):
         assert cost(fight(**where, potions_used=[potion]), FIXED).potions == price
     both = fight(**where, exit_hp=40, potions_used=[BASE, HIGH, BASE])
@@ -74,9 +74,9 @@ def test_the_potion_shaped_rock_is_free(where):
 
 
 def test_maximum_hp_counts_whole_and_a_gain_lowers_the_cost():
-    assert cost(fight(exit_max_hp=74, exit_hp=54), FIXED) == (6.0, 6.0, 0.0, 0.0)
+    assert cost(fight(exit_max_hp=74, exit_hp=54), FIXED) == (6.0, 6.0, 0.0, 0.0, 0.0)
     # Not discounted at an act boss, where the HP counts a fifth.
-    assert cost(fight(**ACT2_BOSS, exit_max_hp=75, exit_hp=50), FIXED) == (pytest.approx(2.0), 5.0, 0.0, 0.0)
+    assert cost(fight(**ACT2_BOSS, exit_max_hp=75, exit_hp=50), FIXED) == (pytest.approx(2.0), 5.0, 0.0, 0.0, 0.0)
     gained = cost(fight(exit_max_hp=87, exit_hp=67), FIXED)
     assert gained.max_hp == -7.0 and gained.hp == -7.0 and gained.total == -14.0
     assert fight_return(fight(exit_max_hp=87, exit_hp=67), FIXED) == pytest.approx(0.14)
@@ -85,27 +85,39 @@ def test_maximum_hp_counts_whole_and_a_gain_lowers_the_cost():
 @pytest.mark.parametrize("where, weight", [(NORMAL, 1.0), (ACT1_BOSS, 0.2), (FINAL_BOSS, 1.0)])
 def test_a_death_counts_the_hp_down_to_zero_and_a_hundred_on_top(where, weight):
     died = fight(**where, exit_hp=0, exit_max_hp=80, died=True, potions_used=[BASE])
-    price = FIXED.price(BASE, died)
-    assert cost(died, FIXED) == (pytest.approx(60 * weight), 0.0, price, 100.0)
-    assert fight_return(died, FIXED) == pytest.approx(-(60 * weight + price + 100) / 100)
+    assert cost(died, FIXED) == (pytest.approx(60 * weight), 0.0, 0.0, 100.0, 0.0)
+    assert fight_return(died, FIXED) == pytest.approx(-(60 * weight + 100) / 100)
     # Whatever HP the record has at the death, and without it.
     assert cost(fight(**where, exit_hp=None, exit_max_hp=None, died=True), FIXED) == (
-        pytest.approx(60 * weight), 0.0, 0.0, 100.0)
+        pytest.approx(60 * weight), 0.0, 0.0, 100.0, 0.0)
     assert cost(fight(**where, exit_hp=12, died=True), FIXED).hp == pytest.approx(60 * weight)
+
+
+@pytest.mark.parametrize("where", [NORMAL, ELITE, ACT1_BOSS, FINAL_BOSS])
+def test_a_death_prices_no_potion_so_drinking_before_it_costs_nothing(where):
+    """The run ends with the death and the belt with it: dying with the potions drunk
+    comes to the same return as dying with them kept, so that a group whose segments
+    all died is uniform rather than teaching to keep them."""
+    kept = fight(**where, died=True)
+    drunk = fight(**where, died=True, potions_used=[BASE, HIGH, ELEVATED])
+    assert cost(drunk, FIXED).potions == 0.0
+    assert fight_return(drunk, FIXED) == fight_return(kept, FIXED)
+    # Survived, the same potions are priced.
+    assert cost(fight(**where, exit_hp=30, potions_used=[BASE]), FIXED).potions == FIXED.price(BASE, kept)
 
 
 def test_a_revival_is_not_priced():
     """The solver's premium of 9 per HP a revival restored is left out: at about 24 HP
     it would cost more than dying. A fairy in a bottle brings the player back at 24 HP:
     the fight counts the HP lost down to 24 and nothing for the revival."""
-    assert costs.Cost._fields == ("hp", "max_hp", "potions", "death")
+    assert costs.Cost._fields == ("hp", "max_hp", "potions", "death", "growth")
     revived = fight(kind="elite", exit_hp=24, revived_hp=24)
-    assert cost(revived, FIXED) == (36.0, 0.0, 0.0, 0.0)
+    assert cost(revived, FIXED) == (36.0, 0.0, 0.0, 0.0, 0.0)
 
 
 def test_the_final_boss_won_counts_no_hp_when_no_decision_follows():
     won = fight(**FINAL_BOSS, exit_hp=None, exit_max_hp=None, potions_used=[HIGH, ELEVATED])
-    assert cost(won, FIXED) == (0.0, 0.0, 2.0, 0.0)
+    assert cost(won, FIXED) == (0.0, 0.0, 2.0, 0.0, 0.0)
     assert fight_return(won, FIXED) == pytest.approx(-0.02)
     # With the exit HP recorded it counts whole, as the solver compares the final boss.
     assert cost(fight(**FINAL_BOSS, exit_hp=25), FIXED).hp == 35.0
@@ -119,7 +131,7 @@ def test_the_final_boss_won_counts_the_hp_of_its_last_decision():
     """The fight segments record the HP at a fight's last decision: where the run ends
     with the fight won, it stands for the exit HP the end frame cannot give."""
     won = fight(**FINAL_BOSS, exit_hp=None, exit_max_hp=None, last_hp=41, last_max_hp=78, potions_used=[HIGH])
-    assert cost(won, FIXED) == (19.0, 2.0, 1.0, 0.0)
+    assert cost(won, FIXED) == (19.0, 2.0, 1.0, 0.0, 0.0)
     # Only there: a death counts down to 0, and a fight the run goes on from needs its exit.
     assert cost(fight(**FINAL_BOSS, exit_hp=None, last_hp=41, died=True), FIXED).hp == 60.0
     with pytest.raises(ValueError, match="no exit"):
@@ -163,6 +175,7 @@ def test_other_prices_price_the_same_records_again():
     solver = Prices(tiers=(9, 14, 18))
     assert [fight_return(r, solver) for r in records] == pytest.approx([-0.19, -0.62, -0.24, -0.02, -1.6])
     cheaper = Prices(tiers=(1, 2, 3), final=(0, 0, 0), free=frozenset())
-    assert [fight_return(r, cheaper) for r in records] == pytest.approx([-0.11, -0.35, -0.12, 0.0, -1.61])
-    assert [fight_return(r, Flat()) for r in records] == pytest.approx([-0.12, -0.38, -0.12, -0.04, -1.64])
+    # The death prices no potion at any prices, the rock no longer free among them.
+    assert [fight_return(r, cheaper) for r in records] == pytest.approx([-0.11, -0.35, -0.12, 0.0, -1.6])
+    assert [fight_return(r, Flat()) for r in records] == pytest.approx([-0.12, -0.38, -0.12, -0.04, -1.6])
     assert records == kept

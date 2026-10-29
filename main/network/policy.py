@@ -24,6 +24,7 @@ class Choice:
     ranking: list[dict] | None = None
     base_log_prob: torch.Tensor | float | None = None  # at temperature 1
     explored: bool = False  # drawn among the candidates the caller restricted it to, not from the policy
+    explored_by: str | None = None  # who proposed an explored candidate: "prior", or None for the policy's own rule
     forked: bool = False  # the candidate of the rank the caller named, not a draw from the policy
     # Every legal candidate's log-probability at the temperature it was drawn at, in the
     # frame's order: the distribution it was drawn from (or would have been, explored or forked).
@@ -187,6 +188,12 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
                 for i in indices.tolist()
             ]
         index_tensor = torch.tensor(index, device=model.device)
+        drawn = None
+        if sample:
+            # Each candidate's log-probability at the temperature, in the frame's order,
+            # as a sampling process's choice carries it (`main/play/sampling.py`).
+            logs = distribution.logits.detach().log_softmax(-1)
+            drawn = [float(logs[slots.index(candidate["decoder_slot_ref"])]) for candidate in candidates]
         results[batch_index] = Choice(
             legal[slots[index]]["candidate_ref"],
             distribution.log_prob(index_tensor),
@@ -195,6 +202,7 @@ def choose_batch(policies, frames, *, teachers=None, sample=True, top_k=0, pad_t
             output.distribution(1.0).log_prob(index_tensor),
             explored=sample and allowed is not None,
             forked=sample and place is not None and teacher is None,
+            log_probs=drawn,
         )
     return results
 

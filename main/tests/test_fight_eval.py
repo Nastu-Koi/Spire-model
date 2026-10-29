@@ -302,7 +302,7 @@ def test_the_summary_prices_each_fight_and_counts_deaths_potions_and_danger():
     found = summary(rows)
     assert found["normal"]["cost"] == pytest.approx(7.0) and found["normal"]["deaths"] == 0
     assert found["normal"]["cost_error"] == pytest.approx(math.sqrt(200) / math.sqrt(2))
-    assert found["normal"]["items"] == dict(hp=5.0, max_hp=-1.5, potions=3.5, death=0.0)
+    assert found["normal"]["items"] == dict(hp=5.0, max_hp=-1.5, potions=3.5, death=0.0, growth=0.0)
     assert found["normal"]["potions_per_fight"] == 0.5 and found["normal"]["fights_with_potion"] == 1
     assert found["elite"]["cost"] == 160.0 and found["elite"]["death_rate"] == 1.0
     assert found["elite"]["danger"] == dict(decisions=2, fights=1, used=1, use_rate=0.5, probability=0.3,
@@ -513,10 +513,18 @@ def test_the_commands_draw_a_set_play_it_and_report_it_again(tmp_path, monkeypat
         commands.COMMANDS["fight-eval"](parser().parse_args(
             ["fight-eval", "--checkpoint", str(path), "--fights", str(tmp_path / "set"), "--output", str(first)]), {})
     # A trial on the first fight of each kind.
+    from main.learn import costs, potion_prices
+
+    cheap = tmp_path / "cheap.json"
+    potion_prices.save(costs.Prices(tiers=(1.0, 1.0, 1.0)), cheap)
     trial = parser().parse_args(["fight-eval", "--checkpoint", str(path), "--fights", str(tmp_path / "set"),
-                                 "--output", str(tmp_path / "trial"), "--workers", "1", "--per-kind", "2"])
+                                 "--output", str(tmp_path / "trial"), "--workers", "1", "--per-kind", "2",
+                                 "--prices", str(cheap)])
     commands.COMMANDS["fight-eval"](trial, {})
     assert len(read_rows(tmp_path / "trial" / "fights.jsonl")) == 2
+    # Beside the report at the fixed prices, one at the prices asked for.
+    again = json.loads((tmp_path / "trial" / "report-prices.json").read_text())
+    assert again["prices"] == str(cheap) and again["summary"]["all"]["finished"] == 2 and "gap" not in again
     # Reported again: against the solver's fights of the set, found in the set, and
     # the two plays fight by fight.
     solver_output(tmp_path / "set" / "solver", load_set(tmp_path / "set")[0])
@@ -529,3 +537,9 @@ def test_the_commands_draw_a_set_play_it_and_report_it_again(tmp_path, monkeypat
     assert compared["paired"]["all"] == dict(fights=15, other_actions=0, other_records=0, other_deaths=0,
                                              difference=0.0, difference_error=0.0)
     assert compared["second"]["all"]["finished"] == 15
+    # At other prices, the policy's fights alone: no potion was used, so they cost the same.
+    commands.COMMANDS["fight-compare"](parser().parse_args(["fight-compare", str(first), str(second),
+                                                            "--prices", str(cheap)]), {})
+    priced_again = shown[-1]
+    assert "gap" not in priced_again and priced_again["paired"]["all"]["difference"] == 0.0
+    assert priced_again["summary"]["all"]["cost"] == compared["summary"]["all"]["cost"]

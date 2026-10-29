@@ -41,7 +41,8 @@ def record(row):
     """A row's fight record as `costs.cost` reads it. A fight won that ended the run
     takes the HP at its last decision for the HP after it, whatever else was told."""
     found = dict(row["record"], kind=row["kind"], act=row["act"], floor=row["floor"],
-                 second_boss=row["second_boss"], ascension=row["ascension"], run_id=row["id"])
+                 second_boss=row["second_boss"], ascension=row["ascension"], character=row.get("character"),
+                 run_id=row["id"])
     if not found["died"] and relief(found) == RUN_ENDING:
         found.update(exit_hp=None, exit_max_hp=None)
     return found
@@ -102,6 +103,8 @@ def tally(rows, prices=FIXED):
     done = finished(rows)
     costs = [priced(row, prices)["cost"] for row in done]
     center, error = mean_error(cost["total"] for cost in costs)
+    # Without the growth reward (`costs.Growing`), as the rounds before it were priced.
+    plain = mean(cost["total"] - cost["growth"] for cost in costs)
     deaths = sum(bool(row["record"]["died"]) for row in done)
     used = [len(row["record"]["potions_used"] or ()) for row in done]
     with_potion = sum(count > 0 for count in used)
@@ -110,8 +113,9 @@ def tally(rows, prices=FIXED):
     return dict(
         fights=len(rows), finished=len(done), unfinished=len(rows) - len(done), deaths=deaths,
         death_rate=_round(deaths / len(done) if done else None, 4),
-        cost=_round(center), cost_error=_round(error),
-        items={item: _round(mean(cost[item] for cost in costs)) for item in ("hp", "max_hp", "potions", "death")},
+        cost=_round(center), cost_error=_round(error), cost_without_growth=_round(plain),
+        items={item: _round(mean(cost[item] for cost in costs))
+               for item in ("hp", "max_hp", "potions", "death", "growth")},
         potions_per_fight=_round(mean(used)), fights_with_potion=with_potion,
         fights_with_potion_share=_round(with_potion / len(done) if done else None),
         held_at_death=held_at_death(done),
@@ -261,9 +265,9 @@ def text(found):
     """The tables of a report (`report`, with `paired` if there is one) as text."""
     lines = ["## policy", "",
              _cells(("kind", "fights", "deaths", "death rate", "cost", "±", "hp", "max hp", "potions", "death",
-                     "potions/fight", "with potion", "died holding", "danger", "danger used", "P(use) T=1",
+                     "growth", "potions/fight", "with potion", "died holding", "danger", "danger used", "P(use) T=1",
                      "P(use) T")),
-             _cells(("---",) * 17)]
+             _cells(("---",) * 18)]
     for kind, entry in found["summary"].items():
         danger, held = entry["danger"], entry["held_at_death"]
         lines.append(_cells((kind, entry["finished"], entry["deaths"], entry["death_rate"], entry["cost"],

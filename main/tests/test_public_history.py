@@ -9,7 +9,7 @@ from main.network.checkpoint import save_checkpoint, load_model
 from main.network.model import PolicyNetwork
 from main.env.protocol import ProtocolError
 from main.env.public_history import HISTORY_VERSION, recorded_memory, draw_relations, unknown_memory
-from main.demos.recorder.snapshot import PublicSnapshot
+from main.steam.snapshot import PublicSnapshot
 from main.encoding.fields import fields_of
 from main.encoding.frames import clean_public
 from main.encoding.representation import observation

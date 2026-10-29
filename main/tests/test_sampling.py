@@ -715,42 +715,6 @@ def test_a_decision_marked_with_a_rank_takes_the_slot_of_that_rank_with_the_poli
         prepare_decisions(vocabulary, frames, rank=[1, None, 0], restrict=[["move:map:0:1"], None, None])
 
 
-def test_a_run_explores_potion_use_at_the_rate_asked_and_records_the_policys_log_probability():
-    learner, _, _ = setup_round({"combat": 0.5, "other": 0.8})
-    exploring = RolloutRunner(learner.model, learner.vocabulary, precision="no", ascension=0,
-                              temperatures={"combat": 0.5, "other": 0.8}, explore_potions=1.0)
-    run = exploring.run(drinking(), "Ironclad", "drink")
-    assert run["status"] == "complete" and run["explore_potions"] == {"normal": 1.0, "elite": 1.0, "boss": 1.0}
-    # The fight's first decision could use the potion; exploring at rate 1 it does, once,
-    # and the step says so. The decision is still the policy's as the record has it: its
-    # log-probability is what the tempered policy gives the action, so the trainer's
-    # replay matches it like any other.
-    explored = explored_steps(run)
-    assert len(explored) == 1 and verb_of(explored[0]) == "USE_POTION"
-    assert explored[0] is run["macros"][0]["steps"][0]
-    assert all(verb_of(step) != "USE_POTION" for macro in run["macros"] for step in macro["steps"] if not step.get("explored"))
-    assert replayed_gap(learner.model, learner.vocabulary, [run]) < 1e-4
-    assert _without_frames(run)["explored"] == 1
-    validate_run(run, on_policy=True)
-    # The training sample of the macro-action says it was explored.
-    from main.data.shards import samples as training_samples
-    flagged = [item.explored for item in training_samples([run])]
-    assert flagged[0] and not any(flagged[1:])
-    assert not any(item.forked for item in training_samples([run]))
-    # Outside sampling, or at rate 0, nothing is explored and nothing is marked.
-    greedy = exploring.run(drinking(), "Ironclad", "greedy", sample=False)
-    assert greedy["explore_potions"] is None and not explored_steps(greedy)
-    plain = RolloutRunner(learner.model, learner.vocabulary, precision="no", ascension=0,
-                          temperatures={"combat": 0.5, "other": 0.8})
-    run = plain.run(drinking(), "Ironclad", "plain")
-    assert run["explore_potions"] == {"normal": 0.0, "elite": 0.0, "boss": 0.0}
-    assert not explored_steps(run) and _without_frames(run)["explored"] == 0
-    assert all("explored" not in step for macro in run["macros"] for step in macro["steps"])
-    for wrong in (-0.1, 1.5, [0.1, 0.2, 0.3, 0.4], {"event": 0.1}):
-        with pytest.raises(ValueError, match="exploration"):
-            RolloutRunner(learner.model, learner.vocabulary, explore_potions=wrong)
-
-
 def branching_steps(run):
     return [step for macro in run["macros"] for step in macro["steps"] if not step["forced"]]
 
@@ -767,83 +731,11 @@ def rank_of(model, vocabulary, step):
     return order.index(obs.slot_refs.index(slots[step["candidate_ref"]]))
 
 
-def test_a_segment_forks_its_first_decisions_by_its_place_in_the_group(tmp_path):
-    learner, runner, _ = setup_round({"combat": 0.5, "other": 0.8})
-    model, vocabulary = learner.model, learner.vocabulary
-    runs = [runner.run(engine(), "Ironclad", "fork", fork=dict(index=j, size=4, depth=1)) for j in range(4)]
-    for j, run in enumerate(runs):
-        assert run["status"] == "complete" and run["fork"] == dict(index=j, size=4, depth=1)
-        first, *rest = branching_steps(run)
-        # The first half of the group takes the policy's most likely candidate, the
-        # other half its second; the step says it was forked, the rest are drawn.
-        assert first["forked"] and rank_of(model, vocabulary, first) == (0 if j < 2 else 1)
-        assert not any(step.get("forked") for step in rest) and not first.get("explored")
-        assert _without_frames(run)["forked"] == 1
-        validate_run(run, on_policy=True)
-    # Recorded with the policy's own log-probability, as a draw would be.
-    assert replayed_gap(model, vocabulary, runs) < 1e-4
-    from main.data.shards import samples as training_samples
-    forked_sample = training_samples([runs[2]])[0]
-    assert forked_sample.forked and not forked_sample.explored
-    # A depth of two parts each half again; greedy runs and runs without a fork never fork.
-    deeper = [runner.run(engine(), "Ironclad", "fork", fork=dict(index=j, size=4, depth=2)) for j in range(4)]
-    assert [[rank_of(model, vocabulary, step) for step in branching_steps(run)[:2]] for run in deeper] == [
-        [0, 0], [0, 1], [1, 0], [1, 1]]
-    greedy = runner.run(engine(), "Ironclad", "fork", sample=False, fork=dict(index=3, size=4, depth=1))
-    assert greedy["fork"] is None and not any(step.get("forked") for step in branching_steps(greedy))
-    plain = runner.run(engine(), "Ironclad", "fork")
-    assert plain["fork"] is None and not any(step.get("forked") for step in branching_steps(plain))
-    for wrong in (dict(index=4, size=4, depth=1), dict(index=0, size=4, depth=-1), dict(index=0, size=4)):
-        with pytest.raises(ValueError, match="fork"):
-            runner.run(engine(), "Ironclad", "fork", fork=wrong)
-    # The sampling processes fork as the runner alone does.
-    from main.play.rollout import SEGMENTS
-    jobs = [("Ironclad", dict(seed="fork", run_id=f"g-{j}", group="g", fork=dict(index=j, size=4, depth=1)), None)
-            for j in range(4)]
-    with samplers(runner, engine, engines=4, processes=2) as pool:
-        played = []
-        pool.collect(runner, jobs, on_run=lambda index, run: played.append((index, run)), layout=SEGMENTS)
-    assert sorted(run["forked"] for _, run in played) == [1, 1, 1, 1]
-
-
 class EliteDrinking(Drinking):
     """The same fight, an elite's."""
 
     def enter(self, encounter, act=1, kind="normal"):
         super().enter(encounter, act, "elite")
-
-
-def test_the_exploration_rate_is_the_fights_kinds(tmp_path):
-    learner, _, seeds = setup_round({"combat": 0.5, "other": 0.8})
-    # Two rates: normal fights, then elite and boss fights.
-    runner = RolloutRunner(learner.model, learner.vocabulary, version=learner.policy_version, precision="no",
-                           ascension=0, temperatures={"combat": 0.5, "other": 0.8}, explore_potions=[0.0, 1.0])
-    assert runner.explore_potions == {"normal": 0.0, "elite": 1.0, "boss": 1.0}
-    assert not explored_steps(runner.run(drinking(), "Ironclad", "normal-fight"))
-    elite = runner.run(EliteDrinking(4, 2), "Ironclad", "elite-fight")
-    assert len(explored_steps(elite)) == 1 and verb_of(explored_steps(elite)[0]) == "USE_POTION"
-    assert elite["explore_potions"] == {"normal": 0.0, "elite": 1.0, "boss": 1.0}
-    # By kind, with a kind left out exploring nothing; and in the sampling processes alike.
-    by_kind = RolloutRunner(learner.model, learner.vocabulary, version=learner.policy_version, precision="no",
-                            ascension=0, temperatures={"combat": 0.5, "other": 0.8}, explore_potions={"elite": 1.0})
-    assert by_kind.explore_potions == {"normal": 0.0, "elite": 1.0, "boss": 0.0}
-    with samplers(by_kind, lambda: EliteDrinking(4, 2), engines=5, processes=3) as pool:
-        runs = read(collect_round(pool, by_kind, seeds, tmp_path / "round"))
-    assert all(len(explored_steps(run)) == 1 for run in runs)
-    with samplers(by_kind, drinking, engines=5, processes=3) as pool:
-        runs = read(collect_round(pool, by_kind, seeds, tmp_path / "normal"))
-    assert not any(explored_steps(run) for run in runs)
-
-
-def test_sampling_processes_explore_potion_use_as_the_runner_alone_does(tmp_path):
-    learner, _, seeds = setup_round({"combat": 0.5, "other": 0.8})
-    runner = RolloutRunner(learner.model, learner.vocabulary, version=learner.policy_version, precision="no",
-                           ascension=0, temperatures={"combat": 0.5, "other": 0.8}, explore_potions=1.0)
-    with samplers(runner, drinking, engines=5, processes=3) as pool:
-        runs = read(collect_round(pool, runner, seeds, tmp_path / "round"))
-    assert all(run["explore_potions"] == {"normal": 1.0, "elite": 1.0, "boss": 1.0} for run in runs)
-    assert all(len(explored_steps(run)) == 1 and verb_of(explored_steps(run)[0]) == "USE_POTION" for run in runs)
-    assert replayed_gap(learner.model, learner.vocabulary, runs) < 1e-4
 
 
 def greedy_runner(learner, temperatures, **settings):
@@ -905,34 +797,192 @@ def test_greedy_fights_take_the_fights_most_likely_actions_and_draw_the_rest(tmp
     outside = [rank_of(model, vocabulary, step) for run in alone for macro in run["macros"] if macro["fight"] is None
                for step in branching_steps(dict(macros=[macro]))]
     assert outside and any(outside)
-    # Greedy runs are greedy throughout, as they were; the switch takes no exploration.
+    # Greedy runs are greedy throughout, as they were.
     assert "greedy_fights" not in greedy.run(engine(), "Ironclad", "evaluated", sample=False)
-    with pytest.raises(ValueError, match="explore"):
-        greedy_runner(learner, temperatures, explore_potions=0.1)
     with pytest.raises(ValueError, match="Greedy"):
         RolloutRunner(model, vocabulary, greedy_fights=1)
 
 
-def test_greedy_fights_fork_at_the_first_decisions_outside_them(tmp_path):
-    learner, _, _ = setup_round({"combat": 0.5, "other": 0.8})
+class Rewarding(SyntheticEngine):
+    """The decision after the fight, on a reward screen: a decision outside fights of a
+    phase that explores (`rollout.OUTSIDE_PHASES`)."""
+
+    def frame(self):
+        result = super().frame()
+        if result["public"]["phase"] == "combat_play":
+            result["public"]["phase"] = "rewards"
+        return result
+
+
+def test_a_run_explores_outside_fights_at_the_rate_asked_by_another_candidate_than_the_most_likely(tmp_path):
+    learner, _, seeds = setup_round({"combat": 0.5, "other": 0.8})
     model, vocabulary = learner.model, learner.vocabulary
-    greedy = greedy_runner(learner, {"combat": 0.5, "other": 0.8})
-    runs = [greedy.run(engine(), "Ironclad", "fork", fork=dict(index=j, size=4, depth=1)) for j in range(4)]
-    for j, run in enumerate(runs):
-        fight, after = run["macros"]
-        assert fight["fight"] is not None and after["fight"] is None
-        # The fight's decisions come first and are taken by argmax, unforked; the fork
-        # falls on the first decision with a choice outside it.
-        assert not any(step.get("forked") for step in fight["steps"])
-        assert all(rank_of(model, vocabulary, step) == 0 for step in branching_steps(dict(macros=[fight])))
-        first = branching_steps(dict(macros=[after]))[0]
-        assert first["forked"] and rank_of(model, vocabulary, first) == (0 if j < 2 else 1)
-        assert _without_frames(run)["forked"] == 1
-    # The sampling processes fork as the runner alone does.
-    from main.play.rollout import SEGMENTS
-    jobs = [("Ironclad", dict(seed="fork", run_id=f"g-{j}", group="g", fork=dict(index=j, size=4, depth=1)), None)
-            for j in range(4)]
-    with samplers(greedy, engine, engines=4, processes=2) as pool:
-        played = []
-        pool.collect(greedy, jobs, on_run=lambda index, run: played.append((index, run)), layout=SEGMENTS)
-    assert sorted(run["forked"] for _, run in played) == [1, 1, 1, 1]
+    exploring = RolloutRunner(model, vocabulary, version=learner.policy_version, precision="no", ascension=0,
+                              temperatures={"combat": 0.5, "other": 0.8}, explore_outside=1.0)
+    for index in range(4):
+        run = exploring.run(Rewarding(4, 2), "Ironclad", f"outside-{index}")
+        assert run["status"] == "complete" and run["explore_outside"]["rewards"] == 1.0
+        # The decision outside the fight takes the candidate the policy likes less, as an
+        # explored one; the fight's own decisions are drawn as ever.
+        explored = explored_steps(run)
+        assert len(explored) == 1 and explored[0]["frame"]["public"]["phase"] == "rewards"
+        assert rank_of(model, vocabulary, explored[0]) == 1
+        assert all(macro["fight"] is not None for macro in run["macros"] for step in macro["steps"]
+                   if not step["forced"] and not step.get("explored"))
+        # Recorded with the policy's own log-probability of the action, at its temperature and at 1.
+        assert replayed_gap(model, vocabulary, [run]) < 1e-4
+        validate_run(run, on_policy=True)
+    from main.data.shards import samples as training_samples
+    assert sum(item.explored for item in training_samples([run])) == 1
+    # The sampling processes explore as the runner alone does.
+    with samplers(exploring, lambda: Rewarding(4, 2), engines=5, processes=3) as pool:
+        runs = read(collect_round(pool, exploring, seeds, tmp_path / "round"))
+    for run in runs:
+        assert len(explored_steps(run)) == 1 and rank_of(model, vocabulary, explored_steps(run)[0]) == 1
+    assert replayed_gap(model, vocabulary, runs) < 1e-4
+    # Not sampling, at rate 0, or in a phase left out, nothing outside is explored.
+    assert not explored_steps(exploring.run(Rewarding(4, 2), "Ironclad", "greedy", sample=False))
+    plain = exploring.variant(explore_outside=0.0)
+    run = plain.run(Rewarding(4, 2), "Ironclad", "plain")
+    assert "explore_outside" not in run and not explored_steps(run)
+    other = exploring.variant(explore_outside={"map": 1.0})
+    assert not explored_steps(other.run(Rewarding(4, 2), "Ironclad", "map-only"))
+
+
+def top_of(model, vocabulary, frame):
+    """The candidate the network likes most among the frame's legal ones."""
+    return next(c["candidate_ref"] for c in frame["legal"]["candidates"]
+                if rank_of(model, vocabulary, dict(frame=frame, candidate_ref=c["candidate_ref"])) == 0)
+
+
+def test_a_run_takes_the_priors_proposal_outside_fights_where_it_is_not_the_policys_most_likely(tmp_path):
+    from main.data.shards import samples as training_samples
+    from main.play.digests import explored_mark
+
+    learner, _, seeds = setup_round({"combat": 0.5, "other": 0.8})
+    model, vocabulary = learner.model, learner.vocabulary
+    torch.manual_seed(1)
+    prior = PolicyNetwork(ModelConfig.tiny()).eval()  # other weights, the same vocabulary
+    asking = RolloutRunner(model, vocabulary, version=learner.policy_version, precision="no", ascension=0,
+                           temperatures={"combat": 0.5, "other": 0.8}, explore_prior=1.0, prior=prior)
+
+    def checked(runs, prior=prior):
+        """How many decisions outside fights took the prior's proposal; each that did is
+        the prior's most likely and not the policy's, each that did not is where they agree."""
+        proposed = 0
+        for run in runs:
+            assert run["explore_prior"]["rewards"] == 1.0
+            for macro in run["macros"]:
+                for step in macro["steps"]:
+                    if macro["fight"] is not None or step["forced"]:
+                        assert not step.get("explored")
+                        continue
+                    frame = step["frame"]
+                    if step.get("explored"):
+                        assert step["explored_by"] == "prior"
+                        assert step["candidate_ref"] == top_of(prior, vocabulary, frame) != top_of(model, vocabulary, frame)
+                        proposed += 1
+                    else:
+                        assert top_of(prior, vocabulary, frame) == top_of(model, vocabulary, frame)
+        return proposed
+
+    runs = [asking.run(Rewarding(4, 2), "Ironclad", f"prior-{index}") for index in range(8)]
+    proposed = checked(runs)
+    assert proposed > 0
+    # Recorded with the policy's own log-probabilities, as any explored decision.
+    assert replayed_gap(model, vocabulary, runs) < 1e-4
+    for run in runs:
+        validate_run(run, on_policy=True)
+    assert sum(item.explored for run in runs for item in training_samples([run])) == proposed
+    # The digests the advantages read tell the prior's proposals apart.
+    marks = [explored_mark(macro["steps"]) for run in runs for macro in run["macros"] if macro["fight"] is None]
+    assert marks.count("prior") == proposed and set(marks) <= {"prior", False}
+    assert explored_mark([{"explored": True}, {}]) is True
+    # The sampling processes ask the prior's network in the collecting process, as the runner alone does.
+    with pytest.raises(ValueError, match="prior network"):
+        with samplers(asking, lambda: Rewarding(4, 2), engines=2, processes=1) as pool:
+            collect_round(pool, asking, seeds, tmp_path / "missing")
+    with Samplers(lambda: Rewarding(4, 2), model, vocabulary, engines=5, processes=3, prior=prior) as pool:
+        played = read(collect_round(pool, asking, seeds, tmp_path / "round"))
+    assert checked(played) > 0 and replayed_gap(model, vocabulary, played) < 1e-4
+    # Not sampling, or at rate 0, the prior proposes nothing.
+    assert not explored_steps(asking.run(Rewarding(4, 2), "Ironclad", "greedy", sample=False))
+    plain = asking.variant(explore_prior=0.0)
+    run = plain.run(Rewarding(4, 2), "Ironclad", "prior-0")
+    assert "explore_prior" not in run and not explored_steps(run)
+    # A prior that agrees with the policy proposes nothing: the draw stands, or with the
+    # policy's own exploration as well the decision explores by its rule.
+    same = deepcopy(model)
+    agreeing = asking.variant(prior=same)
+    assert checked([agreeing.run(Rewarding(4, 2), "Ironclad", f"same-{index}") for index in range(4)], same) == 0
+    both = agreeing.variant(explore_outside=1.0)
+    for index in range(4):
+        explored = explored_steps(both.run(Rewarding(4, 2), "Ironclad", f"both-{index}"))
+        assert len(explored) == 1 and "explored_by" not in explored[0] and rank_of(model, vocabulary, explored[0]) == 1
+
+
+def test_a_priors_proposal_is_never_the_policys_most_likely_nor_a_discard():
+    from main.network.policy import Choice
+
+    learner, _, _ = setup_round()
+    runner = RolloutRunner(learner.model, learner.vocabulary, explore_prior={"map": 1.0})
+    frame = {"public": {"phase": "map"}, "legal": {"candidates": [
+        {"candidate_ref": "c0", "verb": "MOVE_TO_NODE"}, {"candidate_ref": "c1", "verb": "MOVE_TO_NODE"},
+        {"candidate_ref": "c2", "verb": "DISCARD_POTION"}]}}
+    drawn = [-0.02, -4.0, -5.0]
+    drew = Choice("c1", -4.0, log_probs=drawn)
+
+    class Proposing:
+        def __init__(self, ref):
+            self.ref = ref
+
+        def choose(self, frame, *, sample, temperature):
+            assert not sample
+            return Choice(self.ref)
+
+    choice = runner.explore_by_prior(frame, drew, 0.5, Proposing("c1"))
+    # The draw was the proposal already, yet it is the prior's: explored, at the policy's own log-probability.
+    assert choice.explored and choice.explored_by == "prior" and choice.candidate_ref == "c1"
+    assert choice.log_prob == -4.0 and choice.log_probs == drawn
+    for proposal in ("c0", "c2"):
+        assert runner.explore_by_prior(frame, drew, 0.5, Proposing(proposal)) is drew
+    assert runner.explore_by_prior(dict(frame, public={"phase": "event"}), drew, 0.5, Proposing("c1")) is drew
+    assert runner.explore_by_prior(frame, drew, 0.5, None) is drew
+
+
+def test_exploring_outside_fights_takes_the_second_or_another_candidate_never_the_first_nor_a_discard():
+    import math
+    from main.network.policy import Choice
+    from main.play.rollout import outside_rates
+
+    learner, _, _ = setup_round()
+    runner = RolloutRunner(learner.model, learner.vocabulary, explore_outside={"map": 1.0})
+    frame = {"public": {"phase": "map"}, "legal": {"candidates": [
+        {"candidate_ref": "c0", "verb": "MOVE_TO_NODE"}, {"candidate_ref": "c1", "verb": "MOVE_TO_NODE"},
+        {"candidate_ref": "c2", "verb": "MOVE_TO_NODE"}, {"candidate_ref": "c3", "verb": "DISCARD_POTION"},
+        {"candidate_ref": "c4", "verb": "MOVE_TO_NODE"}]}}
+    drawn = [-0.02, -4.0, -6.0, -3.0, -9.0]
+    drew = Choice("c0", -0.02, log_probs=drawn)
+    taken = [runner.explore_outside_fights(frame, drew, 0.5) for _ in range(400)]
+    counts = {ref: sum(choice.candidate_ref == ref for choice in taken) for ref in ("c0", "c1", "c2", "c3", "c4")}
+    # Half the time the second most likely, which is not the discard; otherwise one of the rest.
+    assert counts["c0"] == counts["c3"] == 0 and counts["c2"] > 0 and counts["c4"] > 0
+    assert 0.55 < counts["c1"] / 400 < 0.8
+    choice = next(choice for choice in taken if choice.candidate_ref == "c2")
+    assert choice.explored and choice.log_prob == -6.0 and choice.log_probs == drawn
+    scaled = [0.5 * value for value in drawn]
+    assert choice.base_log_prob == pytest.approx(scaled[2] - math.log(sum(math.exp(v) for v in scaled)))
+    # Another phase, or a frame whose only other candidate is a discard, keeps the draw.
+    assert runner.explore_outside_fights(dict(frame, public={"phase": "event"}), drew, 0.5) is drew
+    lone = {"public": {"phase": "map"}, "legal": {"candidates": frame["legal"]["candidates"][:1] + [
+        frame["legal"]["candidates"][3]]}}
+    assert runner.explore_outside_fights(lone, Choice("c0", -0.1, log_probs=[-0.1, -2.4]), 0.5).candidate_ref == "c0"
+    with pytest.raises(ValueError, match="distribution"):
+        runner.explore_outside_fights(frame, Choice("c0", -0.02), 0.5)
+    # The rates: one for every phase, or by phase; phases at 0 are left out.
+    assert set(outside_rates(0.05)) == {"map", "rewards", "card_reward", "event", "rest_site", "shop", "treasure",
+                                        "card_select", "bundle_select", "crystal_sphere"}
+    assert outside_rates({"map": 0.1, "event": 0.0}) == {"map": 0.1} and outside_rates(0.0) == {}
+    for wrong in (-0.1, 1.5, {"combat": 0.1}, {"map": True}):
+        with pytest.raises(ValueError, match="outside fights"):
+            outside_rates(wrong)

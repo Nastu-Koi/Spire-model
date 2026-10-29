@@ -19,10 +19,12 @@ and the joint batch is what the objective (`main/learn/grpo.py`) learns from.
   feeder processes of its own, at least two (`streams.stream_feeders`), and begun anew
   when it ends before the pass does (`streams.Joint`).
 - **Other kinds of source.** A batch may also hold the fight groups' decisions and
-  combat demonstrations (`main/learn/mixed.py`), each a stream of its own. The kinds
-  share the batch by their decisions, or as given, and the act groups' share is split
-  among the waves as above (`stream_shares`); every decision of any kind weighs 1/B
-  each time it is in a batch, so a kind's share is its share of the gradient too.
+  combat demonstrations (`main/learn/mixed.py`), each a stream of its own, the fight
+  groups and their hindsight forks two streams of one kind. The kinds share the batch
+  by their decisions, or as given; the act groups' share is split among the waves as
+  above, a kind of several other streams among them by their decisions
+  (`stream_shares`). Every decision of any kind weighs 1/B each time it is in a batch,
+  so a kind's share is its share of the gradient too.
 """
 
 import math
@@ -54,16 +56,18 @@ def wave_shares(macros, relative=None):
 
 def stream_shares(macros, others=None, *, waves=None, sources=None):
     """The shares of a batch of an update's streams. `macros` maps an act wave to its
-    priced decisions, `others` a stream of another kind of source (`mixed.KINDS`: the
-    fight groups, the combat demonstrations), named by its kind, to its decisions. The
-    kinds share the batch by `sources` ({kind: positive number}, naming every kind the
-    update has) normalized, or by their decisions; the act groups' share is split among
-    their waves by `waves` (`wave_shares`). With the act groups alone these are the
-    waves' shares."""
+    priced decisions, `others` another kind of source (`mixed.KINDS`: the fight groups,
+    the combat demonstrations) to its decisions: of one stream named by its kind, or
+    {stream: decisions} of several. The kinds share the batch by `sources` ({kind:
+    positive number}, naming every kind the update has) normalized, or by their
+    decisions; the act groups' share is split among their waves by `waves`
+    (`wave_shares`), another kind's among its streams by their decisions. With the act
+    groups alone these are the waves' shares."""
     others = dict(others or {})
     if ACT in others or set(others) - set(KINDS):
         raise ValueError(f"The other streams of an update are of the kinds {[kind for kind in KINDS if kind != ACT]}")
-    decisions = {ACT: sum(macros.values()), **others}
+    streams = {kind: value if isinstance(value, dict) else {kind: value} for kind, value in others.items()}
+    decisions = {ACT: sum(macros.values()), **{kind: sum(parts.values()) for kind, parts in streams.items()}}
     if sources is None:
         weights = decisions
     else:
@@ -76,7 +80,9 @@ def stream_shares(macros, others=None, *, waves=None, sources=None):
     total = sum(weights.values())
     kinds = {kind: weight / total for kind, weight in weights.items()}
     within = wave_shares(macros, waves)
-    return {**{name: kinds[ACT] * share for name, share in within.items()}, **{kind: kinds[kind] for kind in others}}
+    return {**{name: kinds[ACT] * share for name, share in within.items()},
+            **{name: kinds[kind] * share for kind, parts in streams.items()
+               for name, share in wave_shares(parts).items()}}
 
 
 def pass_updates(macros, batch):

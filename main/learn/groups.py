@@ -1,7 +1,10 @@
 """Advantages of act groups (`main/play/groups.py`), from the groups themselves.
 
 A segment's return R is what it came to, passed back up the chain of waves
-(`segments.returns`); a segment without one is left out. A group's segments share a
+(`segments.returns`); a segment without one is left out. With a win's HP bonus
+(`win_bonuses`) a won run adds to its 1 the bonus's weight times the share of its
+maximum HP it ended with: a tie-break among wins, at most worth a few points of
+winning, that parts the groups whose segments all won. A group's segments share a
 start, so their mean is the baseline each is measured against; it is refined two
 ways so that every decision gets an advantage of its own:
 
@@ -39,7 +42,8 @@ import numpy as np
 
 from main.learn.advantage import header, write
 from main.learn.features import NAMES
-from main.learn.segments import RIDGE, fit, read_waves, returns, tree
+from main.learn.segments import RIDGE, TREE, fit, read_waves, returns, tree
+from main.play.fights import fight_rows
 from main.play.groups import groups_summary
 
 KIND = "act-groups"
@@ -66,12 +70,26 @@ def uniform(members, table):
     return len({table[s.run_id] for s in members}) == 1
 
 
-def wave_advantages(wave_segments, table, ridge=RIDGE, drop_uniform=False):
+def wave_advantages(wave_segments, table, ridge=RIDGE, drop_uniform=False, explored_on_tree=False,
+                    explored_centered=False):
     """{segment id: [(macro index, value, advantage)]} of one wave's segments that have
     a return, and the statistics of how they were computed. With `drop_uniform` the
     uniform groups' segments are left out, and the baseline is fitted without them;
     the counts of the groups, of their returns and of the uniform ones still take in
-    every group, the advantages' and the tree's the groups kept."""
+    every group, the advantages' and the tree's the groups kept. With
+    `explored_on_tree` an explored decision outside fights that the tree does not price
+    gets no advantage (0): off the tree its advantage is the segment's return against
+    the baseline, mostly the luck of the rest of the segment, which an explored
+    decision's unclipped score would push on in full (ticket 31's fifteenth segment).
+    The statistics take its advantage before. With `explored_centered` the explored
+    decisions outside fights that learn (those the tree prices with `explored_on_tree`)
+    have their advantages less the mean of those of their phase in the wave: that an
+    action the policy all but never takes does worse than its own on average is what
+    the policy knows already, and learnt again it pushes every candidate but the most
+    likely down through the shared weights (ticket 33: the sixteenth segment's fixed-set
+    entropy fell every round, and rose with the explored decisions' advantages at 0);
+    what is left is which proposals did better than the others. The statistics take
+    the advantages before; `centered` has each phase's mean taken off."""
     groups = defaultdict(list)
     for segment in wave_segments:
         if segment.run_id in table:
@@ -81,7 +99,13 @@ def wave_advantages(wave_segments, table, ridge=RIDGE, drop_uniform=False):
     counts, runs = Counter(), {}
     explored, forked = [], []  # the advantages of the explored and of the forked decisions
     explored_at = defaultdict(list)  # the explored decisions' advantages by ascension
+    # The explored decisions outside fights (`RolloutRunner.explore_outside`), and how many
+    # of them the tree prices: same frame, another segment's other action.
+    outside, outside_on_tree = [], 0
+    # The same by who proposed them (`explore_prior`), with the tree's alone apart.
+    outside_by = defaultdict(lambda: dict(all=[], on_tree=[]))
     fights = 0  # the decisions priced that were made inside a fight
+    learning = defaultdict(list)  # the explored decisions outside fights that learn, by phase: (segment, place)
     prefix = {}
     for members in kept.values():
         found, node_counts = tree(members, table)
@@ -105,10 +129,31 @@ def wave_advantages(wave_segments, table, ridge=RIDGE, drop_uniform=False):
                 if decision.explored:
                     explored.append(advantage)
                     explored_at[segment.ascension].append(advantage)
+                    if not decision.fight:
+                        priced = (segment.run_id, decision.index) in prefix
+                        outside.append(advantage)
+                        outside_on_tree += priced
+                        source = decision.explored if isinstance(decision.explored, str) else "rule"
+                        outside_by[source]["all"].append(advantage)
+                        if priced:
+                            outside_by[source]["on_tree"].append(advantage)
+                        elif explored_on_tree:
+                            advantage = 0.0
+                            entries[-1] = (decision.index, value, advantage)
+                        if priced or not explored_on_tree:
+                            learning[decision.phase].append((segment.run_id, len(entries) - 1))
                 if decision.forked:
                     forked.append(advantage)
                 fights += decision.fight
             runs[segment.run_id] = entries
+    centered = {}
+    if explored_centered:
+        for phase, places in sorted(learning.items(), key=lambda item: str(item[0])):
+            mean = sum(runs[run_id][place][2] for run_id, place in places) / len(places)
+            centered[str(phase)] = dict(decisions=len(places), mean=round(mean, 5))
+            for run_id, place in places:
+                index, value, advantage = runs[run_id][place]
+                runs[run_id][place] = (index, value, advantage - mean)
     between, mean_return = share([[table[s.run_id] for s in members] for members in groups.values()])
     uniform_groups = sum(uniform(members, table) for members in groups.values())
     decisions = sum(len(entries) for entries in runs.values())
@@ -124,6 +169,11 @@ def wave_advantages(wave_segments, table, ridge=RIDGE, drop_uniform=False):
         # What exploring taught: the mean advantage of the explored decisions says whether
         # what they tried paid off on average; the signed counts how often.
         explored=signed(explored),
+        explored_outside=dict(signed(outside), on_tree=outside_on_tree,
+                              by_source={source: dict(signed(kept["all"]), on_tree=signed(kept["on_tree"]))
+                                         for source, kept in sorted(outside_by.items())},
+                              learned="on_tree" if explored_on_tree else "all",
+                              **({"centered": centered} if explored_centered else {})),
         # What forking taught: its decisions stand on the tree, each half against the other.
         forked=signed(forked),
         # The fights' decisions priced, and those left out: kept without frames, played
@@ -162,29 +212,73 @@ def signed(values):
                 positive=sum(a > 0 for a in values), negative=sum(a < 0 for a in values))
 
 
-def advantages(directory, ridge=RIDGE, processes=None, drop_uniform=False):
+def win_bonuses(directory, waves, weight):
+    """{segment id: `weight` × the share of its maximum HP a segment's last fight left
+    it} of the segments of a round's `waves` whose last fight they lived through, from
+    the waves' fight records (`fights.fight_rows`, the round played with fight
+    entries): the HP after the fight, or at its last decision where the run ended with
+    it. `returns` adds it to a win alone; a won run's last fight is the one that won it."""
+    last = {}
+    for wave in waves:
+        for row in fight_rows(directory, wave):
+            if row["run_id"] not in last or row["fight"] > last[row["run_id"]]["fight"]:
+                last[row["run_id"]] = row
+    found = {}
+    for run_id, row in last.items():
+        hp = row["exit_hp"] if row.get("exit_hp") is not None else row.get("last_hp")
+        top = row["exit_max_hp"] if row.get("exit_max_hp") is not None else row.get("last_max_hp")
+        if not row["died"] and hp is not None and top:
+            found[run_id] = weight * max(0, hp) / top
+    return found
+
+
+def advantages(directory, ridge=RIDGE, processes=None, drop_uniform=False, win_hp_bonus=0.0, explored_on_tree=False,
+               explored_centered=False):
     """Compute and write the advantages of every wave of a round of act groups, the
-    uniform groups left out with `drop_uniform` (`wave_advantages`). Returns {wave:
-    header}; a round holding advantages of this kind, ridge and dropping already is
+    uniform groups left out with `drop_uniform` (`wave_advantages`), a win's return
+    raised by `win_hp_bonus` times the share of its maximum HP it ended with
+    (`win_bonuses`; the round played with fight entries), the explored decisions outside
+    fights off the tree at 0 with `explored_on_tree`, those that learn centered by phase
+    with `explored_centered`. Returns {wave: header}; a round
+    holding advantages of this kind, ridge, dropping, bonus and explored rule already is
     left as it is."""
     directory = Path(directory)
     summary_ = groups_summary(directory)
     if summary_ is None:
         raise FileNotFoundError(f"{directory} holds no finished round of act groups")
-    identity = dict(kind=KIND, ridge=ridge, boundaries=summary_["boundaries"], bosses=summary_.get("bosses", []),
+    identity = dict(kind=KIND, ridge=ridge, tree=TREE, boundaries=summary_["boundaries"],
                     policy_version=summary_["policy_version"],
                     written={wave: summary_[wave]["written"] for wave in summary_["waves"]})
     if drop_uniform:
         identity["drop_uniform_groups"] = True
+    if win_hp_bonus:
+        if not summary_.get("fight_entries"):
+            raise ValueError("A win's HP bonus reads the HP from the fights' records: play the round with fight entries")
+        identity["win_hp_bonus"] = win_hp_bonus
+    if explored_on_tree:
+        identity["explored_on_tree"] = True
+    if explored_centered:
+        identity["explored_centered"] = True
     found = headers(directory)
     if all(found[wave] is not None and found[wave].get("drop_uniform_groups", False) == drop_uniform
+           and found[wave].get("win_hp_bonus", 0.0) == win_hp_bonus
+           and found[wave].get("explored_on_tree", False) == explored_on_tree
+           and found[wave].get("explored_centered", False) == explored_centered
            and all(found[wave].get(key) == value for key, value in identity.items()) for wave in summary_["waves"]):
         return found
     waves = list(read_waves(directory, summary_["waves"], processes).items())
-    table = returns(waves)
+    bonuses = win_bonuses(directory, summary_["waves"], win_hp_bonus) if win_hp_bonus else {}
+    table = returns(waves, bonuses)
     written = {}
     for wave, wave_segments in waves:
-        runs, stats = wave_advantages(wave_segments, table, ridge, drop_uniform)
+        runs, stats = wave_advantages(wave_segments, table, ridge, drop_uniform, explored_on_tree, explored_centered)
+        if win_hp_bonus:
+            won = [s.run_id for s in wave_segments if s.outcome == "win"]
+            given = [bonuses[run_id] for run_id in won if run_id in bonuses]
+            stats["win_bonus"] = dict(wins=len(won), missing=len(won) - len(given),
+                                      mean=round(float(np.mean(given)), 5) if given else None,
+                                      low=round(min(given), 5) if given else None,
+                                      high=round(max(given), 5) if given else None)
         written[wave] = write(directory / wave, dict(identity, wave=wave, stats=stats), runs)
     return written
 

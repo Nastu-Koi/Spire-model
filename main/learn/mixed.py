@@ -29,7 +29,7 @@ groups alone has always reported them.
 import torch
 
 from main.env.protocol import ProtocolError
-from main.learn.clipped import TALLY, Clipped
+from main.learn.clipped import MAXIMA, TALLY, Clipped, combine, empty
 from main.play.rollout import precision_context
 
 ACT, FIGHTS, DEMOS = "act-groups", "fight-groups", "combat-demos"
@@ -77,7 +77,8 @@ class Mixed:
     is learned by its kind's objective. `kinds` maps a stream's name (what its samples
     are reported as, `Sample.source`) to its kind (`KINDS`); `reference` is the KL's
     reference of the sampled kinds, a frozen policy network or None for the
-    distributions the decisions were drawn from (`clipped.Clipped`). A microbatch is
+    distributions the decisions were drawn from (`clipped.Clipped`); `kl` is its
+    coefficient, one for every sampled kind or {kind: coefficient}. A microbatch is
     one stream's: the streams are packed apart (`streams.Joint`)."""
 
     def __init__(self, kinds, reference, *, clip, kl):
@@ -85,8 +86,11 @@ class Mixed:
         if unknown:
             raise ValueError(f"Unknown kinds of source {sorted(unknown)}; they are {list(KINDS)}")
         self.kinds = dict(kinds)
-        self.objectives = {kind: Clipped(reference, clip=clip, kl=kl) if kind in SAMPLED else Likelihood()
-                           for kind in KINDS if kind in self.kinds.values()}
+        if isinstance(kl, dict) and set(kl) - set(SAMPLED):
+            raise ValueError(f"KL coefficients are of the sampled kinds {list(SAMPLED)}")
+        coefficient = lambda kind: kl.get(kind, 0.0) if isinstance(kl, dict) else kl  # noqa: E731
+        self.objectives = {kind: Clipped(reference, clip=clip, kl=coefficient(kind)) if kind in SAMPLED
+                           else Likelihood() for kind in KINDS if kind in self.kinds.values()}
         self._accuracy = dict.fromkeys(self.objectives)
         self._device = None
         # Everything flushed so far, for the pass's summary.
@@ -121,14 +125,23 @@ class Mixed:
             if self._device is None:
                 continue
             zeros = lambda width: torch.zeros(width, dtype=torch.float64, device=self._device)  # noqa: E731
-            parts.append(torch.cat([zeros(self.width(objective)) if seen is None else seen,
-                                    zeros(2) if accuracy is None else accuracy]))
+            nothing = empty(self._device) if isinstance(objective, Clipped) else zeros(objective.WIDTH)
+            parts.append(torch.cat([nothing if seen is None else seen, zeros(2) if accuracy is None else accuracy]))
         tally = torch.cat(parts) if parts else None
         if tally is not None:
-            self._all = tally if self._all is None else self._all + tally
+            self._all = combine(self._all, tally, self.maxima())
         for kind, count in samples.items():
             self._samples_all[kind] += count
         return tally, samples
+
+    def maxima(self):
+        """Where the entries combined by their maximum are in a flushed tally (`clipped.MAXIMA`)."""
+        places, offset = [], 0
+        for objective in self.objectives.values():
+            if isinstance(objective, Clipped):
+                places += [offset + index for index in MAXIMA]
+            offset += self.width(objective) + 2
+        return tuple(places)
 
     def means(self, tally, samples):
         """The report of a tally over each kind's `samples`: the clipped objective's means
@@ -146,7 +159,7 @@ class Mixed:
             if isinstance(objective, Clipped):
                 report = Clipped.means(part, n)
                 if part is not None:
-                    sampled = part if sampled is None else sampled + part
+                    sampled = combine(sampled, part)
                 count += n
             else:
                 report = objective.means(part, n) if part is not None else dict(nll=None)

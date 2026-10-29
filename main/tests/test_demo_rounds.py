@@ -9,7 +9,7 @@ import pytest
 
 from main.demos.rounds import EXPORT, IMPORTED, SOLVED, solve_round
 from main.tests.test_independent import samples
-from main.tests.test_iterate import world  # noqa: F401  (`world` is a fixture)
+from main.tests.test_iterate import keep_uniform, world  # noqa: F401  (fixtures)
 
 
 class Solver:
@@ -58,7 +58,7 @@ def test_a_round_without_a_selection(tmp_path):
         solve_round(tmp_path, log=lambda line: None, run=Solver())
 
 
-def test_an_iteration_hands_fights_to_the_solver_and_learns_the_last_rounds_demonstrations(world):
+def test_an_iteration_hands_fights_to_the_solver_and_learns_the_last_rounds_demonstrations(world, keep_uniform):
     """The BC phase: after its advantages every round picks fights for the solver, and
     its update learns the imports of this round and the one before (`demo_buffer` 2);
     an import no later update takes is cleaned up."""
@@ -76,7 +76,7 @@ def test_an_iteration_hands_fights_to_the_solver_and_learns_the_last_rounds_demo
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("main.iterate.demo_rounds.solve_round", solve)
-        state = driver(world, eval_seeds=None, greedy_fights=True, fight_entries=True, round_demos=4, demo_buffer=2,
+        state = driver(world, eval_seeds=None, round_demos=4, demo_buffer=2,
                        demo_workers=3, source_shares={ACT: 1, DEMOS: 1}).run(3)
     # The synthetic rounds hold fewer kinds of fight than the quotas ask for: what they have is picked.
     picked = [state["iterations"][str(n)]["demos"]["account"] for n in range(3)]
@@ -94,9 +94,8 @@ def test_an_iteration_hands_fights_to_the_solver_and_learns_the_last_rounds_demo
     assert all((rounds / f"round-{n}/demos/selection.json").is_file() for n in range(3))
     history = [json.loads(line) for line in (world.output / "history.jsonl").read_text().splitlines()]
     assert [line["metrics"]["demo_fights"] for line in history] == [account["picked"] for account in picked]
-    for wrong in (dict(round_demos=4), dict(round_demos=-1, greedy_fights=True, fight_entries=True),
-                  dict(round_demos=4, greedy_fights=True, fight_entries=True, demo_buffer=0),
-                  dict(round_demos=4, greedy_fights=True, fight_entries=True, demo_opening=1.5)):
+    for wrong in (dict(round_demos=-1), dict(round_demos=4, demo_buffer=0),
+                  dict(round_demos=4, demo_opening=1.5)):
         with pytest.raises(ValueError):
             driver(world, eval_seeds=None, **wrong)
 

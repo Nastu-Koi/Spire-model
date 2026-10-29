@@ -77,6 +77,35 @@ foreach (var apply in new Action<OddsHistory>[] {
         online.PotionProbability(true, false) == replay.PotionProbability(true, false), "prefix replay parity");
 }
 
+// A snapshot restored into a loaded history goes on exactly as the run it was taken
+// from; restoring an unknown snapshot keeps the unknowns; acts must agree.
+foreach (bool tutorialRun in new[] { false, true })
+{
+    var source = new OddsHistory(true, 0, tutorial: tutorialRun);
+    source.PotionGenerated(false, false); source.QuestionRoomGenerated("Event", all);
+    source.QuestionRoomGenerated("Shop", all); source.EnterAct(1); source.PotionGenerated(true, false);
+    var restored = new OddsHistory(false, 1, tutorial: tutorialRun);
+    restored.Restore(source.Snapshot());
+    foreach (var apply in new Action<OddsHistory>[] {
+        h => { }, h => h.PotionGenerated(false, false), h => h.QuestionRoomGenerated("Monster", noShop),
+        h => h.QuestionRoomGenerated("Event", all), h => h.EnterAct(2), h => h.PotionGenerated(true, false) })
+    {
+        apply(source); apply(restored);
+        Check(source.RoomProbabilities(all).SequenceEqual(restored.RoomProbabilities(all)) &&
+            source.RoomProbabilities(noShop).SequenceEqual(restored.RoomProbabilities(noShop)) &&
+            source.PotionProbability(false, false) == restored.PotionProbability(false, false) &&
+            source.PotionProbability(true, false) == restored.PotionProbability(true, false),
+            "a restored snapshot goes on as its run");
+    }
+}
+var unknownSource = new OddsHistory(false, 1);
+var unknownRestored = new OddsHistory(false, 1);
+unknownRestored.Restore(unknownSource.Snapshot());
+Check(unknownRestored.PotionProbability(false, false) == null && unknownRestored.RoomProbabilities(all)["Event"] == null,
+    "an unknown snapshot cannot invent a prior");
+try { new OddsHistory(false, 2).Restore(new OddsHistory(true, 1).Snapshot()); Check(false, "act mismatch restored"); }
+catch (InvalidOperationException) { }
+
 // The knowledge tracker never sees random insertion/removal indices. Check all
 // facts it retains against an independent hidden pile through 10,000 mutations.
 var rng = new Random(8429);

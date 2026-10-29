@@ -4,13 +4,17 @@ A fight is counted in HP the way CombatSolver 0.44 counts a route
 (`CombatBeamSolver.HealthResourceCost`, `ActEndingBossPolicy`, `PotionUsePolicy`):
 
     cost = w·(entry HP − exit HP) + (entry max HP − exit max HP)
-           + Σ prices of the potions used + 100·death
+           + Σ prices of the potions used + 100·death − bonus·growth events
 
 and a fight segment's return is −cost / 100: a death is about −1 and a point of HP
 about −0.01, the scale of the act groups' ±1. The weight w is 1/5 at the boss of the
 first and second act, whose HP the act's end heals back, and 1 elsewhere (`relief`).
 A potion's price is the price table's (`Prices`): the solver's three tiers at 7, 9
 and 11, and 1 in the run's last fight, where nothing is left to keep a potion for.
+A fight the player dies in prices no potion: the run ends there and the belt with it,
+so a potion drunk is worth no more kept. Priced, the potions would make a death with
+potions drunk cost more than one without, and a group whose segments all died would
+teach only to keep them.
 Anything with the same `price(potion, fight)` serves as the prices: the returns are
 counted from the records whenever they are wanted, so other prices (a fitted table)
 price the same fights again without playing them again.
@@ -18,7 +22,15 @@ price the same fights again without playing them again.
 A fight's record is a dict with its kind (normal, elite, boss), act, `second_boss`,
 the run's `ascension`, the entry and exit HP and maximum HP (and those at its last
 decision, for a run that ends with it), the content ids of the potions used
-(`potions_used`) and whether the player died (`died`). Nothing else of it is read.
+(`potions_used`), whether the player died (`died`), and what it leaves to grow on
+(`growth`, `relic_counters`). Nothing else of it is read.
+
+The growth reward (ticket 15 of .scratch/training-plan): what a fight leaves the rest of
+the run besides HP, which one fight's cost does not see, is worth `bonus` HP an event
+(`Growing`, `growth_events`): a card grown for the run, played or by a fatal blow
+(`main.play.fights.PLAYED`, `FATAL`), and a relic whose count carries to the next fight
+left close to its trigger (`RELIC_WINDOWS`). A fight the run ends in, by death or as its
+last, counts none: nothing grows on after it. Without a bonus the cost is as before.
 
 The solver's premium on a revival (`DeathSavePremium`, 9 per HP it restored) is left
 out: at the 20-odd HP a fairy brings back it would make a revival cost more than
@@ -73,6 +85,26 @@ def relief(fight):
     return NONE if fight["ascension"] >= DOUBLE_BOSS else RUN_ENDING
 
 
+# Relics whose count the run keeps from fight to fight and the fights move: the count
+# that triggers them, and how far below it a fight may leave the count to have it count
+# as a growth event. The short ones count only at one below their trigger, the long
+# ones within three. The engine shows the count modulo the trigger (`DisplayAmount`).
+RELIC_WINDOWS = {
+    "RELIC.HAPPY_FLOWER": (3, 1), "RELIC.FAKE_HAPPY_FLOWER": (5, 1), "RELIC.PENDULUM": (3, 1),
+    "RELIC.POLLINOUS_CORE": (4, 1), "RELIC.IRON_CLUB": (4, 1), "RELIC.JOSS_PAPER": (5, 1),
+    "RELIC.NUNCHAKU": (10, 3), "RELIC.PEN_NIB": (10, 3), "RELIC.TUNING_FORK": (10, 3), "RELIC.GALACTIC_DUST": (10, 3),
+}
+
+
+def growth_events(fight):
+    """A fight's growth events: its cards' (`growth`) and its relics left near their
+    trigger at its end (`relic_counters`, `RELIC_WINDOWS`). A record without either has none."""
+    relics = sum(1 for relic, count in (fight.get("relic_counters") or {}).items()
+                 if relic in RELIC_WINDOWS and RELIC_WINDOWS[relic][0] - RELIC_WINDOWS[relic][1]
+                 <= count <= RELIC_WINDOWS[relic][0] - 1)
+    return sum((fight.get("growth") or {}).values()) + relics
+
+
 def tier(potion):
     """The solver's tier of a potion (a content id): 0 base, 1 elevated, 2 high."""
     return 2 if potion in HIGH else 1 if potion in ELEVATED else 0
@@ -104,17 +136,39 @@ class Prices:
 FIXED = Prices()  # the fixed prices, those the solver's demonstrations are solved at
 
 
+@dataclass(frozen=True, slots=True)
+class Growing:
+    """`prices` and a growth reward: each of a fight's growth events (`growth_events`)
+    takes `bonus` HP off its cost. Serves as the prices do (`price`)."""
+
+    prices: object
+    bonus: float
+
+    def __post_init__(self):
+        if not self.bonus > 0:
+            raise ValueError("A growth reward is a positive number of HP")
+
+    def price(self, potion, fight):
+        return self.prices.price(potion, fight)
+
+
+def with_growth(prices, bonus):
+    """`prices` with a growth reward of `bonus` HP an event; `prices` alone without one."""
+    return Growing(prices, float(bonus)) if bonus else prices
+
+
 class Cost(NamedTuple):
     """A fight's cost by item, in HP; `total` is the cost."""
 
     hp: float  # w·(entry HP − exit HP)
     max_hp: float  # entry max HP − exit max HP: a gain lowers the cost
-    potions: float  # the prices of the potions used
+    potions: float  # the prices of the potions used, 0 for a death
     death: float  # 100 for dying
+    growth: float = 0.0  # −bonus·growth events: a fight that grows the run costs less
 
     @property
     def total(self):
-        return self.hp + self.max_hp + self.potions + self.death
+        return self.hp + self.max_hp + self.potions + self.death + self.growth
 
 
 def cost(fight, prices):
@@ -122,11 +176,13 @@ def cost(fight, prices):
     `price(potion, fight)`).
 
     The exit HP is the first decision's after the fight, post-combat healing in it. A
-    death counts the HP down to 0, whatever the record says, and DEATH on top. A run
+    death counts the HP down to 0, whatever the record says, and DEATH on top, and no
+    potion's price. A run
     that ends with the fight won (the final boss) has no decision after it: there the
     HP at the fight's last decision (`last_hp`, `last_max_hp`) stands for the exit, and
     a record without either counts that item as 0. Anywhere else a missing exit is an
-    error."""
+    error. With a growth reward (`Growing`) each growth event takes its bonus off,
+    except in a fight the run ends in."""
     stance = relief(fight)
     died = bool(fight["died"])
     ended = died or stance == RUN_ENDING  # no decision after the fight to read the HP from
@@ -141,11 +197,13 @@ def cost(fight, prices):
 
     hp_after = 0 if died else after("exit_hp")
     max_hp_after = after("exit_max_hp")
+    priced = () if died else fight.get("potions_used") or ()
     return Cost(
         hp=0.0 if hp_after is None else HP_WEIGHTS[stance] * (fight["entry_hp"] - hp_after),
         max_hp=0.0 if max_hp_after is None else float(fight["entry_max_hp"] - max_hp_after),
-        potions=sum((prices.price(potion, fight) for potion in fight.get("potions_used") or ()), 0.0),
-        death=DEATH if died else 0.0)
+        potions=sum((prices.price(potion, fight) for potion in priced), 0.0),
+        death=DEATH if died else 0.0,
+        growth=0.0 if ended or not isinstance(prices, Growing) else -prices.bonus * growth_events(fight))
 
 
 def fight_return(fight, prices):

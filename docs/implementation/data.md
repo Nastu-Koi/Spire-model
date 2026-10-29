@@ -22,8 +22,8 @@
 | `source` | 谁写 | 约束 |
 | --- | --- | --- |
 | `independent` | `import-independent`（摘要锚点） | `bc_only`、`status=partial`、`teacher_visibility` 为 `recorded_public` 或 `privileged` |
-| `recorder_bc` | `import-recorder --bootstrap-only`、求解器 `verify` | `bc_only`、`status=partial`、`teacher_visibility=unverified` |
-| `demonstration` | `import-recorder`（完整的人类对局） | 完整对局，`teacher_visibility=public` |
+| `recorder_bc` | 求解器 `verify`（另有已删的 Steam 录制导入写过的旧数据） | `bc_only`、`status=partial`、`teacher_visibility=unverified` |
+| `demonstration` | 已删的 Steam 录制导入（完整的人类对局，只在旧数据里） | 完整对局，`teacher_visibility=public` |
 | `rollout` | 幕组采样 | `sampling=full_distribution`；历史、控制与奖励账本都是当前版本；宏动作里没有控制器步骤 |
 | `evaluation` | 评估 | 完整对局 |
 
@@ -31,7 +31,7 @@
 
 ### 内存数据集
 
-`--data` 只给一个不带索引的路径时，`load_runs` 把它整个读进内存并逐局校验：目录读其中的 `*.json`，另外接受 `.jsonl`、`.jsonl.gz` 和单个 `.json`（一局或一个列表）。Steam 录制的导入结果是一个 `accepted.jsonl`，要直接给这个文件。多个 `--data` 必须都是分片目录。`python -m main audit` 校验完整对局文件、清洗帧，写出接受与隔离两份 JSON Lines。
+`--data` 只给一个不带索引的路径时，`load_runs` 把它整个读进内存并逐局校验：目录读其中的 `*.json`，另外接受 `.jsonl`、`.jsonl.gz` 和单个 `.json`（一局或一个列表）。多个 `--data` 必须都是分片目录。`python -m main audit` 校验完整对局文件、清洗帧，写出接受与隔离两份 JSON Lines。
 
 ## 数据复用
 
@@ -68,4 +68,3 @@
 ## 已知的坑
 
 - 原始导入总数不是可训练样本数；控制器过滤后的计数在索引里。
-- `import-recorder` 的输出不是分片目录；把输出目录当 `--data` 给出时只会去找其中的 `*.json`，要给 `accepted.jsonl`。

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import random
 import re
 import time
@@ -12,7 +13,7 @@ from pathlib import Path
 import orjson
 import torch
 
-from main.network.policy import SessionPolicy
+from main.network.policy import Choice, SessionPolicy
 from main.data.index import COMPRESSION
 from main.env.clock import timed
 from main.env.control import CONTROL_VERSION, REWARD_RULE, environment_action, free_reward, is_policy_frame
@@ -21,7 +22,9 @@ from main.encoding.frames import clean_frame
 from main.env.rewards import MilestoneLedger
 from main.env.public_history import require_history_version
 from main.env.saves import FightTracker, continue_save
-from main.play.fights import FightLog
+from main.play.digests import frame_key
+from main.play.fights import FightLog, drinks
+from main.play.fights import state as fight_state
 
 
 # The precisions a run may be played at: bf16 autocasts the global layers, fp32 (or
@@ -176,20 +179,21 @@ class RolloutRunner:
         ascension=0,
         claim_rewards=False,
         temperatures=None,
-        explore_potions=0.0,
+        explore_outside=0.0,
+        explore_prior=0.0,
+        prior=None,
         greedy_fights=False,
         iteration=None,
     ):
         if max_steps < 1 or timeout <= 0:
             raise ValueError("Rollout limits must be positive")
-        explore_potions = exploration_rates(explore_potions)
+        explore_outside = outside_rates(explore_outside)
+        explore_prior = outside_rates(explore_prior)
         temperatures = {"combat": 1.0, "other": 1.0} if temperatures is None else dict(temperatures)
         if set(temperatures) != {"combat", "other"} or not all(t > 0 for t in temperatures.values()):
             raise ValueError("The sampling temperatures must be positive, one for fights and one for the rest")
         if type(greedy_fights) is not bool:
             raise ValueError("Greedy fights are on or off")
-        if greedy_fights and any(explore_potions.values()):
-            raise ValueError("Greedy fights explore no potion use: their decisions are not drawn")
         if type(ascension) is not int or not 0 <= ascension <= 10:
             raise ValueError("Ascension must be an integer from 0 to 10")
         if iteration is not None and (type(iteration) is not int or iteration < 0):
@@ -205,21 +209,32 @@ class RolloutRunner:
         # which are the same at every temperature. The temperatures are part of the
         # policy's definition: a run records them.
         self.temperatures = temperatures
-        # Exploration of potion use, a probability per kind of fight (normal, elite,
-        # boss): with it a sampled decision of such a fight that could use a potion draws
-        # one of its USE_POTION candidates instead of a sample from the tempered policy.
-        # The policy puts too little on using potions for the sampling temperature ever
-        # to draw one, so without it no group ever holds a segment that used one to
-        # compare against. An explored decision is recorded with the policy's own
-        # log-probability of the action, as if the policy had drawn it; the update tells
-        # it apart (`explored`) and holds it in a symmetric trust region.
-        self.explore_potions = explore_potions
+        # Exploration outside fights, a probability per phase (`outside_rates`): with it a
+        # sampled decision of that phase takes a candidate other than the policy's most
+        # likely, half the time the second most likely and otherwise one of the rest at
+        # random, never a potion's discard. The policy grows sure of its choices outside
+        # fights as it trains, and at the sampling temperature a candidate under a few
+        # percent is never drawn: no group then holds a segment that took it, and no
+        # update can find it better. The decision is recorded with the policy's own
+        # log-probability of the candidate it took, as if the policy had drawn it; the
+        # update tells it apart (`explored`) and learns it by its score.
+        self.explore_outside = explore_outside
+        # Proposals of a prior outside fights, a probability per phase (`outside_rates`):
+        # with it a sampled decision of that phase asks the prior (another network of the
+        # same vocabulary, `prior`, or the policy handed in's `prior`) for its most likely
+        # candidate and, where that is not the policy's most likely, takes it in place of
+        # the draw, recorded as an explored decision of the prior's (`explored_by`) with
+        # the policy's own log-probabilities. Where they agree the decision goes on to
+        # `explore_outside` as any other. The prior proposes what the policy has stopped
+        # trying; the update alone says whether it pays (ticket 33 of .scratch/training-plan).
+        self.explore_prior = explore_prior
+        self.prior = prior
         # Greedy fights: a sampled run takes every decision inside a fight by the
         # policy's most likely action, as a greedy run does, and draws only the rest at
         # their temperature. The fights are then the policy's fixed play, and whatever
         # sets the segments of a group apart is the decisions outside them; a round of
         # act groups keeps no frames of its fights (`groups.sample_groups`), so that no
-        # update learns from them. They explore nothing and are not forked.
+        # update learns from them. They explore nothing.
         self.greedy_fights = greedy_fights
         self._random = random.Random()
         # The sampling iteration the runs belong to.
@@ -238,8 +253,8 @@ class RolloutRunner:
         greedy fights (`main.play.fight_groups`)."""
         settings = dict(precision=self.precision, version=self.version, max_steps=self.max_steps,
                         timeout=self.timeout, ascension=self.ascension, claim_rewards=self.claim_rewards,
-                        temperatures=self.temperatures, explore_potions=self.explore_potions,
-                        greedy_fights=self.greedy_fights, iteration=self.iteration)
+                        temperatures=self.temperatures, explore_outside=self.explore_outside, explore_prior=self.explore_prior,
+                        prior=self.prior, greedy_fights=self.greedy_fights, iteration=self.iteration)
         if not set(changes) <= set(settings):
             raise ValueError(f"A runner's settings are {sorted(settings)}")
         runner = RolloutRunner(self.model, self.vocabulary, **{**settings, **changes})
@@ -263,40 +278,83 @@ class RolloutRunner:
         inside = fight is not None or frame["public"]["phase"] == "combat"
         return self.temperatures["combat" if inside else "other"]
 
-    def exploration_for(self, frame, fight, sample=True, kind=None):
-        """The candidates a decision of `frame` is drawn among when it explores potion
-        use (`explore_potions`), or None for a decision drawn from the policy: a sampled
-        decision inside a fight of `kind` that could use a potion, with that kind's rate."""
-        rate = self.explore_potions.get(kind, 0.0) if sample and fight is not None else 0.0
-        if not rate:
-            return None
-        potions = [c["candidate_ref"] for c in frame["legal"]["candidates"] if c["verb"] == "USE_POTION"]
-        if not potions or len(frame["legal"]["candidates"]) < 2 or self._random.random() >= rate:
-            return None
-        return potions
+    def explore_by_prior(self, frame, choice, temperature, prior):
+        """`choice`, the policy's draw at a sampled decision outside fights, or in its
+        place the most likely candidate of `prior` (a policy of the prior network), at the
+        rate of the frame's phase (`explore_prior`), where that is neither the policy's
+        most likely nor a potion's discard. The candidate is recorded as
+        `explore_outside_fights` records its own, marked as the prior's."""
+        rate = self.explore_prior.get(frame["public"]["phase"], 0.0)
+        candidates = frame["legal"]["candidates"]
+        if not rate or prior is None or len(candidates) < 2 or self._random.random() >= rate:
+            return choice
+        drawn = getattr(choice, "log_probs", None)
+        if drawn is None:
+            raise ValueError("Exploring outside fights needs the distribution the decision was drawn from")
+        proposed = prior.choose(frame, sample=False, temperature=1.0).candidate_ref
+        top = max(range(len(candidates)), key=lambda index: drawn[index])
+        taken = next(index for index, candidate in enumerate(candidates) if candidate["candidate_ref"] == proposed)
+        if taken == top or candidates[taken]["verb"] == "DISCARD_POTION":
+            return choice
+        return _explored(candidates, drawn, taken, temperature, by="prior")
+
+    def explore_outside_fights(self, frame, choice, temperature):
+        """`choice`, the policy's draw at a sampled decision outside fights, or in its
+        place a candidate other than the policy's most likely, at the rate of the frame's
+        phase (`explore_outside`): the second most likely half the time, otherwise one of
+        the others at random; a potion's discard is never taken. The candidate is recorded
+        with the policy's own log-probabilities of it, at `temperature` and at 1, from the
+        distribution the draw came with."""
+        rate = self.explore_outside.get(frame["public"]["phase"], 0.0)
+        candidates = frame["legal"]["candidates"]
+        if not rate or len(candidates) < 2 or self._random.random() >= rate:
+            return choice
+        drawn = getattr(choice, "log_probs", None)
+        if drawn is None:
+            raise ValueError("Exploring outside fights needs the distribution the decision was drawn from")
+        top = max(range(len(candidates)), key=lambda index: drawn[index])
+        others = [index for index, candidate in enumerate(candidates)
+                  if index != top and candidate["verb"] != "DISCARD_POTION"]
+        if not others:
+            return choice
+        if self._random.random() < 0.5:
+            taken = max(others, key=lambda index: drawn[index])
+        else:
+            taken = self._random.choice(others)
+        return _explored(candidates, drawn, taken, temperature)
 
     def run(self, engine, character, seed, *, sample=True, journal=None,
-            combat_frames=True, resume=None, until_act=None, until_boss=None, until_fight_end=False,
-            run_id=None, group=None, fork=None, ascension=None, packed=False, fight_entries=False, _policy=None):
+            combat_frames=True, resume=None, until_act=None, until_fight_end=False,
+            run_id=None, group=None, ascension=None, packed=False, fight_entries=False, entry_saves=True,
+            hindsight=None, _policy=None):
         """Play one run, or a segment of one.
 
         With `resume` (a save a segment stopped at, as `save` below) the run goes on
         from that save instead of starting: at the map (`engine.resume`) or at the
         fight it was written before (`engine.resume_fight`); `character` and `seed`
         are the saved run's. With `until_act` the run stops at the first decision of
-        that act, with `until_boss` at the first decision of that act's (first) boss
-        fight; the decision is not part of this segment. The engine's continue save
-        there is returned as `save`, `{"at": "act", "save": …}` or `{"at": "fight",
-        "save": …, "fight": …}` (the fight as `saves.FightTracker` describes it, with
-        its floor), and the segment's `outcome` is `reached`; a run that ended first
-        has `outcome` `win` or `loss`. `run_id` and `group` name the segment and the
-        group of segments it belongs to (`main.play.groups`). With `fork` (`fork_ranks`:
-        the segment's place in its group, the group's size, a depth) a sampled segment
-        takes its first decisions with a choice by the policy's order instead of a draw
-        (with `greedy_fights`, its first ones outside fights), so that the group's
-        segments part there two ways. `ascension` is the run's
+        that act; the decision is not part of this segment. The engine's continue save
+        there is returned as `save`, `{"at": "act", "save": …}`, and the segment's
+        `outcome` is `reached`; a run that ended first has `outcome` `win` or `loss`.
+        `run_id` and `group` name the segment and the group of segments it belongs to
+        (`main.play.groups`). `ascension` is the run's
         (the runner's own without one); a save goes on at the ascension it was
         written at, which must be the one asked for.
+
+        With `hindsight` (`replay`: the candidates another segment of the same fight
+        took at its decisions with a choice, in order; `key`: the frame they led it to,
+        `digests.frame_key`; `potion`: a content id or None; `force`: a candidate or
+        None, not both) a segment resumed from a
+        fight's entry save to the fight's end takes those actions again, and the
+        decisions without a choice between them, without drawing or keeping them: the
+        same actions bring the fight back to the same frame (`hindsight` in the trace
+        says how many it replayed). Its first decision with a choice after them is the
+        fork, which must be at `key`: there it drinks `potion`, among that potion's
+        candidates by the policy, as an explored decision, or takes `force` with the
+        policy's own log-probability, as a forked decision; with neither it draws as it
+        would. It goes on drawing to the fight's end. A replay that does not come back
+        to its key, a potion the fork cannot drink or a candidate it does not offer is
+        an error of the segment.
 
         Without `combat_frames` the macro-actions played inside fights keep their
         counts and log-probability but not their frames, which are most of a run.
@@ -306,6 +364,9 @@ class RolloutRunner:
         With `fight_entries` the run keeps a record of every fight it plays and writes
         the entry save of every fight not begun by an event (`fights.FightLog`), returned
         as `fight_records`; the decisions and the frames are what they are without.
+        Without `entry_saves` it keeps the records alone. A run that keeps records and
+        stops at an act also returns where the player stands there and what they have
+        (`fights.state` of the decision it stops at) as `cut_state`.
 
         With `until_fight_end` a segment resumed from a fight's entry save (`resume` at
         "fight") plays that fight alone: it stops at the first decision that does not
@@ -319,12 +380,16 @@ class RolloutRunner:
             raise ValueError("Unknown character")
         if until_fight_end and (resume is None or resume.get("at") != "fight"):
             raise ValueError("A segment plays to its fight's end from the fight's entry save")
-        if until_fight_end and (until_act is not None or until_boss is not None):
-            raise ValueError("A segment stops at its fight's end, at an act or at a boss fight, one of them")
+        if until_fight_end and until_act is not None:
+            raise ValueError("A segment stops at its fight's end or at an act, one of them")
+        if hindsight is not None and (not until_fight_end or not sample or self.greedy_fights):
+            raise ValueError("A hindsight segment replays a sampled fight segment from its entry save, drawing "
+                             "after its fork")
+        if hindsight is not None and hindsight.get("potion") is not None and hindsight.get("force") is not None:
+            raise ValueError("A hindsight fork drinks a potion or takes a candidate, not both")
         ascension = self.ascension if ascension is None else ascension
         if type(ascension) is not int or not 0 <= ascension <= 10:
             raise ValueError("Ascension must be an integer from 0 to 10")
-        ranks = fork_ranks(fork) if sample and fork else []
         trace = {
             "schema": SCHEMA,
             "character": character,
@@ -338,8 +403,6 @@ class RolloutRunner:
             "source": "rollout" if sample else "evaluation",
             "sampling": "full_distribution" if sample else "argmax",
             "temperature": dict(self.temperatures) if sample else None,
-            "explore_potions": dict(self.explore_potions) if sample else None,
-            "fork": dict(fork) if sample and fork else None,
             "iteration": self.iteration,
             "status": "unresolved",
             "macros": [],
@@ -350,15 +413,19 @@ class RolloutRunner:
             "reward_claim_rule": REWARD_RULE if self.claim_rewards else None,
             "environment_actions": [],
         }
+        if sample and self.explore_outside:
+            trace["explore_outside"] = dict(self.explore_outside)
+        if sample and self.explore_prior:
+            trace["explore_prior"] = dict(self.explore_prior)
         if group is not None:
             trace["group"] = group
+        if hindsight is not None:
+            trace["hindsight"] = dict(potion=hindsight.get("potion"), force=hindsight.get("force"), replayed=0)
         if sample and self.greedy_fights:
             # Its fights' macro-actions record no temperature: they were not drawn.
             trace["greedy_fights"] = True
-        if until_act is not None and until_boss is not None:
-            raise ValueError("A segment stops at an act or at a boss fight, not both")
-        if resume is not None or until_act is not None or until_boss is not None:
-            trace["segment"] = {"resumed": resume is not None, "until_act": until_act, "until_boss": until_boss}
+        if resume is not None or until_act is not None:
+            trace["segment"] = {"resumed": resume is not None, "until_act": until_act}
             if until_fight_end:
                 trace["segment"]["until_fight_end"] = True
             trace["outcome"] = None
@@ -366,30 +433,41 @@ class RolloutRunner:
         policy = _policy or SessionPolicy(
             self.model, self.vocabulary, version=self.version
         )
+        # The prior of `explore_prior`: the policy handed in's, or a session of `prior` here.
+        if _policy is not None:
+            prior = getattr(_policy, "prior", None)
+        else:
+            prior = None if self.prior is None else SessionPolicy(self.prior, self.vocabulary)
 
         # A policy handed in draws its choices where the network runs; either is told
         # the temperature of each decision here, where the fight it belongs to is known.
-        def choose(frame, fight, kind, *, sample, rank=None):
+        def choose(frame, fight, *, sample, restrict=None):
             temperature = self.temperature_for(frame, sample, fight)
             if temperature is None:
                 # A fight's decision with greedy fights: the most likely action, as a
-                # greedy run takes it, scored at 1; it explores and forks nothing.
+                # greedy run takes it, scored at 1; it explores nothing.
                 return policy.choose(frame, sample=False, temperature=1.0)
-            # A forking decision takes the candidate of its rank and explores nothing.
-            restrict = None if rank is not None else self.exploration_for(frame, fight, sample, kind)
-            # A policy that does not explore (a test double) is asked nothing it does not know.
+            # A hindsight fork drinks the potion it was given (`restrict`). A policy that
+            # does not explore (a test double) is asked nothing it does not know.
             among = {} if restrict is None else {"restrict": restrict}
-            if rank is not None:
-                among["rank"] = rank
-            return policy.choose(frame, sample=sample, temperature=temperature, **among)
+            chosen = policy.choose(frame, sample=sample, temperature=temperature, **among)
+            if sample and fight is None and restrict is None and frame["public"]["phase"] != "combat":
+                if self.explore_prior:
+                    chosen = self.explore_by_prior(frame, chosen, temperature, prior)
+                if self.explore_outside and not getattr(chosen, "explored", False):
+                    chosen = self.explore_outside_fights(frame, chosen, temperature)
+            return chosen
 
         pending_steps, current_segment, active_macro = [], None, None
-        branched = 0  # drawn decisions with a choice so far: the first `len(ranks)` of them fork
         waiting_since = None
         fights, stands = FightTracker(), []
         # A segment played to its fight's end keeps the fight's record, not its entry save again.
-        log = FightLog(saves=not until_fight_end) if fight_entries or until_fight_end else None
+        log = FightLog(saves=entry_saves and not until_fight_end) if fight_entries or until_fight_end else None
         started = None  # with `until_fight_end`, the fight the segment plays
+        # With `hindsight`, the actions to take again before the fork and how many were.
+        replay, replayed = (None, 0) if hindsight is None else (list(hindsight["replay"]), 0)
+        # A hindsight fork's candidate given (`force`): its step is kept as a forked one.
+        forced = False
         sink = Path(journal).open("w") if journal else nullcontext()
         self.model.eval()
         try:
@@ -461,6 +539,7 @@ class RolloutRunner:
                         trace["save"] = dict(at="act", save=continue_save(engine))
                         if log is not None:
                             log.passed(frame, None)
+                            trace["cut_state"] = fight_state(frame)
                         trace.update(status="complete", victory=None, outcome="reached", reached_act=act)
                         break
                     fight, entry = fights.decision()
@@ -480,14 +559,6 @@ class RolloutRunner:
                             # its record took the HP after the fight here (`log.passed`).
                             trace.update(status="complete", victory=None, outcome="reached")
                             break
-                    if entry and until_boss is not None and entry["kind"] == "boss" and not entry["second_boss"] \
-                            and entry["act"] is not None and entry["act"] >= until_boss:
-                        # The first decision of the boss fight the segment stops at: the
-                        # engine still stands at the fight's entry and saves the run as it
-                        # was before the room; the next segment enters the fight again.
-                        trace["save"] = dict(at="fight", save=continue_save(engine), fight=dict(entry, floor=floor))
-                        trace.update(status="complete", victory=None, outcome="reached", reached_boss=entry["act"])
-                        break
                     if log is not None:
                         log.entered(engine, frame, fight, entry, floor)
                     stands.append((act, floor, length))
@@ -502,16 +573,36 @@ class RolloutRunner:
                         steps += 1
                         frame = engine.send(execution_command(frame, automatic["candidate_ref"]))
                         continue
+                    branching = len(frame["legal"]["candidates"]) > 1
+                    drink = None
+                    if replay is not None:
+                        if replayed < len(replay) or not branching:
+                            # Before the fork: the actions given, neither drawn nor kept.
+                            ref = replay[replayed] if branching else frame["legal"]["candidates"][0]["candidate_ref"]
+                            if branching and all(c["candidate_ref"] != ref for c in frame["legal"]["candidates"]):
+                                raise ProtocolError(f"Hindsight replay diverged at its decision {replayed}")
+                            replayed += branching
+                            trace["hindsight"]["replayed"] = replayed
+                            if log is not None:
+                                log.chose(frame, fight, ref)
+                            steps += 1
+                            frame = engine.send(execution_command(frame, ref))
+                            continue
+                        if frame_key(frame) != hindsight["key"]:
+                            raise ProtocolError("Hindsight replay came to another frame than its fork's")
+                        replay = None
+                        if hindsight.get("potion") is not None:
+                            drink = drinks(frame).get(hindsight["potion"])
+                            if not drink:
+                                raise ProtocolError(f"The fork cannot drink {hindsight['potion']}")
+                        if hindsight.get("force") is not None:
+                            if all(c["candidate_ref"] != hindsight["force"] for c in frame["legal"]["candidates"]):
+                                raise ProtocolError("The fork does not offer its arm's candidate")
+                            drink, forced = [hindsight["force"]], True
                     key = segment_key(frame)
                     if key != current_segment:
                         current_segment, pending_steps, active_macro = key, [], None
-                    branching = len(frame["legal"]["candidates"]) > 1
-                    # A fight's decision taken greedily (`greedy_fights`) is not one of
-                    # them: the forks fall on the first drawn decisions with a choice.
-                    forking = branching and self.temperature_for(frame, sample, fight) is not None
-                    rank = ranks[branched] if forking and branched < len(ranks) else None
-                    branched += forking
-                    choice = choose(frame, fight, fights.kind, sample=sample, rank=rank)
+                    choice = choose(frame, fight, sample=sample, restrict=drink)
                     if log is not None:
                         log.chose(frame, fight, choice.candidate_ref)
                     # A frame played inside a fight is kept only where every frame is.
@@ -520,10 +611,13 @@ class RolloutRunner:
                         "candidate_ref": choice.candidate_ref,
                         "forced": not branching,
                     }
-                    if getattr(choice, "explored", False):
+                    if forced:
+                        # The fork's candidate given, not drawn.
+                        step["forked"], forced = True, False
+                    elif getattr(choice, "explored", False):
                         step["explored"] = True
-                    if getattr(choice, "forked", False):
-                        step["forked"] = True
+                        if getattr(choice, "explored_by", None):
+                            step["explored_by"] = choice.explored_by
                     if branching and getattr(choice, "log_probs", None) is not None:
                         # The distribution it was drawn from: the update's KL may take it for its reference's.
                         step["log_probs"] = choice.log_probs
@@ -549,6 +643,8 @@ class RolloutRunner:
                         active_macro["steps"].append(step)
                     steps += 1
                     frame = engine.send(execution_command(frame, choice.candidate_ref))
+                if replay is not None and trace["status"] == "complete":
+                    raise ProtocolError("Hindsight replay ended before its fork")
         except (ProtocolError, TimeoutError, OSError, ValueError) as exc:
             trace["status"] = "unresolved" if isinstance(exc, TimeoutError) else "error"
             trace["error"] = str(exc)
@@ -573,44 +669,34 @@ class RolloutRunner:
         return trace
 
 
-FIGHT_KINDS = ("normal", "elite", "boss")
+def _explored(candidates, drawn, taken, temperature, by=None):
+    """The explored choice of candidate `taken`, with the policy's own log-probabilities
+    of it from `drawn` (at `temperature`) and at 1, marked as `by`'s proposal."""
+    # At temperature 1 the scores are the tempered log-probabilities times the temperature.
+    scaled = [temperature * value for value in drawn]
+    peak = max(scaled)
+    total = peak + math.log(sum(math.exp(value - peak) for value in scaled))
+    return Choice(candidates[taken]["candidate_ref"], drawn[taken], base_log_prob=scaled[taken] - total,
+                  explored=True, log_probs=list(drawn), explored_by=by)
 
 
-def fork_ranks(fork):
-    """The ranks a segment takes at its first decisions with a choice: segment j of a
-    group of `size` parts two ways at each of `depth` decisions, the first half of the
-    group (and of each half after it) taking the policy's most likely candidate (0),
-    the other half its second (1). A depth beyond log2 of the size would part branches
-    of one segment: it stops there."""
-    index, size, depth = (fork.get(name) for name in ("index", "size", "depth"))
-    if any(type(value) is not int for value in (index, size, depth)) or not 0 <= index < size or depth < 0:
-        raise ValueError("A fork names a segment's place in its group, the group's size and a depth")
-    depth = min(depth, size.bit_length() - 1)
-    return [(index << (level + 1)) // size % 2 for level in range(depth)]
+# The phases of the decisions outside fights (`explore_outside`).
+OUTSIDE_PHASES = ("map", "rewards", "card_reward", "event", "rest_site", "shop", "treasure", "card_select",
+                  "bundle_select", "crystal_sphere")
 
 
-def exploration_rates(rates):
-    """The potion exploration rate of each kind of fight, from one probability for all,
-    a mapping by kind (a kind left out explores nothing), or a sequence: one value for
-    all kinds, two for normal fights and for elite and boss fights, three for each."""
+def outside_rates(rates):
+    """The exploration rate outside fights of each phase that explores (`OUTSIDE_PHASES`),
+    from one probability for them all or a mapping by phase; phases at 0 are left out."""
     if isinstance(rates, dict):
-        if not set(rates) <= set(FIGHT_KINDS):
-            raise ValueError(f"Potion exploration rates are given by fight kind {FIGHT_KINDS}")
-        rates = {kind: rates.get(kind, 0.0) for kind in FIGHT_KINDS}
+        if not set(rates) <= set(OUTSIDE_PHASES):
+            raise ValueError(f"Exploration outside fights is given by phase {OUTSIDE_PHASES}")
     else:
-        values = [rates] if isinstance(rates, (int, float)) else list(rates)
-        if len(values) == 1:
-            values = values * 3
-        elif len(values) == 2:
-            values = [values[0], values[1], values[1]]
-        if len(values) != 3:
-            raise ValueError("Potion exploration takes one rate, one for normal and one for elite and boss "
-                             "fights, or one per kind")
-        rates = dict(zip(FIGHT_KINDS, values))
+        rates = {phase: rates for phase in OUTSIDE_PHASES}
     for value in rates.values():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
-            raise ValueError("The potion exploration rate is a probability")
-    return {kind: float(value) for kind, value in rates.items()}
+            raise ValueError("The exploration rate outside fights is a probability")
+    return {phase: float(value) for phase, value in rates.items() if value}
 
 
 def _resumed(engine, resume):
@@ -641,16 +727,18 @@ def write_run(path, trace):
 
 
 def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, journal=True,
-         combat_frames=True, segment=False, fight_entries=False):
+         combat_frames=True, segment=False, fight_entries=False, entry_saves=True):
     """One job of a round: a run and, as the layout says (`FULL_RUNS`,
     `SUMMARY_RUNS`), its journal and its run file. With `segment` the job is
     (character, spec, None): a segment of a run (`main.play.groups`), `spec` naming
-    its seed, `run_id`, `group`, `until_act`, `until_boss` or `until_fight_end`, its
+    its seed, `run_id`, `group`, `until_act` or `until_fight_end`, its
     `ascension` if not the runner's and, to go on from a save, the file the save is in
     (`resume`); with `until_fight_end` true it plays from a fight's entry save to the
-    fight's end and keeps the fight's record (`RolloutRunner.run`). With `fight_entries`
-    it keeps its fights' records and entry saves (`fights.FightLog`). Returns the run;
-    one that no file of its own is written for keeps its frames packed, for the line it
+    fight's end and keeps the fight's record (`RolloutRunner.run`), with `hindsight`
+    replaying another segment's actions to a fork first. With `fight_entries`
+    it keeps its fights' records and, unless not `entry_saves`, their entry saves
+    (`fights.FightLog`).
+    Returns the run; one that no file of its own is written for keeps its frames packed, for the line it
     makes in a shard (`packed_line`)."""
     if fight_entries and not segment:
         raise ValueError("Fight entries are kept for the segments of act groups")
@@ -661,10 +749,10 @@ def play(engine, runner, job, *, sample=True, policy=None, trajectory=True, jour
         return runner.run(
             engine, character, spec["seed"], sample=sample, combat_frames=combat_frames,
             resume=read_save(spec["resume"]) if spec.get("resume") else None,
-            until_act=spec.get("until_act"), until_boss=spec.get("until_boss"),
-            until_fight_end=spec.get("until_fight_end", False), run_id=spec["run_id"],
-            group=spec["group"], fork=spec.get("fork"), ascension=spec.get("ascension"),
-            packed=not trajectory, fight_entries=fight_entries, _policy=policy)
+            until_act=spec.get("until_act"), until_fight_end=spec.get("until_fight_end", False),
+            run_id=spec["run_id"], group=spec["group"], ascension=spec.get("ascension"),
+            packed=not trajectory, fight_entries=fight_entries, entry_saves=entry_saves,
+            hindsight=spec.get("hindsight"), _policy=policy)
     character, seed, path = job
     trace = runner.run(
         engine,

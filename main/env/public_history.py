@@ -40,7 +40,7 @@ def unknown_memory(entities):
 
 
 def recorded_memory(state, refs, entities):
-    """Translate recorder object identities to frame-local, reference-only handles."""
+    """Translate the Steam mod's object identities to frame-local, reference-only handles."""
     history = state.get("public_history")
     if history is None:
         return unknown_memory(entities)

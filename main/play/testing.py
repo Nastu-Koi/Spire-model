@@ -226,6 +226,12 @@ class SyntheticEngine:
             self.leave(candidate)
         return self.frame()
 
+    def reseed(self, seed):
+        """Another future (`CliEngine.reseed`): nothing here is drawn at random, so
+        nothing changes but the record of the seeds given, in order."""
+        self.reseeds = getattr(self, "reseeds", []) + [int(seed)]
+        return {"type": "ok"}
+
     def __enter__(self):
         return self
 

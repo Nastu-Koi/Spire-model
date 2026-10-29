@@ -7,7 +7,7 @@ import pytest
 
 from main import steam
 from main.env.protocol import ProtocolError
-from main.demos.recorder.snapshot import card_fields
+from main.steam.snapshot import card_fields
 from main.encoding.frames import clean_public
 from main.steam import PROTOCOL, SteamBridge, choose_action, live_frame
 
@@ -175,6 +175,18 @@ def test_an_event_shows_the_numbers_of_its_options_and_a_closed_chest_only_its_l
     assert relic["content_id"] == "RELIC.ANCHOR" and "enabled" not in relic
 
 
+def test_a_rest_site_with_options_left_after_a_choice_offers_them_and_leaving():
+    # Miniature Tent: the options not yet taken stay, and the native Proceed is the
+    # policy's choice, as LEAVE_ROOM is in the headless engine.
+    rest = message("rest_site", [dict(command="choose_rest_option", args=dict(index=0)),
+                                 dict(command="leave_rest_site", args={})],
+                   [dict(index=0, option_id="SMITH", enabled=True), dict(index=1, option_id="DIG", enabled=False)])
+    frame = live_frame(rest)[0]
+    assert [(c["verb"], c["source_refs"]) for c in frame["legal"]["candidates"]] == [
+        ("CHOOSE_REST_OPTION", ["option:0"]), ("LEAVE_ROOM", [])]
+    assert choose_action(Policy("LEAVE_ROOM"), rest) == dict(command="leave_rest_site", args={})
+
+
 def test_a_shop_entry_is_an_item_that_offers_its_card():
     def entry(key, kind, cost, stocked=True, **value):
         return dict(instance_id=key, value=dict(type="MegaCrit.Sts2.Core.Entities.Merchant." + kind, Cost=cost,
@@ -238,7 +250,7 @@ def test_the_map_names_the_bosses_of_the_act():
 
 
 def test_a_recorded_card_being_played_is_in_the_play_zone():
-    from main.demos.recorder.snapshot import PublicSnapshot
+    from main.steam.snapshot import PublicSnapshot
 
     state = message("combat_play", [], {})["state"]
     hero = state["players"][0]

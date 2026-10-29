@@ -183,3 +183,25 @@ def test_a_decision_without_what_the_ratio_needs_is_refused():
         Clipped(reference)(learner, prepared, [replace(items[0], temperature=None)] + items[1:])
     with pytest.raises(ValueError):
         Clipped(reference, clip=1.5)
+
+
+def test_the_ratios_are_tallied_by_kind_of_decision_with_their_largest():
+    """Explored, forked, and plain decisions by the sign of their advantage: how many,
+    how many with a ratio above `OVER`, the largest ratio; summed over what was seen,
+    the largest kept."""
+    learner, reference, prepared, items = setup()
+    objective = Clipped(reference, clip=0.2, kl=0.0)
+    count = len(items)
+    kinds = dict(explored=dict(explored=True, advantage=1.0), forked=dict(forked=True, advantage=-1.0),
+                 negative=dict(advantage=-1.0), positive=dict(advantage=1.0), zero=dict(advantage=0.0))
+    for ratio in (30.0, 2.0):  # above OVER, then not
+        for changes in kinds.values():
+            objective(learner, prepared, [replace(item, old_log_prob=item.old_log_prob - math.log(ratio), **changes)
+                                          for item in items])
+    seen = objective.take()
+    for kind in ("explored", "forked", "negative", "positive"):
+        assert seen[f"ratio_samples_{kind}"] == 2 * count and seen[f"ratio_over_{kind}"] == count
+        assert seen[f"ratio_max_{kind}"] == pytest.approx(30.0, rel=1e-3)
+    # A zero advantage is none of them; nothing seen, no largest.
+    assert sum(seen[f"ratio_samples_{kind}"] for kind in ("explored", "forked", "negative", "positive")) == 8 * count
+    assert Clipped.means(None, 0)["ratio_max_negative"] is None

@@ -23,17 +23,16 @@ from main.data.shards import extent
 from main.env.protocol import ProtocolError
 from main.learn import batches, combat_demos, streams
 from main.learn.clipped import CLIP, KL, with_advantages
-from main.learn.mixed import ACT, DEMOS, FIGHTS, Mixed, by_kind
+from main.learn.mixed import ACT, DEMOS, FIGHTS, SAMPLED, Mixed, by_kind
 
 
 def group_update(learner, waves, reference, *, fights=None, demos=None, demo_key="demos", clip=CLIP, kl=KL,
                  updates=None, window_shards=8, on_update=None, weight_cap=streams.WEIGHT_CAP, shares=None,
-                 phase_weights="group", accumulate=1):
+                 accumulate=1, frozen=None):
     """One pass over a round of act groups with the clipped objective (`Clipped`): every
     logical batch draws from each wave's segments in proportion to `shares` (each
     wave's share of the round's decisions by default, `batches.wave_shares`) at the
-    wave's capped share weights (`streams.buffer_weights`, by phase group or even at
-    `phase_weights`); `reference` is the frozen policy network the KL is to
+    wave's capped share weights (`streams.buffer_weights`, by phase group); `reference` is the frozen policy network the KL is to
     (`Reference`), or `Reference.recorded()`: the distributions the decisions were drawn from.
     `waves` maps a wave's name to its directory. `updates` sets the pass in logical
     batches (`batches.pass_updates` sees every wave about once at the default shares);
@@ -41,13 +40,19 @@ def group_update(learner, waves, reference, *, fights=None, demos=None, demo_key
     optimizer step (`trainer.Learner.fit`).
 
     `fights` is the directory of a round's fight groups (a stream `fight-groups`,
-    priced as a wave is, learned by the same objective at the same weights); `demos` a
+    priced as a wave is, learned by the same objective at the same weights), or
+    {stream: directory} of several streams of fight groups (the fight groups and their
+    hindsight forks); `demos` a
     data set of combat demonstrations (`combat_demos.fights`: a stream `combat-demos`,
     every macro-action by its NLL, evenly weighted), of which the pass takes its share
     of every batch, drawn by `demo_key` (`combat_demos.draw`). `shares` then names every
     stream, and by default each has its share of the decisions, a demonstration
     stream that of its data set's. Returns the pass's metrics, with `groups`: what each
-    stream drew from and what the objective saw, by kind of source (`mix`)."""
+    stream drew from and what the objective saw, by kind of source (`mix`).
+
+    `kl` is one coefficient for every sampled kind or {kind: coefficient} (`Mixed`).
+    The streams of a kind in `frozen` (`mixed.ACT`, say) are learned with every advantage
+    0: only their KL pulls, keeping what they do where the reference has it."""
     if not waves:
         raise ValueError("An update of act groups needs at least one wave")
     if reference.vocabulary_digest is not None and reference.vocabulary_digest != learner.vocabulary.digest:
@@ -55,8 +60,9 @@ def group_update(learner, waves, reference, *, fights=None, demos=None, demo_key
     config = learner.config
     data = batches.priced_waves(waves)
     sampled = dict(data)
+    fights = None if fights is None else fights if isinstance(fights, dict) else {FIGHTS: fights}
     if fights is not None:
-        sampled[FIGHTS] = batches.priced_waves({FIGHTS: fights})[FIGHTS]
+        sampled.update(batches.priced_waves(fights))
     macros = {name: shards.macros for name, (shards, _) in sampled.items()}
     if demos is not None:
         macros[DEMOS] = demos.macros
@@ -70,10 +76,13 @@ def group_update(learner, waves, reference, *, fights=None, demos=None, demo_key
     primary = max(waves, key=lambda name: data[name][0].macros)
     window = max(1, window_shards // len(macros))
     feeders = streams.stream_feeders(config, shares)
-    parts = {name: (streams.batches(learner, shards,
-                                    streams.buffer_weights(shards.source_counts, weight_cap, phase_weights),
+    frozen = set(frozen or ())
+    if frozen - set(SAMPLED):
+        raise ValueError(f"Only sampled kinds {list(SAMPLED)} are frozen")
+    of_kind = lambda name: ACT if name in waves else FIGHTS  # noqa: E731
+    parts = {name: (streams.batches(learner, shards, streams.buffer_weights(shards.source_counts, weight_cap),
                                     counts[name], window, feeders[name]),
-                    with_advantages(table, name, shards.macros / total))
+                    with_advantages(table, name, shards.macros / total, frozen=of_kind(name) in frozen))
              for name, (shards, table) in sampled.items()}
     drawn = None
     if demos is not None:
@@ -82,7 +91,7 @@ def group_update(learner, waves, reference, *, fights=None, demos=None, demo_key
         drawn = combat_demos.draw(demos, made * counts[DEMOS], demo_key)
         parts[DEMOS] = (combat_demos.batches(learner, drawn, counts[DEMOS], window, feeders[DEMOS]),
                         combat_demos.weigh(demos.macros / total))
-    kinds = {**dict.fromkeys(waves, ACT), **({FIGHTS: FIGHTS} if fights is not None else {}),
+    kinds = {**dict.fromkeys(waves, ACT), **dict.fromkeys(fights or (), FIGHTS),
              **({DEMOS: DEMOS} if demos is not None else {})}
     joint = streams.Joint(parts, primary, updates)
     objective = Mixed(kinds, reference.model, clip=clip, kl=kl)
@@ -118,8 +127,10 @@ def group_update(learner, waves, reference, *, fights=None, demos=None, demo_key
         batch=config.logical_batch_size * accumulate,
         waves={name: wave(name, shards) for name, (shards, _) in data.items()},
         losses={name: metrics["sources"].get(name, {}).get("loss") for name in parts},
-        weight_cap=weight_cap or None, phase_weights=phase_weights, seen=summary, mix=mix,
-        **({"fights": wave(FIGHTS, sampled[FIGHTS][0])} if fights is not None else {}),
+        weight_cap=weight_cap or None, phase_weights="group", seen=summary, mix=mix,
+        **({"fights": wave(FIGHTS, sampled[FIGHTS][0])} if fights is not None and FIGHTS in fights else {}),
+        **({"fight_streams": {name: wave(name, sampled[name][0]) for name in fights}}
+           if fights is not None and len(fights) > 1 else {}),
         **({"demos": dict(drawn.describe(), batches=len(joint.seen[DEMOS]),
                           samples=sum(entry["samples"] for entry in joint.seen[DEMOS]))} if drawn else {}))
     return metrics
